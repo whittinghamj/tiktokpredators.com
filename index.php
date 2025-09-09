@@ -38,16 +38,23 @@ $dsn = getenv('DB_DSN') ?: 'mysql:host=10.254.6.110;dbname=tiktokpredators;chars
 $dbu = getenv('DB_USER') ?: 'stiliam';
 $dbp = getenv('DB_PASS') ?: 'WRceFeIy58I0ypAgD5fu';
 try { $pdo = new PDO($dsn, $dbu, $dbp, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]); }
-catch (Throwable $e) { /* In production, log this. Show generic message. */ }
+catch (Throwable $e) {
+    // Record DB error for debugging and show a safe message
+    $_SESSION['last_db_error'] = $e->getMessage();
+    flash('error', 'Database connection failed. Please check configuration.');
+    $_SESSION['auth_tab'] = 'register';
+}
 
 // Handle login POST
 if (($_POST['action'] ?? '') === 'login') {
     throttle();
-    if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); $_SESSION['auth_tab'] = 'login'; header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
     $email = trim($_POST['email'] ?? '');
     $password = $_POST['password'] ?? '';
     if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
-        flash('error', 'Invalid email or password.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+        flash('error', 'Invalid email or password.');
+        $_SESSION['auth_tab'] = 'login';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
     try {
         $stmt = $pdo->prepare('SELECT id, email, password_hash, role FROM users WHERE email = ? AND is_active = 1');
@@ -61,6 +68,7 @@ if (($_POST['action'] ?? '') === 'login') {
         } else {
             $_SESSION['auth_attempts'] = (int)$_SESSION['auth_attempts'] + 1; $_SESSION['auth_last'] = time();
             flash('error', 'Incorrect email or password.');
+            $_SESSION['auth_tab'] = 'login';
         }
     } catch (Throwable $e) {
         flash('error', 'Unable to process login at this time.');
@@ -71,27 +79,61 @@ if (($_POST['action'] ?? '') === 'login') {
 // Handle register POST
 if (($_POST['action'] ?? '') === 'register') {
     throttle();
-    if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); $_SESSION['auth_tab'] = 'register'; header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
     $email = trim($_POST['email'] ?? '');
     $password = $_POST['password'] ?? '';
     $confirm = $_POST['password_confirm'] ?? '';
     $agree = isset($_POST['agree']);
 
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) { flash('error', 'Please enter a valid email address.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (!$agree) { flash('error', 'You must accept the terms to register.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (strlen($password) < 8) { flash('error', 'Password must be at least 8 characters.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (!hash_equals($password, $confirm)) { flash('error', 'Passwords do not match.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        flash('error', 'Please enter a valid email address.');
+        $_SESSION['auth_tab'] = 'register';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if (!$agree) {
+        flash('error', 'You must accept the terms to register.');
+        $_SESSION['auth_tab'] = 'register';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if (strlen($password) < 8) {
+        flash('error', 'Password must be at least 8 characters.');
+        $_SESSION['auth_tab'] = 'register';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if (!hash_equals($password, $confirm)) {
+        flash('error', 'Passwords do not match.');
+        $_SESSION['auth_tab'] = 'register';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
 
     try {
         $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
         $stmt->execute([$email]);
-        if ($stmt->fetch()) { flash('error', 'An account with that email already exists.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+        if ($stmt->fetch()) {
+            flash('error', 'An account with that email already exists.');
+            $_SESSION['auth_tab'] = 'register';
+            header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+        }
         $hash = password_hash($password, PASSWORD_DEFAULT);
         $ins = $pdo->prepare('INSERT INTO users (email, password_hash, role, is_active) VALUES (?, ?, "viewer", 1)');
         $ins->execute([$email, $hash]);
         flash('success', 'Registration successful. You can now log in.');
     } catch (Throwable $e) {
-        flash('error', 'Unable to register right now. Please try again later.');
+        // Map common PDO errors to user-friendly messages, append safe error code
+        $code = 0;
+        if ($e instanceof PDOException && isset($e->errorInfo[1])) {
+            $code = (int)$e->errorInfo[1];
+        }
+        $public = 'Unable to register right now.';
+        if ($code === 1062) {
+            $public = 'That email is already registered.';
+        } elseif (stripos($e->getMessage(), 'foreign key') !== false) {
+            $public = 'Invalid reference on registration.';
+        }
+        // Store raw message for debugging (not shown unless debug enabled)
+        $_SESSION['last_register_error'] = $e->getMessage();
+        flash('error', $public.' [ERR#'.$code.']');
+        $_SESSION['auth_tab'] = 'register';
     }
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
@@ -148,6 +190,7 @@ if (isset($_GET['logout'])) {
   <?php if ($msg = flash('error')): ?>
     <div class="alert alert-danger border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
   <?php endif; ?>
+  <?php $openAuth = $_SESSION['auth_tab'] ?? ''; unset($_SESSION['auth_tab']); ?>
   <!-- Top Navbar -->
   <nav class="navbar navbar-expand-lg border-bottom sticky-top bg-body glass">
     <div class="container-xl">
@@ -526,6 +569,19 @@ if (isset($_GET['logout'])) {
       </div>
     </div>
   </footer>
+  <?php if (getenv('APP_DEBUG') === '1'): ?>
+    <div class="container-xl my-3">
+      <details class="small">
+        <summary class="text-secondary">Debug info (visible only with APP_DEBUG=1)</summary>
+        <?php if (!empty($_SESSION['last_db_error'])): ?>
+          <div class="alert alert-warning mt-2">DB Error: <?php echo htmlspecialchars($_SESSION['last_db_error']); unset($_SESSION['last_db_error']); ?></div>
+        <?php endif; ?>
+        <?php if (!empty($_SESSION['last_register_error'])): ?>
+          <div class="alert alert-warning mt-2">Register Error: <?php echo htmlspecialchars($_SESSION['last_register_error']); unset($_SESSION['last_register_error']); ?></div>
+        <?php endif; ?>
+      </details>
+    </div>
+  <?php endif; ?>
 
   <!-- Create Case Modal -->
   <div class="modal fade" id="createCaseModal" tabindex="-1" aria-hidden="true">
@@ -782,6 +838,17 @@ if (isset($_GET['logout'])) {
         if (trigger) new bootstrap.Tab(trigger).show();
       }, 150);
     });
+  </script>
+  <script>
+    // Auto-open auth modal on server-side errors
+    (function(){
+      const openAuth = <?php echo json_encode($openAuth ?? ''); ?>;
+      if (!openAuth) return;
+      const m = new bootstrap.Modal(document.getElementById('authModal'));
+      m.show();
+      const trigger = document.querySelector(openAuth === 'register' ? '#register-tab' : '#login-tab');
+      if (trigger) new bootstrap.Tab(trigger).show();
+    })();
   </script>
 </body>
 </html>
