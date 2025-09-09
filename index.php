@@ -651,37 +651,37 @@ if (isset($_GET['logout'])) {
   </main>
 
   <?php
-$adminCaseCode = $_GET['admin_case'] ?? '';
-if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')):
-    // Fetch case meta
-    $caseRow = null; $caseId = 0;
-    try {
-        $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
-        $s->execute([$adminCaseCode]);
-        $caseRow = $s->fetch();
-        $caseId = (int)($caseRow['id'] ?? 0);
-    } catch (Throwable $e) {
-        $_SESSION['sql_error'] = $e->getMessage();
-    }
-    // Fetch notes
-    $notes = [];
-    if ($caseId > 0) {
-        try {
-            $n = $pdo->prepare('SELECT cn.id, cn.note_text, cn.created_at, u.display_name FROM case_notes cn LEFT JOIN users u ON u.id = cn.created_by WHERE cn.case_id = ? ORDER BY cn.created_at DESC LIMIT 50');
-            $n->execute([$caseId]);
-            $notes = $n->fetchAll();
-        } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
-    }
-    // Fetch evidence
-    $ev = [];
-    if ($caseId > 0) {
-        try {
-            $evi = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC LIMIT 100');
-            $evi->execute([$caseId]);
-            $ev = $evi->fetchAll();
-        } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
-    }
-?>
+  $adminCaseCode = $_GET['admin_case'] ?? '';
+  if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')) {
+      // Fetch case meta
+      $caseRow = null; $caseId = 0;
+      try {
+          $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
+          $s->execute([$adminCaseCode]);
+          $caseRow = $s->fetch();
+          $caseId = (int)($caseRow['id'] ?? 0);
+      } catch (Throwable $e) {
+          $_SESSION['sql_error'] = $e->getMessage();
+      }
+      // Fetch notes
+      $notes = [];
+      if ($caseId > 0) {
+          try {
+              $n = $pdo->prepare('SELECT cn.id, cn.note_text, cn.created_at, u.display_name FROM case_notes cn LEFT JOIN users u ON u.id = cn.created_by WHERE cn.case_id = ? ORDER BY cn.created_at DESC LIMIT 50');
+              $n->execute([$caseId]);
+              $notes = $n->fetchAll();
+          } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+      }
+      // Fetch evidence
+      $ev = [];
+      if ($caseId > 0) {
+          try {
+              $evi = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC LIMIT 100');
+              $evi->execute([$caseId]);
+              $ev = $evi->fetchAll();
+          } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+      }
+  ?>
 <section class="py-5 border-top" id="admin-case">
   <div class="container-xl">
     <div class="d-flex align-items-center justify-content-between mb-3">
@@ -689,7 +689,7 @@ if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['
       <a class="btn btn-outline-light btn-sm" href="#cases"><i class="bi bi-grid-1x2 me-1"></i> Back to dashboard</a>
     </div>
 
-    <?php if ($caseRow): ?>
+    <?php if ($caseRow) { ?>
     <div class="row g-4">
       <div class="col-lg-4">
         <div class="card glass h-100">
@@ -742,14 +742,14 @@ if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['
               <div class="text-end mt-2"><button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-journal-plus me-1"></i> Save Note</button></div>
             </form>
             <ul class="list-group list-group-flush">
-              <?php if ($notes): foreach ($notes as $n): ?>
+              <?php if ($notes) { foreach ($notes as $n) { ?>
                 <li class="list-group-item bg-transparent text-white">
                   <div class="small text-secondary"><?php echo htmlspecialchars($n['created_at']); ?> • <?php echo htmlspecialchars($n['display_name'] ?? ''); ?></div>
                   <div><?php echo nl2br(htmlspecialchars($n['note_text'])); ?></div>
                 </li>
-              <?php endforeach; else: ?>
+              <?php } } else { ?>
                 <li class="list-group-item bg-transparent text-secondary">No notes yet.</li>
-              <?php endif; ?>
+              <?php } ?>
             </ul>
           </div>
 
@@ -788,7 +788,7 @@ if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['
               <table class="table table-sm align-middle">
                 <thead><tr><th>Type</th><th>Title</th><th>File</th><th>MIME</th><th>Size</th><th>Added</th></tr></thead>
                 <tbody>
-                  <?php if ($ev): foreach ($ev as $e): ?>
+                  <?php if ($ev) { foreach ($ev as $e) { ?>
                     <tr>
                       <td><?php echo htmlspecialchars($e['type']); ?></td>
                       <td><?php echo htmlspecialchars($e['title']); ?></td>
@@ -797,9 +797,9 @@ if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['
                       <td class="small text-secondary"><?php echo number_format((int)$e['size_bytes']); ?> B</td>
                       <td class="small text-secondary"><?php echo htmlspecialchars($e['created_at']); ?></td>
                     </tr>
-                  <?php endforeach; else: ?>
+                  <?php } } else { ?>
                     <tr><td colspan="6" class="text-secondary">No evidence uploaded yet.</td></tr>
-                  <?php endif; ?>
+                  <?php } ?>
                 </tbody>
               </table>
             </div>
@@ -808,7 +808,7 @@ if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['
           <!-- Photos -->
           <div class="tab-pane fade" id="photos-pane" role="tabpanel">
             <div class="row g-2">
-              <?php if ($ev): $hasImg=false; foreach ($ev as $e): if ($e['type']==='image'): $hasImg=true; ?>
+              <?php if ($ev) { $hasImg=false; foreach ($ev as $e) { if ($e['type']==='image') { $hasImg=true; ?>
                 <div class="col-6 col-md-4">
                   <div class="card h-100">
                     <img src="<?php echo htmlspecialchars($e['filepath']); ?>" class="card-img-top" alt="">
@@ -817,34 +817,34 @@ if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['
                     </div>
                   </div>
                 </div>
-              <?php endif; endforeach; if(!$hasImg): ?>
+              <?php } } if(!$hasImg) { ?>
                 <div class="col-12 text-secondary">No photos yet.</div>
-              <?php endif; ?>
+              <?php } } ?>
             </div>
           </div>
 
           <!-- PDFs -->
           <div class="tab-pane fade" id="pdfs-pane" role="tabpanel">
             <ul class="list-group list-group-flush">
-              <?php if ($ev): $hasPdf=false; foreach ($ev as $e): if ($e['type']==='pdf'): $hasPdf=true; ?>
+              <?php if ($ev) { $hasPdf=false; foreach ($ev as $e) { if ($e['type']==='pdf') { $hasPdf=true; ?>
                 <li class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center">
                   <span><i class="bi bi-filetype-pdf me-2"></i><?php echo htmlspecialchars($e['title']); ?></span>
                   <a href="<?php echo htmlspecialchars($e['filepath']); ?>" target="_blank" class="btn btn-sm btn-outline-light">Open</a>
                 </li>
-              <?php endif; endforeach; if(!$hasPdf): ?>
+              <?php } } if(!$hasPdf) { ?>
                 <li class="list-group-item bg-transparent text-secondary">No PDFs yet.</li>
-              <?php endif; ?>
+              <?php } } ?>
             </ul>
           </div>
         </div>
       </div>
     </div>
-    <?php else: ?>
+    <?php } else { ?>
       <div class="alert alert-danger"><i class="bi bi-exclamation-octagon me-2"></i>Case not found or unavailable.</div>
-    <?php endif; ?>
+    <?php } ?>
   </div>
 </section>
-<?php endif; ?>
+<?php } ?>
 
   <!-- Reports Section (Mock) -->
   <section class="py-5 border-top" id="reports">
