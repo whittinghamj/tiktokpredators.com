@@ -355,7 +355,9 @@ if (isset($_GET['logout'])) {
             <div class="btn-group">
               <button class="btn btn-outline-light btn-sm"><i class="bi bi-sort-alpha-down"></i></button>
               <button class="btn btn-outline-light btn-sm"><i class="bi bi-funnel"></i></button>
-              <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i> New Case</button>
+              <?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'admin'): ?>
+                <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i> Add Case</button>
+              <?php endif; ?>
             </div>
           </div>
           <div class="row g-3 row-cols-1 row-cols-md-2">
@@ -608,35 +610,49 @@ if (isset($_GET['logout'])) {
     <div class="modal-dialog modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-folder-plus me-2"></i>New Case</h5>
+          <h5 class="modal-title"><i class="bi bi-folder-plus me-2"></i>Add Case</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <form>
+          <form method="post" action="">
+            <?php csrf_field(); ?>
             <div class="mb-3">
-              <label class="form-label">Subject Handle</label>
-              <input type="text" class="form-control" placeholder="@username" />
+              <label class="form-label">Case Name</label>
+              <input type="text" name="case_name" class="form-control" placeholder="E.g., CASE-2025-0003 – Alleged DM Grooming" required>
             </div>
-            <div class="mb-3">
+            <div class="row g-2">
+              <div class="col-md-6">
+                <label class="form-label">Person Name</label>
+                <input type="text" name="person_name" class="form-control" placeholder="Full name (if known)">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">TikTok Username</label>
+                <div class="input-group">
+                  <span class="input-group-text">@</span>
+                  <input type="text" name="tiktok_username" class="form-control" placeholder="handle">
+                </div>
+              </div>
+            </div>
+            <div class="mt-3 mb-3">
               <label class="form-label">Initial Summary</label>
-              <textarea class="form-control" rows="3" placeholder="Short description…"></textarea>
+              <textarea name="initial_summary" class="form-control" rows="3" placeholder="Short description of the allegation and evidence context" required></textarea>
             </div>
             <div class="row g-2">
               <div class="col-md-6">
                 <label class="form-label">Sensitivity</label>
-                <select class="form-select">
-                  <option>Standard</option>
-                  <option>Restricted</option>
-                  <option>Sealed</option>
+                <select name="sensitivity" class="form-select" required>
+                  <option value="Standard">Standard</option>
+                  <option value="Restricted">Restricted</option>
+                  <option value="Sealed">Sealed</option>
                 </select>
               </div>
               <div class="col-md-6">
                 <label class="form-label">Status</label>
-                <select class="form-select">
-                  <option>Open</option>
-                  <option>In Review</option>
-                  <option>Verified</option>
-                  <option>Closed</option>
+                <select name="status" class="form-select" required>
+                  <option value="Open">Open</option>
+                  <option value="In Review">In Review</option>
+                  <option value="Verified">Verified</option>
+                  <option value="Closed">Closed</option>
                 </select>
               </div>
             </div>
@@ -644,7 +660,7 @@ if (isset($_GET['logout'])) {
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary"><i class="bi bi-save me-1"></i> Create</button>
+          <button class="btn btn-primary"><i class="bi bi-save me-1"></i> Save</button>
         </div>
       </div>
     </div>
