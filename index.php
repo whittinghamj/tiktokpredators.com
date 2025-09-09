@@ -1,3 +1,84 @@
+<?php
+// ---- Minimal auth bootstrap (no frameworks) ----
+if (session_status() === PHP_SESSION_NONE) {
+    // Secure session settings
+    ini_set('session.use_strict_mode', 1);
+    ini_set('session.cookie_httponly', 1);
+    ini_set('session.cookie_secure', isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on' ? 1 : 0);
+    ini_set('session.cookie_samesite', 'Lax');
+    session_start();
+}
+
+// Flash helper
+function flash(string $key, ?string $val = null){
+    if ($val === null) {
+        if (!empty($_SESSION['flash'][$key])) { $msg = $_SESSION['flash'][$key]; unset($_SESSION['flash'][$key]); return $msg; }
+        return '';
+    }
+    $_SESSION['flash'][$key] = $val;
+}
+
+// CSRF token helper
+if (empty($_SESSION['csrf_token'])) {
+    $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
+}
+function csrf_field(){ echo '<input type="hidden" name="csrf_token" value="'.htmlspecialchars($_SESSION['csrf_token']).'">'; }
+function check_csrf(){ return isset($_POST['csrf_token']) && hash_equals($_SESSION['csrf_token'] ?? '', $_POST['csrf_token']); }
+
+// VERY simple throttle (per-session)
+$_SESSION['auth_attempts'] = $_SESSION['auth_attempts'] ?? 0;
+$_SESSION['auth_last'] = $_SESSION['auth_last'] ?? 0;
+function throttle(){
+    $now = time();
+    if ($now - ($_SESSION['auth_last'] ?? 0) < 3) { sleep(1); }
+}
+
+// PDO connection (configure these env vars or replace with constants)
+$dsn = getenv('DB_DSN') ?: 'mysql:host=10.254.6.110;dbname=tiktokpredators;charset=utf8mb4';
+$dbu = getenv('DB_USER') ?: 'stiliam';
+$dbp = getenv('DB_PASS') ?: 'WRceFeIy58I0ypAgD5fu';
+try { $pdo = new PDO($dsn, $dbu, $dbp, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]); }
+catch (Throwable $e) { /* In production, log this. Show generic message. */ }
+
+// Handle login POST
+if (($_POST['action'] ?? '') === 'login') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    $email = trim($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
+        flash('error', 'Invalid email or password.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    try {
+        $stmt = $pdo->prepare('SELECT id, email, password_hash, role FROM users WHERE email = ? AND is_active = 1');
+        $stmt->execute([$email]);
+        $user = $stmt->fetch();
+        if ($user && password_verify($password, $user['password_hash'])) {
+            session_regenerate_id(true);
+            $_SESSION['user'] = [ 'id'=>$user['id'], 'email'=>$user['email'], 'role'=>$user['role'] ];
+            $_SESSION['auth_attempts'] = 0; $_SESSION['auth_last'] = time();
+            flash('success', 'Welcome back, '. htmlspecialchars($user['email']));
+        } else {
+            $_SESSION['auth_attempts'] = (int)$_SESSION['auth_attempts'] + 1; $_SESSION['auth_last'] = time();
+            flash('error', 'Incorrect email or password.');
+        }
+    } catch (Throwable $e) {
+        flash('error', 'Unable to process login at this time.');
+    }
+    header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
+
+// Handle logout
+if (isset($_GET['logout'])) {
+    $_SESSION = [];
+    if (ini_get('session.use_cookies')) {
+        $params = session_get_cookie_params();
+        setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'], $params['secure'], $params['httponly']);
+    }
+    session_destroy();
+    header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
+?>
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
 <head>
@@ -33,6 +114,12 @@
   </style>
 </head>
 <body>
+  <?php if ($msg = flash('success')): ?>
+    <div class="alert alert-success border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
+  <?php endif; ?>
+  <?php if ($msg = flash('error')): ?>
+    <div class="alert alert-danger border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
+  <?php endif; ?>
   <!-- Top Navbar -->
   <nav class="navbar navbar-expand-lg border-bottom sticky-top bg-body glass">
     <div class="container-xl">
@@ -47,12 +134,22 @@
           <li class="nav-item"><a class="nav-link" href="#admin">Admin</a></li>
         </ul>
         <div class="d-flex align-items-center gap-2">
-          <!-- Role badge + dark mode toggle -->
-          <span class="badge rounded-pill badge-role"><i class="bi bi-person-badge me-1"></i> Analyst</span>
+          <!-- Theme toggle + auth state -->
           <button id="themeToggle" class="btn btn-outline-light btn-sm" title="Toggle theme"><i class="bi bi-moon-stars"></i></button>
-          <div class="dropdown">
+          <?php if (empty($_SESSION['user'])): ?>
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#loginModal"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
-          </div>
+          <?php else: ?>
+            <div class="dropdown">
+              <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+                <i class="bi bi-person-check me-1"></i> <?php echo htmlspecialchars($_SESSION['user']['email']); ?>
+              </button>
+              <ul class="dropdown-menu dropdown-menu-end">
+                <li><span class="dropdown-item-text small text-secondary">Role: <?php echo htmlspecialchars($_SESSION['user']['role'] ?? 'viewer'); ?></span></li>
+                <li><hr class="dropdown-divider"></li>
+                <li><a class="dropdown-item" href="?logout=1"><i class="bi bi-box-arrow-right me-2"></i>Logout</a></li>
+              </ul>
+            </div>
+          <?php endif; ?>
         </div>
       </div>
     </div>
@@ -488,27 +585,28 @@
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <form>
+          <form method="post" action="">
+            <input type="hidden" name="action" value="login">
+            <?php csrf_field(); ?>
             <div class="mb-3">
               <label class="form-label">Email</label>
-              <input type="email" class="form-control" placeholder="you@org.org" />
+              <input type="email" name="email" class="form-control" placeholder="you@org.org" required />
             </div>
             <div class="mb-3">
               <label class="form-label">Password</label>
-              <input type="password" class="form-control" placeholder="••••••••" />
+              <input type="password" name="password" class="form-control" placeholder="••••••••" minlength="8" required />
             </div>
             <div class="d-flex justify-content-between align-items-center">
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="rememberMe">
-                <label class="form-check-label" for="rememberMe">Remember me</label>
-              </div>
-              <a class="small" href="#">Forgot password?</a>
+              <small class="text-secondary">Minimum 8 characters.</small>
+              <a class="small disabled" tabindex="-1" aria-disabled="true" href="#" title="Not available on public site">Forgot password?</a>
+            </div>
+            <div class="mt-3 d-grid">
+              <button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-in-right me-2"></i>Sign in</button>
             </div>
           </form>
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
-          <button class="btn btn-primary">Sign in</button>
         </div>
       </div>
     </div>
