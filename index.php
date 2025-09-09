@@ -219,13 +219,87 @@ if (($_POST['action'] ?? '') === 'create_case') {
             $status,
             $_SESSION['user']['id'] ?? null
         ]);
+        $case_id = (int)$pdo->lastInsertId();
         flash('success', 'Case created successfully. ID: ' . htmlspecialchars($case_code));
+        // jump to full admin case view
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?admin_case=' . urlencode($case_code) . '#admin-case');
+        exit;
     } catch (Throwable $e) {
         $_SESSION['open_modal'] = 'createCase';
         $_SESSION['sql_error'] = $e->getMessage();
         flash('error', 'Unable to create case.');
     }
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
+
+// Handle add case note (admin only)
+if (($_POST['action'] ?? '') === 'add_case_note') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $note = trim($_POST['note_text'] ?? '');
+    $redir_code = trim($_POST['case_code'] ?? '');
+
+    if ($case_id <= 0 || $note === '') {
+        flash('error', 'Note text is required.');
+        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+    }
+
+    try {
+        $stmt = $pdo->prepare('INSERT INTO case_notes (case_id, note_text, created_by) VALUES (?, ?, ?)');
+        $stmt->execute([$case_id, $note, $_SESSION['user']['id'] ?? null]);
+        flash('success', 'Note added.');
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to add note.');
+    }
+    header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+}
+
+// Handle evidence upload (admin only)
+if (($_POST['action'] ?? '') === 'upload_evidence') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $redir_code = trim($_POST['case_code'] ?? '');
+    $title = trim($_POST['title'] ?? '');
+    $type = $_POST['type'] ?? 'other';
+    $allowedTypes = ['image','video','audio','pdf','doc','other'];
+    if (!in_array($type, $allowedTypes, true)) $type = 'other';
+
+    if ($case_id <= 0 || empty($_FILES['evidence_file']['name'])) {
+        flash('error', 'Please choose a file.');
+        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+    }
+
+    $uploadDir = __DIR__ . '/uploads';
+    if (!is_dir($uploadDir)) { @mkdir($uploadDir, 0755, true); }
+
+    $f = $_FILES['evidence_file'];
+    if ($f['error'] !== UPLOAD_ERR_OK) { flash('error', 'Upload failed with code: '. (int)$f['error']); header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit; }
+
+    $safeName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', basename($f['name']));
+    $destRel = 'uploads/' . uniqid('ev_', true) . '_' . $safeName;
+    $destAbs = __DIR__ . '/' . $destRel;
+    if (!move_uploaded_file($f['tmp_name'], $destAbs)) { flash('error', 'Unable to save uploaded file.'); header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit; }
+
+    $mime = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
+    $size = filesize($destAbs) ?: 0;
+    $hash = hash_file('sha256', $destAbs);
+
+    try {
+        $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, mime_type, size_bytes, hash_sha256, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
+        $stmt->execute([$case_id, $type, ($title !== '' ? $title : $safeName), $destRel, $mime, $size, $hash, $_SESSION['user']['id'] ?? null]);
+        flash('success', 'Evidence uploaded.');
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to save evidence.');
+    }
+    header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
 }
 
 // Handle logout
@@ -488,7 +562,9 @@ if (isset($_GET['logout'])) {
           <div id="evidence" class="mt-4">
             <div class="d-flex align-items-center justify-content-between mb-2">
               <h2 class="h5 mb-0">Evidence Gallery</h2>
-              <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button>
+              <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
+                <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button>
+              <?php endif; ?>
             </div>
             <div class="row g-2 row-cols-2 row-cols-md-3">
               <!-- Mock tiles -->
@@ -571,6 +647,202 @@ if (isset($_GET['logout'])) {
       </div>
     </div>
   </main>
+
+  <?php
+$adminCaseCode = $_GET['admin_case'] ?? '';
+if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')):
+    // Fetch case meta
+    $caseRow = null; $caseId = 0;
+    try {
+        $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
+        $s->execute([$adminCaseCode]);
+        $caseRow = $s->fetch();
+        $caseId = (int)($caseRow['id'] ?? 0);
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+    }
+    // Fetch notes
+    $notes = [];
+    if ($caseId > 0) {
+        try {
+            $n = $pdo->prepare('SELECT cn.id, cn.note_text, cn.created_at, u.display_name FROM case_notes cn LEFT JOIN users u ON u.id = cn.created_by WHERE cn.case_id = ? ORDER BY cn.created_at DESC LIMIT 50');
+            $n->execute([$caseId]);
+            $notes = $n->fetchAll();
+        } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+    }
+    // Fetch evidence
+    $ev = [];
+    if ($caseId > 0) {
+        try {
+            $evi = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC LIMIT 100');
+            $evi->execute([$caseId]);
+            $ev = $evi->fetchAll();
+        } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+    }
+?>
+<section class="py-5 border-top" id="admin-case">
+  <div class="container-xl">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <h2 class="h4 mb-0">Admin: Case <?php echo htmlspecialchars($adminCaseCode); ?></h2>
+      <a class="btn btn-outline-light btn-sm" href="#cases"><i class="bi bi-grid-1x2 me-1"></i> Back to dashboard</a>
+    </div>
+
+    <?php if ($caseRow): ?>
+    <div class="row g-4">
+      <div class="col-lg-4">
+        <div class="card glass h-100">
+          <div class="card-body">
+            <h3 class="h6 mb-3">Case Details</h3>
+            <div class="small text-secondary">Case Name</div>
+            <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
+            <div class="small text-secondary">Person Name</div>
+            <div class="mb-2"><?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?></div>
+            <div class="small text-secondary">TikTok Username</div>
+            <div class="mb-2"><?php echo $caseRow['tiktok_username'] ? '@'.htmlspecialchars($caseRow['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
+            <div class="small text-secondary">Status</div>
+            <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['status']); ?></span></div>
+            <div class="small text-secondary">Sensitivity</div>
+            <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['sensitivity']); ?></span></div>
+            <div class="small text-secondary">Opened</div>
+            <div class="mb-2"><?php echo htmlspecialchars($caseRow['opened_at']); ?></div>
+            <div class="small text-secondary">Initial Summary</div>
+            <div class="mb-0"><?php echo nl2br(htmlspecialchars($caseRow['initial_summary'] ?? '')); ?></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-8">
+        <ul class="nav nav-pills mb-3" id="caseAdminTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="notes-tab" data-bs-toggle="tab" data-bs-target="#notes-pane" type="button" role="tab">Notes</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="uploads-tab" data-bs-toggle="tab" data-bs-target="#uploads-pane" type="button" role="tab">Uploads / Evidence</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="photos-tab" data-bs-toggle="tab" data-bs-target="#photos-pane" type="button" role="tab">Photos</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="pdfs-tab" data-bs-toggle="tab" data-bs-target="#pdfs-pane" type="button" role="tab">PDFs</button>
+          </li>
+        </ul>
+
+        <div class="tab-content">
+          <!-- Notes -->
+          <div class="tab-pane fade show active" id="notes-pane" role="tabpanel">
+            <form class="mb-3" method="post" action="">
+              <input type="hidden" name="action" value="add_case_note">
+              <?php csrf_field(); ?>
+              <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($adminCaseCode); ?>">
+              <label class="form-label">Add Note</label>
+              <textarea name="note_text" class="form-control" rows="3" placeholder="Write an internal note…" required></textarea>
+              <div class="text-end mt-2"><button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-journal-plus me-1"></i> Save Note</button></div>
+            </form>
+            <ul class="list-group list-group-flush">
+              <?php if ($notes): foreach ($notes as $n): ?>
+                <li class="list-group-item bg-transparent text-white">
+                  <div class="small text-secondary"><?php echo htmlspecialchars($n['created_at']); ?> • <?php echo htmlspecialchars($n['display_name'] ?? ''); ?></div>
+                  <div><?php echo nl2br(htmlspecialchars($n['note_text'])); ?></div>
+                </li>
+              <?php endforeach; else: ?>
+                <li class="list-group-item bg-transparent text-secondary">No notes yet.</li>
+              <?php endif; ?>
+            </ul>
+          </div>
+
+          <!-- Uploads/Evidence -->
+          <div class="tab-pane fade" id="uploads-pane" role="tabpanel">
+            <form class="mb-3" method="post" action="" enctype="multipart/form-data">
+              <input type="hidden" name="action" value="upload_evidence">
+              <?php csrf_field(); ?>
+              <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($adminCaseCode); ?>">
+              <div class="row g-2 align-items-end">
+                <div class="col-md-4">
+                  <label class="form-label">Title</label>
+                  <input type="text" name="title" class="form-control" placeholder="Optional title">
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label">Type</label>
+                  <select name="type" class="form-select">
+                    <option value="image">Image</option>
+                    <option value="video">Video</option>
+                    <option value="audio">Audio</option>
+                    <option value="pdf">PDF</option>
+                    <option value="doc">Document</option>
+                    <option value="other" selected>Other</option>
+                  </select>
+                </div>
+                <div class="col-md-5">
+                  <label class="form-label">File</label>
+                  <input type="file" name="evidence_file" class="form-control" required>
+                </div>
+              </div>
+              <div class="text-end mt-2"><button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button></div>
+            </form>
+
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead><tr><th>Type</th><th>Title</th><th>File</th><th>MIME</th><th>Size</th><th>Added</th></tr></thead>
+                <tbody>
+                  <?php if ($ev): foreach ($ev as $e): ?>
+                    <tr>
+                      <td><?php echo htmlspecialchars($e['type']); ?></td>
+                      <td><?php echo htmlspecialchars($e['title']); ?></td>
+                      <td><a href="<?php echo htmlspecialchars($e['filepath']); ?>" target="_blank" class="link-light">Open</a></td>
+                      <td class="small text-secondary"><?php echo htmlspecialchars($e['mime_type']); ?></td>
+                      <td class="small text-secondary"><?php echo number_format((int)$e['size_bytes']); ?> B</td>
+                      <td class="small text-secondary"><?php echo htmlspecialchars($e['created_at']); ?></td>
+                    </tr>
+                  <?php endforeach; else: ?>
+                    <tr><td colspan="6" class="text-secondary">No evidence uploaded yet.</td></tr>
+                  <?php endif; ?>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <!-- Photos -->
+          <div class="tab-pane fade" id="photos-pane" role="tabpanel">
+            <div class="row g-2">
+              <?php if ($ev): $hasImg=false; foreach ($ev as $e): if ($e['type']==='image'): $hasImg=true; ?>
+                <div class="col-6 col-md-4">
+                  <div class="card h-100">
+                    <img src="<?php echo htmlspecialchars($e['filepath']); ?>" class="card-img-top" alt="">
+                    <div class="card-body p-2">
+                      <div class="small text-truncate" title="<?php echo htmlspecialchars($e['title']); ?>"><?php echo htmlspecialchars($e['title']); ?></div>
+                    </div>
+                  </div>
+                </div>
+              <?php endif; endforeach; if(!$hasImg): ?>
+                <div class="col-12 text-secondary">No photos yet.</div>
+              <?php endif; ?>
+            </div>
+          </div>
+
+          <!-- PDFs -->
+          <div class="tab-pane fade" id="pdfs-pane" role="tabpanel">
+            <ul class="list-group list-group-flush">
+              <?php if ($ev): $hasPdf=false; foreach ($ev as $e): if ($e['type']==='pdf'): $hasPdf=true; ?>
+                <li class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center">
+                  <span><i class="bi bi-filetype-pdf me-2"></i><?php echo htmlspecialchars($e['title']); ?></span>
+                  <a href="<?php echo htmlspecialchars($e['filepath']); ?>" target="_blank" class="btn btn-sm btn-outline-light">Open</a>
+                </li>
+              <?php endif; endforeach; if(!$hasPdf): ?>
+                <li class="list-group-item bg-transparent text-secondary">No PDFs yet.</li>
+              <?php endif; ?>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+    <?php else: ?>
+      <div class="alert alert-danger"><i class="bi bi-exclamation-octagon me-2"></i>Case not found or unavailable.</div>
+    <?php endif; ?>
+  </div>
+</section>
+<?php endif; ?>
 
   <!-- Reports Section (Mock) -->
   <section class="py-5 border-top" id="reports">
