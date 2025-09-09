@@ -563,7 +563,9 @@ if (isset($_GET['logout'])) {
             <div class="d-flex align-items-center justify-content-between mb-2">
               <h2 class="h5 mb-0">Evidence Gallery</h2>
               <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
-                <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button>
+                <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
+                  <i class="bi bi-cloud-arrow-up me-1"></i> Upload
+                </button>
               <?php endif; ?>
             </div>
             <div class="row g-2 row-cols-2 row-cols-md-3">
