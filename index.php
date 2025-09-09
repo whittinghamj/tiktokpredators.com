@@ -68,6 +68,34 @@ if (($_POST['action'] ?? '') === 'login') {
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
 
+// Handle register POST
+if (($_POST['action'] ?? '') === 'register') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    $email = trim($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
+    $confirm = $_POST['password_confirm'] ?? '';
+    $agree = isset($_POST['agree']);
+
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) { flash('error', 'Please enter a valid email address.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (!$agree) { flash('error', 'You must accept the terms to register.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (strlen($password) < 8) { flash('error', 'Password must be at least 8 characters.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (!hash_equals($password, $confirm)) { flash('error', 'Passwords do not match.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    try {
+        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
+        $stmt->execute([$email]);
+        if ($stmt->fetch()) { flash('error', 'An account with that email already exists.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+        $hash = password_hash($password, PASSWORD_DEFAULT);
+        $ins = $pdo->prepare('INSERT INTO users (email, password_hash, role, is_active) VALUES (?, ?, "viewer", 1)');
+        $ins->execute([$email, $hash]);
+        flash('success', 'Registration successful. You can now log in.');
+    } catch (Throwable $e) {
+        flash('error', 'Unable to register right now. Please try again later.');
+    }
+    header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
+
 // Handle logout
 if (isset($_GET['logout'])) {
     $_SESSION = [];
@@ -137,7 +165,8 @@ if (isset($_GET['logout'])) {
           <!-- Theme toggle + auth state -->
           <button id="themeToggle" class="btn btn-outline-light btn-sm" title="Toggle theme"><i class="bi bi-moon-stars"></i></button>
           <?php if (empty($_SESSION['user'])): ?>
-            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#loginModal"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
+            <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i> Register</button>
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
           <?php else: ?>
             <div class="dropdown">
               <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
@@ -576,34 +605,73 @@ if (isset($_GET['logout'])) {
     </div>
   </div>
 
-  <!-- Auth Modal -->
-  <div class="modal fade" id="loginModal" tabindex="-1" aria-hidden="true">
+  <!-- Auth Modal (Register / Login) -->
+  <div class="modal fade" id="authModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-box-arrow-in-right me-2"></i>Sign in</h5>
+          <h5 class="modal-title"><i class="bi bi-shield-lock me-2"></i>Account Access</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <form method="post" action="">
-            <input type="hidden" name="action" value="login">
-            <?php csrf_field(); ?>
-            <div class="mb-3">
-              <label class="form-label">Email</label>
-              <input type="email" name="email" class="form-control" placeholder="you@org.org" required />
+          <ul class="nav nav-tabs" id="authTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+              <button class="nav-link active" id="login-tab" data-bs-toggle="tab" data-bs-target="#login-pane" type="button" role="tab" aria-controls="login-pane" aria-selected="true"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
+            </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" id="register-tab" data-bs-toggle="tab" data-bs-target="#register-pane" type="button" role="tab" aria-controls="register-pane" aria-selected="false"><i class="bi bi-person-plus me-1"></i> Register</button>
+            </li>
+          </ul>
+          <div class="tab-content pt-3">
+            <div class="tab-pane fade show active" id="login-pane" role="tabpanel" aria-labelledby="login-tab">
+              <form method="post" action="">
+                <input type="hidden" name="action" value="login">
+                <?php csrf_field(); ?>
+                <div class="mb-3">
+                  <label class="form-label">Email</label>
+                  <input type="email" name="email" class="form-control" placeholder="you@org.org" required />
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">Password</label>
+                  <input type="password" name="password" class="form-control" placeholder="••••••••" minlength="8" required />
+                </div>
+                <div class="d-flex justify-content-between align-items-center">
+                  <small class="text-secondary">Use your account email & password.</small>
+                  <a class="small disabled" tabindex="-1" aria-disabled="true" href="#" title="Not available on public site">Forgot password?</a>
+                </div>
+                <div class="mt-3 d-grid">
+                  <button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-in-right me-2"></i>Sign in</button>
+                </div>
+              </form>
             </div>
-            <div class="mb-3">
-              <label class="form-label">Password</label>
-              <input type="password" name="password" class="form-control" placeholder="••••••••" minlength="8" required />
+            <div class="tab-pane fade" id="register-pane" role="tabpanel" aria-labelledby="register-tab">
+              <form method="post" action="">
+                <input type="hidden" name="action" value="register">
+                <?php csrf_field(); ?>
+                <div class="mb-3">
+                  <label class="form-label">Email</label>
+                  <input type="email" name="email" class="form-control" placeholder="you@org.org" required />
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">Password</label>
+                  <input type="password" name="password" class="form-control" placeholder="At least 8 characters" minlength="8" required />
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">Confirm Password</label>
+                  <input type="password" name="password_confirm" class="form-control" placeholder="Repeat password" minlength="8" required />
+                </div>
+                <div class="form-check mb-2">
+                  <input class="form-check-input" type="checkbox" value="1" id="agreeTos" name="agree" required>
+                  <label class="form-check-label" for="agreeTos">
+                    I agree to the <a href="#" data-bs-toggle="modal" data-bs-target="#tosModal">Terms</a> and acknowledge the <a href="#" data-bs-toggle="modal" data-bs-target="#privacyModal">Privacy Notice</a>.
+                  </label>
+                </div>
+                <div class="mt-3 d-grid">
+                  <button class="btn btn-success" type="submit"><i class="bi bi-person-plus me-2"></i>Create account</button>
+                </div>
+              </form>
             </div>
-            <div class="d-flex justify-content-between align-items-center">
-              <small class="text-secondary">Minimum 8 characters.</small>
-              <a class="small disabled" tabindex="-1" aria-disabled="true" href="#" title="Not available on public site">Forgot password?</a>
-            </div>
-            <div class="mt-3 d-grid">
-              <button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-in-right me-2"></i>Sign in</button>
-            </div>
-          </form>
+          </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
@@ -701,6 +769,18 @@ if (isset($_GET['logout'])) {
           info: "_START_-_END_ of _TOTAL_ cases",
         }
       });
+    });
+  </script>
+  <script>
+    // Switch auth modal to requested tab
+    document.addEventListener('click', function(e){
+      const btn = e.target.closest('[data-auth-tab]');
+      if (!btn) return;
+      const tab = btn.getAttribute('data-auth-tab');
+      setTimeout(()=>{
+        const trigger = document.querySelector(tab === 'register' ? '#register-tab' : '#login-tab');
+        if (trigger) new bootstrap.Tab(trigger).show();
+      }, 150);
     });
   </script>
 </body>
