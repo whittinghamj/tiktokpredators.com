@@ -41,6 +41,7 @@ try { $pdo = new PDO($dsn, $dbu, $dbp, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTIO
 catch (Throwable $e) {
     // Record DB error for debugging and show a safe message
     $_SESSION['last_db_error'] = $e->getMessage();
+    $_SESSION['sql_error'] = $e->getMessage();
     flash('error', 'Database connection failed. Please check configuration.');
     $_SESSION['auth_tab'] = 'register';
 }
@@ -71,6 +72,8 @@ if (($_POST['action'] ?? '') === 'login') {
             $_SESSION['auth_tab'] = 'login';
         }
     } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        $_SESSION['auth_tab'] = 'login';
         flash('error', 'Unable to process login at this time.');
     }
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
@@ -132,6 +135,7 @@ if (($_POST['action'] ?? '') === 'register') {
         }
         // Store raw message for debugging (not shown unless debug enabled)
         $_SESSION['last_register_error'] = $e->getMessage();
+        $_SESSION['sql_error'] = $e->getMessage();
         flash('error', $public.' [ERR#'.$code.']');
         $_SESSION['auth_tab'] = 'register';
     }
@@ -771,6 +775,31 @@ if (isset($_GET['logout'])) {
     </div>
   </div>
 
+  <?php $sqlError = $_SESSION['sql_error'] ?? ''; unset($_SESSION['sql_error']); ?>
+  <div class="modal fade" id="sqlErrorModal" tabindex="-1" aria-labelledby="sqlErrorLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header bg-danger-subtle">
+          <h5 class="modal-title" id="sqlErrorLabel"><i class="bi bi-bug me-2"></i>Database / SQL Error</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <?php if ($sqlError): ?>
+            <div class="alert alert-danger"><i class="bi bi-exclamation-octagon me-2"></i>An error occurred during authentication or registration. Details below:</div>
+            <pre class="small mb-0" style="white-space: pre-wrap; word-wrap: break-word;">
+<?php echo htmlspecialchars($sqlError); ?>
+            </pre>
+          <?php else: ?>
+            <div class="text-secondary small">No SQL error information available.</div>
+          <?php endif; ?>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
@@ -848,6 +877,15 @@ if (isset($_GET['logout'])) {
       m.show();
       const trigger = document.querySelector(openAuth === 'register' ? '#register-tab' : '#login-tab');
       if (trigger) new bootstrap.Tab(trigger).show();
+    })();
+  </script>
+  <script>
+    // Auto-open SQL error modal if server captured a DB error
+    (function(){
+      const hasSqlError = <?php echo json_encode(isset($sqlError) && $sqlError !== ''); ?>;
+      if (!hasSqlError) return;
+      const m = new bootstrap.Modal(document.getElementById('sqlErrorModal'));
+      m.show();
     })();
   </script>
 </body>
