@@ -33,6 +33,21 @@ function throttle(){
     if ($now - ($_SESSION['auth_last'] ?? 0) < 3) { sleep(1); }
 }
 
+// Generate a unique case code like CASE-2025-AB12CD34 (random, collision-checked)
+function generate_case_code(PDO $pdo): string {
+    $year = date('Y');
+    for ($i = 0; $i < 5; $i++) { // retry a few times if duplicate
+        $rand = strtoupper(substr(bin2hex(random_bytes(5)), 0, 8)); // 8 hex chars
+        $code = "CASE-{$year}-{$rand}";
+        // quick existence check
+        $stmt = $pdo->prepare('SELECT 1 FROM cases WHERE case_code = ? LIMIT 1');
+        $stmt->execute([$code]);
+        if (!$stmt->fetch()) return $code;
+    }
+    // Fallback: include microtime entropy
+    return "CASE-{$year}-" . strtoupper(substr(bin2hex(random_bytes(8)), 0, 8));
+}
+
 // PDO connection (configure these env vars or replace with constants)
 $dsn = getenv('DB_DSN') ?: 'mysql:host=10.254.6.110;dbname=tiktokpredators;charset=utf8mb4';
 $dbu = getenv('DB_USER') ?: 'stiliam';
@@ -149,6 +164,56 @@ if (($_POST['action'] ?? '') === 'register') {
         $_SESSION['sql_error'] = $e->getMessage();
         flash('error', $public.' [ERR#'.$code.']');
         $_SESSION['auth_tab'] = 'register';
+    }
+    header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
+
+// Handle create case POST (admin only)
+if (($_POST['action'] ?? '') === 'create_case') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) {
+        flash('error', 'Unauthorized. Admins only.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+
+    // Collect & validate inputs
+    $case_name = trim($_POST['case_name'] ?? '');
+    $person_name = trim($_POST['person_name'] ?? '');
+    $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
+    $initial_summary = trim($_POST['initial_summary'] ?? '');
+    $sensitivity = $_POST['sensitivity'] ?? '';
+    $status = $_POST['status'] ?? '';
+
+    $allowed_sensitivity = ['Standard','Restricted','Sealed'];
+    $allowed_status = ['Open','In Review','Verified','Closed'];
+
+    if ($case_name === '' || $initial_summary === '') {
+        flash('error', 'Case name and initial summary are required.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if (!in_array($sensitivity, $allowed_sensitivity, true)) {
+        flash('error', 'Invalid sensitivity.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if (!in_array($status, $allowed_status, true)) {
+        flash('error', 'Invalid status.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+
+    try {
+        $case_code = generate_case_code($pdo);
+        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+        $stmt->execute([
+            $case_code,
+            $case_name,
+            ($person_name !== '' ? $person_name : null),
+            ($tiktok_username !== '' ? $tiktok_username : null),
+            $initial_summary,
+            $sensitivity,
+            $status,
+            $_SESSION['user']['id'] ?? null
+        ]);
+        flash('success', 'Case created successfully. ID: ' . htmlspecialchars($case_code));
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to create case.');
     }
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
@@ -615,6 +680,7 @@ if (isset($_GET['logout'])) {
         </div>
         <div class="modal-body">
           <form method="post" action="">
+            <input type="hidden" name="action" value="create_case">
             <?php csrf_field(); ?>
             <div class="mb-3">
               <label class="form-label">Case Name</label>
