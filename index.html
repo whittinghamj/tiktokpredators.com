@@ -44,15 +44,10 @@
           <li class="nav-item"><a class="nav-link" href="#cases">Cases</a></li>
           <li class="nav-item"><a class="nav-link" href="#evidence">Evidence</a></li>
           <li class="nav-item"><a class="nav-link" href="#reports">Reports</a></li>
-          <li class="nav-item"><a class="nav-link" href="#admin">Admin</a></li>
         </ul>
         <div class="d-flex align-items-center gap-2">
-          <!-- Role badge + dark mode toggle -->
-          <span class="badge rounded-pill badge-role"><i class="bi bi-person-badge me-1"></i> Analyst</span>
+          <!-- Dark mode toggle -->
           <button id="themeToggle" class="btn btn-outline-light btn-sm" title="Toggle theme"><i class="bi bi-moon-stars"></i></button>
-          <div class="dropdown">
-            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#loginModal"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
-          </div>
         </div>
       </div>
     </div>
@@ -166,7 +161,6 @@
             <div class="btn-group">
               <button class="btn btn-outline-light btn-sm"><i class="bi bi-sort-alpha-down"></i></button>
               <button class="btn btn-outline-light btn-sm"><i class="bi bi-funnel"></i></button>
-              <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i> New Case</button>
             </div>
           </div>
           <div class="row g-3 row-cols-1 row-cols-md-2">
@@ -221,7 +215,6 @@
           <div id="evidence" class="mt-4">
             <div class="d-flex align-items-center justify-content-between mb-2">
               <h2 class="h5 mb-0">Evidence Gallery</h2>
-              <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button>
             </div>
             <div class="row g-2 row-cols-2 row-cols-md-3">
               <!-- Mock tiles -->
@@ -241,7 +234,6 @@
             <div class="card-body">
               <div class="d-flex align-items-center justify-content-between">
                 <h2 class="h6 mb-0">Case Snapshot</h2>
-                <button class="btn btn-sm btn-outline-light"><i class="bi bi-pencil"></i></button>
               </div>
               <div class="mt-3">
                 <div class="d-flex align-items-center gap-2 mb-2">
@@ -265,7 +257,6 @@
               <div>
                 <div class="d-flex align-items-center justify-content-between mb-2">
                   <h3 class="h6 mb-0">Chain of Custody</h3>
-                  <button class="btn btn-sm btn-outline-success"><i class="bi bi-plus-lg"></i></button>
                 </div>
                 <div class="timeline small">
                   <div class="item">
@@ -340,55 +331,7 @@
     </div>
   </section>
 
-  <!-- Admin Section (Mock) -->
-  <section class="py-5 border-top" id="admin">
-    <div class="container-xl">
-      <div class="row g-4">
-        <div class="col-lg-6">
-          <div class="card glass h-100">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center mb-2">
-                <h2 class="h6 mb-0">User Management</h2>
-                <button class="btn btn-sm btn-primary"><i class="bi bi-person-plus me-1"></i> Invite</button>
-              </div>
-              <div class="table-responsive">
-                <table class="table table-sm align-middle">
-                  <thead><tr><th>User</th><th>Role</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
-                  <tbody>
-                    <tr>
-                      <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> Jane Doe</td>
-                      <td><span class="badge rounded-pill badge-role">Analyst</span></td>
-                      <td><span class="badge text-bg-success-subtle border">Active</span></td>
-                      <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
-                    </tr>
-                    <tr>
-                      <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> John Smith</td>
-                      <td><span class="badge rounded-pill text-bg-secondary">Viewer</span></td>
-                      <td><span class="badge text-bg-warning-subtle border">Pending</span></td>
-                      <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="col-lg-6">
-          <div class="card glass h-100">
-            <div class="card-body">
-              <h2 class="h6 mb-2">Retention & Legal Notices</h2>
-              <div class="alert alert-warning small"><i class="bi bi-exclamation-triangle me-2"></i>All uploads must have explicit consent or lawful basis for processing. Sensitive data must be redacted prior to sharing outside the platform.</div>
-              <div class="dropzone">
-                <i class="bi bi-file-earmark-lock display-6 d-block"></i>
-                <p class="mb-1">Drop updated policy PDFs here</p>
-                <small class="text-secondary">Admins only • Versioning & checksum enforced</small>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
+
 
   <footer class="border-top py-4">
     <div class="container-xl d-flex flex-wrap justify-content-between align-items-center gap-3">
@@ -401,118 +344,7 @@
     </div>
   </footer>
 
-  <!-- Create Case Modal -->
-  <div class="modal fade" id="createCaseModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-folder-plus me-2"></i>New Case</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <form>
-            <div class="mb-3">
-              <label class="form-label">Subject Handle</label>
-              <input type="text" class="form-control" placeholder="@username" />
-            </div>
-            <div class="mb-3">
-              <label class="form-label">Initial Summary</label>
-              <textarea class="form-control" rows="3" placeholder="Short description…"></textarea>
-            </div>
-            <div class="row g-2">
-              <div class="col-md-6">
-                <label class="form-label">Sensitivity</label>
-                <select class="form-select">
-                  <option>Standard</option>
-                  <option>Restricted</option>
-                  <option>Sealed</option>
-                </select>
-              </div>
-              <div class="col-md-6">
-                <label class="form-label">Status</label>
-                <select class="form-select">
-                  <option>Open</option>
-                  <option>In Review</option>
-                  <option>Verified</option>
-                  <option>Closed</option>
-                </select>
-              </div>
-            </div>
-          </form>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary"><i class="bi bi-save me-1"></i> Create</button>
-        </div>
-      </div>
-    </div>
-  </div>
 
-  <!-- Upload Modal -->
-  <div class="modal fade" id="uploadModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-cloud-arrow-up me-2"></i>Upload Evidence</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <div class="alert alert-warning small"><i class="bi bi-shield-lock me-2"></i>Ensure personally identifiable information (PII) is handled lawfully. All uploads are hashed and timestamped.</div>
-          <div class="dropzone" role="button" tabindex="0">
-            <i class="bi bi-cloud-upload display-6 d-block"></i>
-            <p class="mb-1">Drag & drop files here or click to browse</p>
-            <small class="text-secondary">Max 1GB per file • Allowed: PNG, JPG, MP4, MOV, WAV, MP3, PDF, TXT, JSON</small>
-          </div>
-          <div class="mt-3 small text-secondary">Selected files (mock list)</div>
-          <ul class="list-group list-group-flush">
-            <li class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center">
-              <span><i class="bi bi-file-earmark-image me-2"></i> screenshot_01.png</span>
-              <span class="badge text-bg-dark border">12.4 MB</span>
-            </li>
-          </ul>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary"><i class="bi bi-arrow-right-circle me-1"></i> Continue</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Auth Modal -->
-  <div class="modal fade" id="loginModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-box-arrow-in-right me-2"></i>Sign in</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <form>
-            <div class="mb-3">
-              <label class="form-label">Email</label>
-              <input type="email" class="form-control" placeholder="you@org.org" />
-            </div>
-            <div class="mb-3">
-              <label class="form-label">Password</label>
-              <input type="password" class="form-control" placeholder="••••••••" />
-            </div>
-            <div class="d-flex justify-content-between align-items-center">
-              <div class="form-check">
-                <input class="form-check-input" type="checkbox" id="rememberMe">
-                <label class="form-check-label" for="rememberMe">Remember me</label>
-              </div>
-              <a class="small" href="#">Forgot password?</a>
-            </div>
-          </form>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
-          <button class="btn btn-primary">Sign in</button>
-        </div>
-      </div>
-    </div>
-  </div>
 
   <!-- Policy Modals (Privacy, Terms, Disclaimer) -->
   <div class="modal fade" id="privacyModal" tabindex="-1" aria-hidden="true">
