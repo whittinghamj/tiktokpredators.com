@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TikTokPredators — Case & Evidence Manager</title>
-  <meta name="description" content="Secure, auditable case & evidence management platform for vetted users." />
+  <title>TikTokPredators — Public Case Archive</title>
+  <meta name="description" content="Public archive of cases documenting alleged predatory behaviour on TikTok, including evidence, timelines, and summaries." />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
   <style>
@@ -58,12 +58,12 @@
     <div class="container-xl">
       <div class="row g-4 align-items-center">
         <div class="col-lg-7">
-          <h1 class="display-5 fw-bold">Manage Cases & Evidence with Security, Legality & Auditability</h1>
-          <p class="lead text-secondary">A privacy-first workspace for vetted teams to collect, preserve, and review case materials related to alleged predatory activity on TikTok.</p>
+          <h1 class="display-5 fw-bold">Public Case Archive: Cases, Evidence & Timelines</h1>
+          <p class="lead text-secondary">Explore documented cases with attached evidence and case summaries. We publish responsibly, preserve chain-of-custody, and include clear legal disclaimers.</p>
           <div class="input-group input-group-lg mt-4">
             <span class="input-group-text"><i class="bi bi-search"></i></span>
             <input type="search" class="form-control" placeholder="Search cases by ID, subject, keyword, tag…" aria-label="Search cases">
-            <button class="btn btn-primary"><i class="bi bi-filter me-1"></i> Filters</button>
+            <button class="btn btn-primary"><i class="bi bi-filter me-1"></i> Browse</button>
           </div>
           <div class="mt-3 d-flex gap-2 flex-wrap">
             <span class="badge text-bg-dark border"><i class="bi bi-hash me-1"></i> grooming</span>
@@ -100,7 +100,7 @@
             <div class="card-body">
               <div class="d-flex justify-content-between align-items-center">
                 <div>
-                  <div class="text-secondary small">Open Cases</div>
+                  <div class="text-secondary small">Public Cases</div>
                   <div class="h3 mb-0">42</div>
                 </div>
                 <i class="bi bi-folder2-open fs-3 text-primary"></i>
@@ -113,7 +113,7 @@
             <div class="card-body">
               <div class="d-flex justify-content-between align-items-center">
                 <div>
-                  <div class="text-secondary small">Items in Review</div>
+                  <div class="text-secondary small">Evidence Items</div>
                   <div class="h3 mb-0">118</div>
                 </div>
                 <i class="bi bi-eye fs-3"></i>
@@ -126,7 +126,7 @@
             <div class="card-body">
               <div class="d-flex justify-content-between align-items-center">
                 <div>
-                  <div class="text-secondary small">Flagged</div>
+                  <div class="text-secondary small">Flagged for Review</div>
                   <div class="h3 mb-0">9</div>
                 </div>
                 <i class="bi bi-flag fs-3 text-danger"></i>
@@ -139,7 +139,7 @@
             <div class="card-body">
               <div class="d-flex justify-content-between align-items-center">
                 <div>
-                  <div class="text-secondary small">Chain-of-Custody OK</div>
+                  <div class="text-secondary small">Chain-of-Custody Integrity</div>
                   <div class="h3 mb-0">99.2%</div>
                 </div>
                 <i class="bi bi-shield-check fs-3 text-success"></i>
@@ -157,7 +157,7 @@
       <div class="row g-4">
         <div class="col-lg-8 case-grid">
           <div class="d-flex align-items-center justify-content-between mb-2">
-            <h2 class="h4 mb-0">Recent Cases</h2>
+            <h2 class="h4 mb-0">Latest Public Cases</h2>
             <div class="btn-group">
               <button class="btn btn-outline-light btn-sm"><i class="bi bi-sort-alpha-down"></i></button>
               <button class="btn btn-outline-light btn-sm"><i class="bi bi-funnel"></i></button>
@@ -171,7 +171,7 @@
                   <div class="d-flex justify-content-between align-items-start">
                     <div>
                       <a href="#" class="stretched-link text-decoration-none"><h3 class="h6 mb-1">CASE-2025-0001</h3></a>
-                      <div class="small text-secondary">Subject: <span class="text-white">@example_user123</span></div>
+                      <div class="small text-secondary">Subject (TikTok): <span class="text-white">@example_user123</span></div>
                     </div>
                     <span class="badge rounded-pill text-bg-warning-subtle border"><i class="bi bi-hourglass-split me-1"></i> In Review</span>
                   </div>
@@ -233,14 +233,14 @@
           <div class="card glass">
             <div class="card-body">
               <div class="d-flex align-items-center justify-content-between">
-                <h2 class="h6 mb-0">Case Snapshot</h2>
+                <h2 class="h6 mb-0">Case Overview</h2>
               </div>
               <div class="mt-3">
                 <div class="d-flex align-items-center gap-2 mb-2">
                   <img src="https://placehold.co/72x72" alt="Subject avatar" class="rounded" width="48" height="48" />
                   <div>
                     <div class="fw-semibold">@example_user123</div>
-                    <div class="small text-secondary">TikTok Subject</div>
+                    <div class="small text-secondary">Subject (TikTok)</div>
                   </div>
                 </div>
                 <div class="row g-2 small">
@@ -268,7 +268,7 @@
                     <div class="text-secondary">by System • 09 Sep 2025 10:15</div>
                   </div>
                   <div class="item">
-                    <div class="fw-semibold">Access granted to analyst team</div>
+                    <div class="fw-semibold">Public summary published</div>
                     <div class="text-secondary">by Admin • 09 Sep 2025 10:20</div>
                   </div>
                 </div>
@@ -300,7 +300,7 @@
   <section class="py-5 border-top" id="reports">
     <div class="container-xl">
       <div class="d-flex align-items-center justify-content-between mb-3">
-        <h2 class="h4 mb-0">Reports</h2>
+        <h2 class="h4 mb-0">Public Reports</h2>
         <div class="btn-group">
           <button class="btn btn-outline-light btn-sm"><i class="bi bi-download me-1"></i> Export</button>
           <button class="btn btn-outline-light btn-sm"><i class="bi bi-printer me-1"></i> Print</button>
@@ -310,7 +310,7 @@
         <div class="col-lg-8">
           <div class="card glass">
             <div class="card-body">
-              <h3 class="h6">Monthly Activity</h3>
+              <h3 class="h6">Monthly Case Activity</h3>
               <div class="placeholder-tile" style="aspect-ratio: 21/9">
                 <div class="text"><i class="bi bi-graph-up-arrow me-1"></i> Chart placeholder</div>
               </div>
@@ -320,7 +320,7 @@
         <div class="col-lg-4">
           <div class="card glass">
             <div class="card-body">
-              <h3 class="h6">Breakdown</h3>
+              <h3 class="h6">Evidence Breakdown</h3>
               <div class="placeholder-tile" style="aspect-ratio: 1/1">
                 <div class="text"><i class="bi bi-pie-chart me-1"></i> Pie chart placeholder</div>
               </div>
@@ -335,7 +335,7 @@
 
   <footer class="border-top py-4">
     <div class="container-xl d-flex flex-wrap justify-content-between align-items-center gap-3">
-      <div class="small">© <span id="year"></span> TikTokPredators. For reporting and documentation only. Not affiliated with TikTok.</div>
+      <div class="small">© <span id="year"></span> TikTokPredators. This is a public reporting service and case archive. Not affiliated with TikTok.</div>
       <div class="d-flex gap-3 small">
         <a href="#" data-bs-toggle="modal" data-bs-target="#privacyModal"><i class="bi bi-shield-lock me-1"></i> Privacy</a>
         <a href="#" data-bs-toggle="modal" data-bs-target="#tosModal"><i class="bi bi-file-text me-1"></i> Terms</a>
@@ -352,7 +352,7 @@
       <div class="modal-content">
         <div class="modal-header"><h5 class="modal-title">Privacy Notice</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
         <div class="modal-body">
-          <p class="small">This platform stores potentially sensitive material. Access is restricted to vetted users. All actions are logged. Do not upload content without lawful basis. Data minimization and redaction are required where appropriate.</p>
+          <p class="small">This site hosts a public archive of cases and related materials. We minimise data, redact sensitive details, and respect lawful takedown requests. All actions on source systems are logged; public views are anonymous.</p>
         </div>
         <div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div>
       </div>
@@ -363,7 +363,7 @@
       <div class="modal-content">
         <div class="modal-header"><h5 class="modal-title">Terms of Use</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
         <div class="modal-body">
-          <p class="small">Users agree to lawful, ethical use. Distribution of unredacted materials is prohibited. Cooperation with legitimate legal requests is supported. Violations may result in suspension and reporting.</p>
+          <p class="small">You may view and share links to public case pages. Do not republish PII or unredacted materials. We will cooperate with lawful requests and may update or remove content accordingly.</p>
         </div>
         <div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div>
       </div>
@@ -374,7 +374,7 @@
       <div class="modal-content">
         <div class="modal-header"><h5 class="modal-title">Legal Disclaimer</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
         <div class="modal-body">
-          <p class="small">Allegations documented here are claims and may be under investigation. Presumption of innocence applies. Content may be shared with appropriate authorities when required.</p>
+          <p class="small">Case entries describe allegations and supporting materials. Allegations are not proof. We strive for accuracy and will correct or remove materials shown to be false, unlawful, or harmful.</p>
         </div>
         <div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div>
       </div>
