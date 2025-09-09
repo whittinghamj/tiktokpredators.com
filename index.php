@@ -188,13 +188,22 @@ if (($_POST['action'] ?? '') === 'create_case') {
     $allowed_status = ['Open','In Review','Verified','Closed'];
 
     if ($case_name === '' || $initial_summary === '') {
-        flash('error', 'Case name and initial summary are required.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+        flash('error', 'Case name and initial summary are required.');
+        $_SESSION['open_modal'] = 'createCase';
+        $_SESSION['form_error'] = 'Case name and initial summary are required.';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
     if (!in_array($sensitivity, $allowed_sensitivity, true)) {
-        flash('error', 'Invalid sensitivity.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+        flash('error', 'Invalid sensitivity.');
+        $_SESSION['open_modal'] = 'createCase';
+        $_SESSION['form_error'] = 'Invalid sensitivity selected.';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
     if (!in_array($status, $allowed_status, true)) {
-        flash('error', 'Invalid status.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+        flash('error', 'Invalid status.');
+        $_SESSION['open_modal'] = 'createCase';
+        $_SESSION['form_error'] = 'Invalid status selected.';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
 
     try {
@@ -212,6 +221,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
         ]);
         flash('success', 'Case created successfully. ID: ' . htmlspecialchars($case_code));
     } catch (Throwable $e) {
+        $_SESSION['open_modal'] = 'createCase';
         $_SESSION['sql_error'] = $e->getMessage();
         flash('error', 'Unable to create case.');
     }
@@ -271,6 +281,7 @@ if (isset($_GET['logout'])) {
     <div class="alert alert-danger border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
   <?php endif; ?>
   <?php $openAuth = $_SESSION['auth_tab'] ?? ''; unset($_SESSION['auth_tab']); ?>
+  <?php $openModal = $_SESSION['open_modal'] ?? ''; unset($_SESSION['open_modal']); $formError = $_SESSION['form_error'] ?? ''; unset($_SESSION['form_error']); ?>
   <!-- Top Navbar -->
   <nav class="navbar navbar-expand-lg border-bottom sticky-top bg-body glass">
     <div class="container-xl">
@@ -679,7 +690,10 @@ if (isset($_GET['logout'])) {
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <form method="post" action="">
+          <?php if (!empty($formError)): ?>
+            <div class="alert alert-danger small d-flex align-items-center"><i class="bi bi-exclamation-octagon me-2"></i><span><?php echo htmlspecialchars($formError); ?></span></div>
+          <?php endif; ?>
+          <form method="post" action="" id="createCaseForm">
             <input type="hidden" name="action" value="create_case">
             <?php csrf_field(); ?>
             <div class="mb-3">
@@ -726,7 +740,7 @@ if (isset($_GET['logout'])) {
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary"><i class="bi bi-save me-1"></i> Save</button>
+          <button class="btn btn-primary" type="submit" form="createCaseForm"><i class="bi bi-save me-1"></i> Save</button>
         </div>
       </div>
     </div>
@@ -887,7 +901,7 @@ if (isset($_GET['logout'])) {
         </div>
         <div class="modal-body">
           <?php if ($sqlError): ?>
-            <div class="alert alert-danger"><i class="bi bi-exclamation-octagon me-2"></i>An error occurred during authentication or registration. Details below:</div>
+            <div class="alert alert-danger"><i class="bi bi-exclamation-octagon me-2"></i>An error occurred during authentication, registration, or case creation. Details below:</div>
             <pre class="small mb-0" style="white-space: pre-wrap; word-wrap: break-word;">
 <?php echo htmlspecialchars($sqlError); ?>
             </pre>
@@ -979,6 +993,15 @@ if (isset($_GET['logout'])) {
       m.show();
       const trigger = document.querySelector(openAuth === 'register' ? '#register-tab' : '#login-tab');
       if (trigger) new bootstrap.Tab(trigger).show();
+    })();
+  </script>
+  <script>
+    // Auto-open Create Case modal if server signaled a form error
+    (function(){
+      const openModal = <?php echo json_encode($openModal ?? ''); ?>;
+      if (openModal !== 'createCase') return;
+      const m = new bootstrap.Modal(document.getElementById('createCaseModal'));
+      m.show();
     })();
   </script>
   <script>
