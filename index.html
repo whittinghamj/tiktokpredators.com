@@ -1,0 +1,588 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TikTokPredators — Case & Evidence Manager</title>
+  <meta name="description" content="Secure, auditable case & evidence management platform for vetted users." />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
+  <style>
+    :root {
+      --tp-primary: #7c4dff; /* violet */
+      --tp-accent: #19c37d;  /* green */
+    }
+    .navbar-brand span { color: var(--tp-primary); }
+    .hero {
+      background: radial-gradient(1200px 600px at 80% -10%, rgba(124,77,255,.2), transparent),
+                  radial-gradient(800px 400px at 10% -10%, rgba(25,195,125,.15), transparent);
+    }
+    .glass { backdrop-filter: blur(8px); background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); }
+    .badge-role { background: rgba(124,77,255,.2); border: 1px solid rgba(124,77,255,.35); }
+    .placeholder-tile { aspect-ratio: 16/9; background: repeating-linear-gradient(45deg, #222 0 10px, #1b1b1b 10px 20px); border-radius: .75rem; position: relative; overflow: hidden; }
+    .placeholder-tile .text { position: absolute; inset: 0; display: grid; place-items: center; color: #888 }
+    .audit-list { max-height: 280px; overflow-y: auto; }
+    .case-grid .card { transition: transform .15s ease, box-shadow .15s ease; }
+    .case-grid .card:hover { transform: translateY(-2px); box-shadow: 0 6px 32px rgba(0,0,0,.35); }
+    .avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; }
+    .dropzone { border: 2px dashed rgba(255,255,255,.25); border-radius: 1rem; padding: 2rem; text-align: center; }
+    .timeline { border-left: 2px solid rgba(255,255,255,.1); padding-left: 1rem; }
+    .timeline .item { position: relative; margin-bottom: 1rem; }
+    .timeline .item::before { content: ""; position: absolute; left: -1.1rem; top: .25rem; width: .65rem; height: .65rem; background: var(--tp-primary); border-radius: 50%; box-shadow: 0 0 0 3px rgba(124,77,255,.25); }
+    footer a { color: inherit }
+  </style>
+</head>
+<body>
+  <!-- Top Navbar -->
+  <nav class="navbar navbar-expand-lg border-bottom sticky-top bg-body glass">
+    <div class="container-xl">
+      <a class="navbar-brand fw-bold" href="#"><i class="bi bi-shield-lock me-2 text-primary"></i> TikTok<span>Predators</span></a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topNav"><span class="navbar-toggler-icon"></span></button>
+      <div class="collapse navbar-collapse" id="topNav">
+        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+          <li class="nav-item"><a class="nav-link active" href="#">Dashboard</a></li>
+          <li class="nav-item"><a class="nav-link" href="#cases">Cases</a></li>
+          <li class="nav-item"><a class="nav-link" href="#evidence">Evidence</a></li>
+          <li class="nav-item"><a class="nav-link" href="#reports">Reports</a></li>
+          <li class="nav-item"><a class="nav-link" href="#admin">Admin</a></li>
+        </ul>
+        <div class="d-flex align-items-center gap-2">
+          <!-- Role badge + dark mode toggle -->
+          <span class="badge rounded-pill badge-role"><i class="bi bi-person-badge me-1"></i> Analyst</span>
+          <button id="themeToggle" class="btn btn-outline-light btn-sm" title="Toggle theme"><i class="bi bi-moon-stars"></i></button>
+          <div class="dropdown">
+            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#loginModal"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <!-- Hero / Search -->
+  <header class="hero border-bottom py-5">
+    <div class="container-xl">
+      <div class="row g-4 align-items-center">
+        <div class="col-lg-7">
+          <h1 class="display-5 fw-bold">Manage Cases & Evidence with Security, Legality & Auditability</h1>
+          <p class="lead text-secondary">A privacy-first workspace for vetted teams to collect, preserve, and review case materials related to alleged predatory activity on TikTok.</p>
+          <div class="input-group input-group-lg mt-4">
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
+            <input type="search" class="form-control" placeholder="Search cases by ID, subject, keyword, tag…" aria-label="Search cases">
+            <button class="btn btn-primary"><i class="bi bi-filter me-1"></i> Filters</button>
+          </div>
+          <div class="mt-3 d-flex gap-2 flex-wrap">
+            <span class="badge text-bg-dark border"><i class="bi bi-hash me-1"></i> grooming</span>
+            <span class="badge text-bg-dark border"><i class="bi bi-hash me-1"></i> messages</span>
+            <span class="badge text-bg-dark border"><i class="bi bi-hash me-1"></i> screenshots</span>
+            <span class="badge text-bg-dark border"><i class="bi bi-hash me-1"></i> escalation</span>
+          </div>
+        </div>
+        <div class="col-lg-5">
+          <!-- Mockup: dashboard preview tile -->
+          <div class="placeholder-tile shadow-sm">
+            <div class="text">
+              <div class="text-center">
+                <i class="bi bi-grid-1x2 display-5 d-block"></i>
+                <span class="small">Dashboard Preview</span>
+              </div>
+            </div>
+          </div>
+          <div class="row g-2 mt-2">
+            <div class="col-6"><div class="placeholder-tile"><div class="text"><span>Case Card</span></div></div></div>
+            <div class="col-6"><div class="placeholder-tile"><div class="text"><span>Media Tile</span></div></div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- KPI Cards -->
+  <section class="py-4">
+    <div class="container-xl">
+      <div class="row g-3 row-cols-2 row-cols-md-4">
+        <div class="col">
+          <div class="card h-100 glass">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center">
+                <div>
+                  <div class="text-secondary small">Open Cases</div>
+                  <div class="h3 mb-0">42</div>
+                </div>
+                <i class="bi bi-folder2-open fs-3 text-primary"></i>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="card h-100 glass">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center">
+                <div>
+                  <div class="text-secondary small">Items in Review</div>
+                  <div class="h3 mb-0">118</div>
+                </div>
+                <i class="bi bi-eye fs-3"></i>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="card h-100 glass">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center">
+                <div>
+                  <div class="text-secondary small">Flagged</div>
+                  <div class="h3 mb-0">9</div>
+                </div>
+                <i class="bi bi-flag fs-3 text-danger"></i>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col">
+          <div class="card h-100 glass">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center">
+                <div>
+                  <div class="text-secondary small">Chain-of-Custody OK</div>
+                  <div class="h3 mb-0">99.2%</div>
+                </div>
+                <i class="bi bi-shield-check fs-3 text-success"></i>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Cases Grid + Right Rail -->
+  <main class="py-4" id="cases">
+    <div class="container-xl">
+      <div class="row g-4">
+        <div class="col-lg-8 case-grid">
+          <div class="d-flex align-items-center justify-content-between mb-2">
+            <h2 class="h4 mb-0">Recent Cases</h2>
+            <div class="btn-group">
+              <button class="btn btn-outline-light btn-sm"><i class="bi bi-sort-alpha-down"></i></button>
+              <button class="btn btn-outline-light btn-sm"><i class="bi bi-funnel"></i></button>
+              <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i> New Case</button>
+            </div>
+          </div>
+          <div class="row g-3 row-cols-1 row-cols-md-2">
+            <!-- Case Card (repeat server-side) -->
+            <div class="col">
+              <div class="card h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                      <a href="#" class="stretched-link text-decoration-none"><h3 class="h6 mb-1">CASE-2025-0001</h3></a>
+                      <div class="small text-secondary">Subject: <span class="text-white">@example_user123</span></div>
+                    </div>
+                    <span class="badge rounded-pill text-bg-warning-subtle border"><i class="bi bi-hourglass-split me-1"></i> In Review</span>
+                  </div>
+                  <div class="mt-3 d-flex gap-2 flex-wrap">
+                    <span class="badge text-bg-dark border">DMs</span>
+                    <span class="badge text-bg-dark border">Screenshots</span>
+                    <span class="badge text-bg-dark border">Under 18</span>
+                  </div>
+                </div>
+                <div class="card-footer d-flex justify-content-between small">
+                  <span><i class="bi bi-clock"></i> Updated 2h ago</span>
+                  <span><i class="bi bi-people"></i> 3 assignees</span>
+                </div>
+              </div>
+            </div>
+            <div class="col">
+              <div class="card h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-start">
+                    <div>
+                      <a href="#" class="stretched-link text-decoration-none"><h3 class="h6 mb-1">CASE-2025-0002</h3></a>
+                      <div class="small text-secondary">Subject: <span class="text-white">@subject_handle</span></div>
+                    </div>
+                    <span class="badge rounded-pill text-bg-success-subtle border"><i class="bi bi-check2-circle me-1"></i> Verified</span>
+                  </div>
+                  <div class="mt-3 d-flex gap-2 flex-wrap">
+                    <span class="badge text-bg-dark border">Video</span>
+                    <span class="badge text-bg-dark border">Metadata</span>
+                  </div>
+                </div>
+                <div class="card-footer d-flex justify-content-between small">
+                  <span><i class="bi bi-clock"></i> Updated yesterday</span>
+                  <span><i class="bi bi-people"></i> 1 assignee</span>
+                </div>
+              </div>
+            </div>
+            <!-- /Case Card -->
+          </div>
+
+          <!-- Evidence Gallery Mock -->
+          <div id="evidence" class="mt-4">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <h2 class="h5 mb-0">Evidence Gallery</h2>
+              <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button>
+            </div>
+            <div class="row g-2 row-cols-2 row-cols-md-3">
+              <!-- Mock tiles -->
+              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-file-earmark-image me-1"></i> image_001.png</div></div></div>
+              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-film me-1"></i> clip_12.mp4</div></div></div>
+              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-chat-dots me-1"></i> dm_export.json</div></div></div>
+              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-filetype-pdf me-1"></i> warrant.pdf</div></div></div>
+              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-mic me-1"></i> call_05.m4a</div></div></div>
+              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-filetype-log me-1"></i> chain.log</div></div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Right Rail: Case Detail / Audit -->
+        <div class="col-lg-4">
+          <div class="card glass">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between">
+                <h2 class="h6 mb-0">Case Snapshot</h2>
+                <button class="btn btn-sm btn-outline-light"><i class="bi bi-pencil"></i></button>
+              </div>
+              <div class="mt-3">
+                <div class="d-flex align-items-center gap-2 mb-2">
+                  <img src="https://placehold.co/72x72" alt="Subject avatar" class="rounded" width="48" height="48" />
+                  <div>
+                    <div class="fw-semibold">@example_user123</div>
+                    <div class="small text-secondary">TikTok Subject</div>
+                  </div>
+                </div>
+                <div class="row g-2 small">
+                  <div class="col-6"><span class="text-secondary">Case ID</span><div>CASE-2025-0001</div></div>
+                  <div class="col-6"><span class="text-secondary">Status</span><div><span class="badge text-bg-warning-subtle border">In Review</span></div></div>
+                  <div class="col-6"><span class="text-secondary">Opened</span><div>09 Sep 2025</div></div>
+                  <div class="col-6"><span class="text-secondary">Custodian</span><div>J. Doe</div></div>
+                  <div class="col-12 mt-2"><span class="text-secondary">Summary</span>
+                    <p class="mb-2">Alleged inappropriate DM exchanges. Evidence includes screenshots, screen recordings, and exported chat logs. Pending metadata verification.</p>
+                  </div>
+                </div>
+              </div>
+              <hr />
+              <div>
+                <div class="d-flex align-items-center justify-content-between mb-2">
+                  <h3 class="h6 mb-0">Chain of Custody</h3>
+                  <button class="btn btn-sm btn-outline-success"><i class="bi bi-plus-lg"></i></button>
+                </div>
+                <div class="timeline small">
+                  <div class="item">
+                    <div class="fw-semibold">Evidence imported</div>
+                    <div class="text-secondary">by Jane • 09 Sep 2025 10:14</div>
+                  </div>
+                  <div class="item">
+                    <div class="fw-semibold">Hash verified (SHA-256)</div>
+                    <div class="text-secondary">by System • 09 Sep 2025 10:15</div>
+                  </div>
+                  <div class="item">
+                    <div class="fw-semibold">Access granted to analyst team</div>
+                    <div class="text-secondary">by Admin • 09 Sep 2025 10:20</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card mt-3 glass">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <h3 class="h6 mb-0">Audit Log</h3>
+                <button class="btn btn-sm btn-outline-light"><i class="bi bi-arrow-clockwise"></i></button>
+              </div>
+              <ul class="list-group list-group-flush audit-list">
+                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-key me-2"></i>Login success • <span class="text-secondary">10:35</span></li>
+                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-eye me-2"></i>Viewed case CASE-2025-0001 • <span class="text-secondary">10:36</span></li>
+                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-cloud-arrow-up me-2"></i>Uploaded file clip_12.mp4 • <span class="text-secondary">10:40</span></li>
+                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-shield-check me-2"></i>Checksum verified • <span class="text-secondary">10:41</span></li>
+                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-pen me-2"></i>Updated status to In Review • <span class="text-secondary">10:45</span></li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Reports Section (Mock) -->
+  <section class="py-5 border-top" id="reports">
+    <div class="container-xl">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <h2 class="h4 mb-0">Reports</h2>
+        <div class="btn-group">
+          <button class="btn btn-outline-light btn-sm"><i class="bi bi-download me-1"></i> Export</button>
+          <button class="btn btn-outline-light btn-sm"><i class="bi bi-printer me-1"></i> Print</button>
+        </div>
+      </div>
+      <div class="row g-3">
+        <div class="col-lg-8">
+          <div class="card glass">
+            <div class="card-body">
+              <h3 class="h6">Monthly Activity</h3>
+              <div class="placeholder-tile" style="aspect-ratio: 21/9">
+                <div class="text"><i class="bi bi-graph-up-arrow me-1"></i> Chart placeholder</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card glass">
+            <div class="card-body">
+              <h3 class="h6">Breakdown</h3>
+              <div class="placeholder-tile" style="aspect-ratio: 1/1">
+                <div class="text"><i class="bi bi-pie-chart me-1"></i> Pie chart placeholder</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Admin Section (Mock) -->
+  <section class="py-5 border-top" id="admin">
+    <div class="container-xl">
+      <div class="row g-4">
+        <div class="col-lg-6">
+          <div class="card glass h-100">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-2">
+                <h2 class="h6 mb-0">User Management</h2>
+                <button class="btn btn-sm btn-primary"><i class="bi bi-person-plus me-1"></i> Invite</button>
+              </div>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                  <thead><tr><th>User</th><th>Role</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
+                  <tbody>
+                    <tr>
+                      <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> Jane Doe</td>
+                      <td><span class="badge rounded-pill badge-role">Analyst</span></td>
+                      <td><span class="badge text-bg-success-subtle border">Active</span></td>
+                      <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
+                    </tr>
+                    <tr>
+                      <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> John Smith</td>
+                      <td><span class="badge rounded-pill text-bg-secondary">Viewer</span></td>
+                      <td><span class="badge text-bg-warning-subtle border">Pending</span></td>
+                      <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-6">
+          <div class="card glass h-100">
+            <div class="card-body">
+              <h2 class="h6 mb-2">Retention & Legal Notices</h2>
+              <div class="alert alert-warning small"><i class="bi bi-exclamation-triangle me-2"></i>All uploads must have explicit consent or lawful basis for processing. Sensitive data must be redacted prior to sharing outside the platform.</div>
+              <div class="dropzone">
+                <i class="bi bi-file-earmark-lock display-6 d-block"></i>
+                <p class="mb-1">Drop updated policy PDFs here</p>
+                <small class="text-secondary">Admins only • Versioning & checksum enforced</small>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer class="border-top py-4">
+    <div class="container-xl d-flex flex-wrap justify-content-between align-items-center gap-3">
+      <div class="small">© <span id="year"></span> TikTokPredators. For reporting and documentation only. Not affiliated with TikTok.</div>
+      <div class="d-flex gap-3 small">
+        <a href="#" data-bs-toggle="modal" data-bs-target="#privacyModal"><i class="bi bi-shield-lock me-1"></i> Privacy</a>
+        <a href="#" data-bs-toggle="modal" data-bs-target="#tosModal"><i class="bi bi-file-text me-1"></i> Terms</a>
+        <a href="#" data-bs-toggle="modal" data-bs-target="#disclaimerModal"><i class="bi bi-exclamation-octagon me-1"></i> Disclaimer</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Create Case Modal -->
+  <div class="modal fade" id="createCaseModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-folder-plus me-2"></i>New Case</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <form>
+            <div class="mb-3">
+              <label class="form-label">Subject Handle</label>
+              <input type="text" class="form-control" placeholder="@username" />
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Initial Summary</label>
+              <textarea class="form-control" rows="3" placeholder="Short description…"></textarea>
+            </div>
+            <div class="row g-2">
+              <div class="col-md-6">
+                <label class="form-label">Sensitivity</label>
+                <select class="form-select">
+                  <option>Standard</option>
+                  <option>Restricted</option>
+                  <option>Sealed</option>
+                </select>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Status</label>
+                <select class="form-select">
+                  <option>Open</option>
+                  <option>In Review</option>
+                  <option>Verified</option>
+                  <option>Closed</option>
+                </select>
+              </div>
+            </div>
+          </form>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary"><i class="bi bi-save me-1"></i> Create</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Upload Modal -->
+  <div class="modal fade" id="uploadModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-cloud-arrow-up me-2"></i>Upload Evidence</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="alert alert-warning small"><i class="bi bi-shield-lock me-2"></i>Ensure personally identifiable information (PII) is handled lawfully. All uploads are hashed and timestamped.</div>
+          <div class="dropzone" role="button" tabindex="0">
+            <i class="bi bi-cloud-upload display-6 d-block"></i>
+            <p class="mb-1">Drag & drop files here or click to browse</p>
+            <small class="text-secondary">Max 1GB per file • Allowed: PNG, JPG, MP4, MOV, WAV, MP3, PDF, TXT, JSON</small>
+          </div>
+          <div class="mt-3 small text-secondary">Selected files (mock list)</div>
+          <ul class="list-group list-group-flush">
+            <li class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center">
+              <span><i class="bi bi-file-earmark-image me-2"></i> screenshot_01.png</span>
+              <span class="badge text-bg-dark border">12.4 MB</span>
+            </li>
+          </ul>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary"><i class="bi bi-arrow-right-circle me-1"></i> Continue</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Auth Modal -->
+  <div class="modal fade" id="loginModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-box-arrow-in-right me-2"></i>Sign in</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <form>
+            <div class="mb-3">
+              <label class="form-label">Email</label>
+              <input type="email" class="form-control" placeholder="you@org.org" />
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Password</label>
+              <input type="password" class="form-control" placeholder="••••••••" />
+            </div>
+            <div class="d-flex justify-content-between align-items-center">
+              <div class="form-check">
+                <input class="form-check-input" type="checkbox" id="rememberMe">
+                <label class="form-check-label" for="rememberMe">Remember me</label>
+              </div>
+              <a class="small" href="#">Forgot password?</a>
+            </div>
+          </form>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+          <button class="btn btn-primary">Sign in</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Policy Modals (Privacy, Terms, Disclaimer) -->
+  <div class="modal fade" id="privacyModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Privacy Notice</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <p class="small">This platform stores potentially sensitive material. Access is restricted to vetted users. All actions are logged. Do not upload content without lawful basis. Data minimization and redaction are required where appropriate.</p>
+        </div>
+        <div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div>
+      </div>
+    </div>
+  </div>
+  <div class="modal fade" id="tosModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Terms of Use</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <p class="small">Users agree to lawful, ethical use. Distribution of unredacted materials is prohibited. Cooperation with legitimate legal requests is supported. Violations may result in suspension and reporting.</p>
+        </div>
+        <div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div>
+      </div>
+    </div>
+  </div>
+  <div class="modal fade" id="disclaimerModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header"><h5 class="modal-title">Legal Disclaimer</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
+        <div class="modal-body">
+          <p class="small">Allegations documented here are claims and may be under investigation. Presumption of innocence applies. Content may be shared with appropriate authorities when required.</p>
+        </div>
+        <div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    // Theme toggle (respects Bootstrap 5.3 data-bs-theme)
+    (function() {
+      const key = 'tp-theme';
+      const stored = localStorage.getItem(key);
+      if (stored) document.documentElement.setAttribute('data-bs-theme', stored);
+      document.getElementById('themeToggle').addEventListener('click', function(){
+        const cur = document.documentElement.getAttribute('data-bs-theme');
+        const next = cur === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-bs-theme', next);
+        localStorage.setItem(key, next);
+      });
+      document.getElementById('year').textContent = new Date().getFullYear();
+    })();
+
+    // Mock: click on placeholder evidence to preview (toast)
+    const toastContainer = document.createElement('div');
+    toastContainer.className = 'toast-container position-fixed bottom-0 end-0 p-3';
+    document.body.appendChild(toastContainer);
+    function makeToast(msg){
+      const el = document.createElement('div');
+      el.className = 'toast align-items-center text-bg-dark border-0';
+      el.role = 'status';
+      el.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>`;
+      toastContainer.appendChild(el);
+      new bootstrap.Toast(el, { delay: 2000 }).show();
+    }
+    $(document).on('click', '.placeholder-tile', function(){ makeToast('Preview would open in a secure viewer.'); });
+
+    // Accessibility helpers (focus outline only on keyboard)
+    function handleFirstTab(e){ if(e.key==='Tab'){ document.body.classList.add('user-is-tabbing'); window.removeEventListener('keydown', handleFirstTab);} }
+    window.addEventListener('keydown', handleFirstTab);
+  </script>
+</body>
+</html>
