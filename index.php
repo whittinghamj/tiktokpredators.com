@@ -58,12 +58,17 @@ if (($_POST['action'] ?? '') === 'login') {
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
     try {
-        $stmt = $pdo->prepare('SELECT id, email, password_hash, role FROM users WHERE email = ? AND is_active = 1');
+        $stmt = $pdo->prepare('SELECT id, email, display_name, password_hash, role FROM users WHERE email = ? AND is_active = 1');
         $stmt->execute([$email]);
         $user = $stmt->fetch();
         if ($user && password_verify($password, $user['password_hash'])) {
             session_regenerate_id(true);
-            $_SESSION['user'] = [ 'id'=>$user['id'], 'email'=>$user['email'], 'role'=>$user['role'] ];
+            $_SESSION['user'] = [
+              'id' => $user['id'],
+              'email' => $user['email'],
+              'display_name' => $user['display_name'] ?? '',
+              'role' => $user['role']
+            ];
             $_SESSION['auth_attempts'] = 0; $_SESSION['auth_last'] = time();
             flash('success', 'Welcome back, '. htmlspecialchars($user['email']));
         } else {
@@ -222,10 +227,15 @@ if (isset($_GET['logout'])) {
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
           <?php else: ?>
             <div class="dropdown">
+              <?php $dn = $_SESSION['user']['display_name'] ?? ''; $label = $dn !== '' ? $dn : ($_SESSION['user']['email'] ?? 'Account'); ?>
               <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
-                <i class="bi bi-person-check me-1"></i> <?php echo htmlspecialchars($_SESSION['user']['email']); ?>
+                <i class="bi bi-person-check me-1"></i> <?php echo htmlspecialchars($label); ?>
               </button>
               <ul class="dropdown-menu dropdown-menu-end">
+                <li class="dropdown-item-text">
+                  <div class="fw-semibold"><?php echo htmlspecialchars($label); ?></div>
+                  <div class="small text-secondary"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></div>
+                </li>
                 <li><span class="dropdown-item-text small text-secondary">Role: <?php echo htmlspecialchars($_SESSION['user']['role'] ?? 'viewer'); ?></span></li>
                 <li><hr class="dropdown-divider"></li>
                 <li><a class="dropdown-item" href="?logout=1"><i class="bi bi-box-arrow-right me-2"></i>Logout</a></li>
