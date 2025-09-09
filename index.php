@@ -84,12 +84,18 @@ if (($_POST['action'] ?? '') === 'register') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); $_SESSION['auth_tab'] = 'register'; header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
     $email = trim($_POST['email'] ?? '');
+    $displayName = trim($_POST['display_name'] ?? '');
     $password = $_POST['password'] ?? '';
     $confirm = $_POST['password_confirm'] ?? '';
     $agree = isset($_POST['agree']);
 
     if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
         flash('error', 'Please enter a valid email address.');
+        $_SESSION['auth_tab'] = 'register';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if ($displayName === '') {
+        flash('error', 'Please enter a display name.');
         $_SESSION['auth_tab'] = 'register';
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
@@ -118,8 +124,8 @@ if (($_POST['action'] ?? '') === 'register') {
             header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
         }
         $hash = password_hash($password, PASSWORD_DEFAULT);
-        $ins = $pdo->prepare('INSERT INTO users (email, password_hash, role, is_active) VALUES (?, ?, "viewer", 1)');
-        $ins->execute([$email, $hash]);
+        $ins = $pdo->prepare('INSERT INTO users (email, display_name, password_hash, role, is_active) VALUES (?, ?, ?, "viewer", 1)');
+        $ins->execute([$email, $displayName, $hash]);
         flash('success', 'Registration successful. You can now log in.');
     } catch (Throwable $e) {
         // Map common PDO errors to user-friendly messages, append safe error code
@@ -708,6 +714,10 @@ if (isset($_GET['logout'])) {
               <form method="post" action="">
                 <input type="hidden" name="action" value="register">
                 <?php csrf_field(); ?>
+                <div class="mb-3">
+                  <label class="form-label">Display Name</label>
+                  <input type="text" name="display_name" class="form-control" placeholder="Your name" required />
+                </div>
                 <div class="mb-3">
                   <label class="form-label">Email</label>
                   <input type="email" name="email" class="form-control" placeholder="you@org.org" required />
