@@ -331,6 +331,66 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
 }
 
+// Handle update evidence (admin only)
+if (($_POST['action'] ?? '') === 'update_evidence') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $evidence_id = (int)($_POST['evidence_id'] ?? 0);
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $title = trim($_POST['title'] ?? '');
+    $type = $_POST['type'] ?? 'other';
+    $allowedTypes = ['image','video','audio','pdf','doc','other'];
+    if (!in_array($type, $allowedTypes, true)) $type = 'other';
+
+    if ($evidence_id <= 0 || $case_id <= 0) { flash('error', 'Invalid evidence.'); $ru = trim($_POST['redirect_url'] ?? ''); if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    try {
+        $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ? WHERE id = ? AND case_id = ? LIMIT 1');
+        $u->execute([$title, $type, $evidence_id, $case_id]);
+        flash('success', 'Evidence updated.');
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to update evidence.');
+    }
+    $ru = trim($_POST['redirect_url'] ?? ''); if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
+
+// Handle delete evidence (admin only)
+if (($_POST['action'] ?? '') === 'delete_evidence') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $evidence_id = (int)($_POST['evidence_id'] ?? 0);
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $ru = trim($_POST['redirect_url'] ?? '');
+
+    if ($evidence_id <= 0 || $case_id <= 0) { flash('error', 'Invalid evidence.'); if($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    try {
+        // fetch row for path
+        $s = $pdo->prepare('SELECT filepath FROM evidence WHERE id = ? AND case_id = ? LIMIT 1');
+        $s->execute([$evidence_id, $case_id]);
+        $row = $s->fetch();
+        if ($row) {
+            $rel = $row['filepath'];
+            $abs = __DIR__ . '/' . ltrim($rel, '/');
+        }
+        // delete row first
+        $d = $pdo->prepare('DELETE FROM evidence WHERE id = ? AND case_id = ? LIMIT 1');
+        $d->execute([$evidence_id, $case_id]);
+        // best-effort remove file
+        if (!empty($abs) && is_file($abs) && strpos(realpath($abs), realpath(__DIR__ . '/uploads')) === 0) { @unlink($abs); }
+        flash('success', 'Evidence deleted.');
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to delete evidence.');
+    }
+    if($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
+
 // Handle logout
 if (isset($_GET['logout'])) {
     $_SESSION = [];
@@ -747,7 +807,34 @@ if ($rs && count($rs) > 0):
                           <tr>
                             <td><?php echo htmlspecialchars($e['type']); ?></td>
                             <td><?php echo htmlspecialchars($e['title']); ?></td>
-                            <td><a href="<?php echo htmlspecialchars($e['filepath']); ?>" target="_blank" class="link-light">Open</a></td>
+                            <td>
+                              <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
+                                      data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                      data-id="<?php echo (int)$e['id']; ?>"
+                                      data-case-id="<?php echo (int)$viewCaseId; ?>"
+                                      data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                      data-title="<?php echo htmlspecialchars($e['title']); ?>"
+                                      data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
+                                      data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
+                                View
+                              </button>
+                              <?php if (is_admin()): ?>
+                                <div class="btn-group ms-1">
+                                  <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                          data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                    Edit
+                                  </button>
+                                  <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                    <input type="hidden" name="action" value="delete_evidence">
+                                    <?php csrf_field(); ?>
+                                    <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                    <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                                    <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                  </form>
+                                </div>
+                              <?php endif; ?>
+                            </td>
                             <td class="small text-secondary d-none d-md-table-cell"><?php echo htmlspecialchars($e['mime_type']); ?></td>
                             <td class="small text-secondary d-none d-md-table-cell"><?php echo number_format((int)$e['size_bytes']); ?> B</td>
                             <td class="small text-secondary"><?php echo htmlspecialchars($e['created_at']); ?></td>
@@ -911,7 +998,32 @@ if ($rs && count($rs) > 0):
                     <tr>
                       <td><?php echo htmlspecialchars($e['type']); ?></td>
                       <td><?php echo htmlspecialchars($e['title']); ?></td>
-                      <td><a href="<?php echo htmlspecialchars($e['filepath']); ?>" target="_blank" class="link-light">Open</a></td>
+                      <td>
+                        <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
+                                data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                data-id="<?php echo (int)$e['id']; ?>"
+                                data-case-id="<?php echo (int)$caseId; ?>"
+                                data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                data-title="<?php echo htmlspecialchars($e['title']); ?>"
+                                data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
+                                data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
+                          View
+                        </button>
+                        <div class="btn-group ms-1">
+                          <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                  data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                            Edit
+                          </button>
+                          <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                            <input type="hidden" name="action" value="delete_evidence">
+                            <?php csrf_field(); ?>
+                            <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                            <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+                            <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
+                            <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                          </form>
+                        </div>
+                      </td>
                       <td class="small text-secondary"><?php echo htmlspecialchars($e['mime_type']); ?></td>
                       <td class="small text-secondary"><?php echo number_format((int)$e['size_bytes']); ?> B</td>
                       <td class="small text-secondary"><?php echo htmlspecialchars($e['created_at']); ?></td>
@@ -1364,6 +1476,55 @@ if ($rs && count($rs) > 0):
   </div>
 
   <?php $sqlError = $_SESSION['sql_error'] ?? ''; unset($_SESSION['sql_error']); ?>
+
+  <!-- Evidence Viewer / Editor Modal -->
+  <div class="modal fade" id="evidenceModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-eye me-2"></i><span id="evModalTitle">Evidence</span></h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div id="evPreview" class="mb-3"></div>
+          <?php if (is_admin()): ?>
+          <hr />
+          <form id="evEditForm" method="post" action="">
+            <input type="hidden" name="action" value="update_evidence">
+            <?php csrf_field(); ?>
+            <input type="hidden" name="evidence_id" id="evEditId" value="">
+            <input type="hidden" name="case_id" id="evEditCaseId" value="">
+            <input type="hidden" name="redirect_url" id="evEditRedirect" value="">
+            <div class="row g-2">
+              <div class="col-md-8">
+                <label class="form-label">Title</label>
+                <input type="text" class="form-control" name="title" id="evEditTitle" />
+              </div>
+              <div class="col-md-4">
+                <label class="form-label">Type</label>
+                <select class="form-select" name="type" id="evEditType">
+                  <option value="image">Image</option>
+                  <option value="video">Video</option>
+                  <option value="audio">Audio</option>
+                  <option value="pdf">PDF</option>
+                  <option value="doc">Document</option>
+                  <option value="other">Other</option>
+                </select>
+              </div>
+            </div>
+          </form>
+          <?php endif; ?>
+        </div>
+        <div class="modal-footer">
+          <a id="evOpenNewTab" href="#" target="_blank" class="btn btn-outline-light">Open in new tab</a>
+          <?php if (is_admin()): ?>
+          <button class="btn btn-primary" type="submit" form="evEditForm"><i class="bi bi-save me-1"></i> Save Changes</button>
+          <?php endif; ?>
+          <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
   <div class="modal fade" id="sqlErrorModal" tabindex="-1" aria-labelledby="sqlErrorLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content">
@@ -1443,6 +1604,53 @@ if ($rs && count($rs) > 0):
         }
       });
     });
+  </script>
+  <script>
+    (function(){
+      function buildPreview(src, type, mime){
+        if (!src) return '<div class="text-secondary">No preview available.</div>';
+        type = (type||'').toLowerCase();
+        mime = (mime||'').toLowerCase();
+        if (type === 'image' || mime.startsWith('image/')){
+          return '<img src="'+src+'" alt="" class="img-fluid rounded">';
+        }
+        if (type === 'pdf' || mime === 'application/pdf'){
+          return '<div class="ratio ratio-16x9"><iframe src="'+src+'" title="PDF" loading="lazy"></iframe></div>';
+        }
+        if (type === 'video' || mime.startsWith('video/')){
+          return '<video controls class="w-100" preload="metadata"><source src="'+src+'"></video>';
+        }
+        if (type === 'audio' || mime.startsWith('audio/')){
+          return '<audio controls class="w-100"><source src="'+src+'"></audio>';
+        }
+        return '<a href="'+src+'" target="_blank" class="btn btn-outline-light">Open file</a>';
+      }
+
+      document.addEventListener('show.bs.modal', function (e) {
+        const trg = e.relatedTarget;
+        if (!trg) return;
+        if (trg.matches('.btn-view-evidence, .btn-edit-evidence')){
+          const id = trg.getAttribute('data-id');
+          const caseId = trg.getAttribute('data-case-id');
+          const src = trg.getAttribute('data-src');
+          const title = trg.getAttribute('data-title') || 'Evidence';
+          const type = trg.getAttribute('data-type') || 'other';
+          const mime = trg.getAttribute('data-mime') || '';
+
+          document.getElementById('evModalTitle').textContent = title;
+          document.getElementById('evPreview').innerHTML = buildPreview(src, type, mime);
+          const openBtn = document.getElementById('evOpenNewTab');
+          if (openBtn) openBtn.href = src;
+          <?php if (is_admin()): ?>
+            document.getElementById('evEditId').value = id || '';
+            document.getElementById('evEditCaseId').value = caseId || '';
+            document.getElementById('evEditRedirect').value = window.location.pathname + window.location.search + '#case-view';
+            document.getElementById('evEditTitle').value = title || '';
+            document.getElementById('evEditType').value = (type || 'other');
+          <?php endif; ?>
+        }
+      });
+    })();
   </script>
   <script>
     // Switch auth modal to requested tab
