@@ -302,8 +302,18 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $hash = hash_file('sha256', $destAbs);
 
     try {
-        $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, mime_type, size_bytes, hash_sha256, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)');
-        $stmt->execute([$case_id, $type, ($title !== '' ? $title : $safeName), $destRel, $mime, $size, $hash, $_SESSION['user']['id'] ?? null]);
+        $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, original_filename, mime_type, size_bytes, hash_sha256, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $stmt->execute([
+            $case_id,
+            $type,
+            ($title !== '' ? $title : $safeName),
+            $destRel,
+            $safeName,
+            $mime,
+            $size,
+            $hash,
+            $_SESSION['user']['id'] ?? null
+        ]);
         flash('success', 'Evidence uploaded.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
