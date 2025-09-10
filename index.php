@@ -463,7 +463,7 @@ if ($rs && count($rs) > 0):
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-start">
           <div>
-            <a href="?admin_case=<?php echo urlencode($code); ?>#admin-case" class="stretched-link text-decoration-none"><h3 class="h6 mb-1"><?php echo htmlspecialchars($name); ?></h3></a>
+            <a href="?view=case&code=<?php echo urlencode($code); ?>#case-view" class="stretched-link text-decoration-none"><h3 class="h6 mb-1"><?php echo htmlspecialchars($name); ?></h3></a>
             <div class="small text-secondary">
               <?php if ($person !== ''): ?>Subject: <span class="text-white"><?php echo htmlspecialchars($person); ?></span><?php endif; ?>
               <?php if ($tuser !== ''): ?><?php if($person!==''): ?>&nbsp;•&nbsp;<?php endif; ?><span class="text-white"><?php echo $tuser; ?></span><?php endif; ?>
@@ -483,7 +483,7 @@ if ($rs && count($rs) > 0):
       <div class="card-footer d-flex justify-content-between align-items-center small">
         <span><i class="bi bi-hash"></i> <?php echo htmlspecialchars($code); ?></span>
         <div class="d-flex gap-2">
-          <a class="btn btn-sm btn-outline-light" href="?admin_case=<?php echo urlencode($code); ?>#admin-case" title="Open case for details"><i class="bi bi-box-arrow-up-right me-1"></i>Open</a>
+          <a class="btn btn-sm btn-outline-light" href="?view=case&code=<?php echo urlencode($code); ?>#case-view" title="Open read-only case view"><i class="bi bi-box-arrow-up-right me-1"></i>Open</a>
         </div>
       </div>
     </div>
@@ -586,6 +586,91 @@ if ($rs && count($rs) > 0):
       </div>
     </div>
   </main>
+  <?php endif; ?>
+
+  <?php if ($view === 'case'): ?>
+    <?php
+      $caseCode = trim($_GET['code'] ?? '');
+      $viewCase = null; $viewCaseId = 0; $viewEv = [];
+      if ($caseCode !== '') {
+        try {
+          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
+          $st->execute([$caseCode]);
+          $viewCase = $st->fetch();
+          $viewCaseId = (int)($viewCase['id'] ?? 0);
+        } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+        if ($viewCaseId > 0) {
+          try {
+            $st2 = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC');
+            $st2->execute([$viewCaseId]);
+            $viewEv = $st2->fetchAll();
+          } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+        }
+      }
+    ?>
+    <section class="py-5 border-top" id="case-view">
+      <div class="container-xl">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <h2 class="h4 mb-0">Case <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
+          <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+        </div>
+        <?php if ($viewCase): ?>
+          <div class="row g-4">
+            <div class="col-lg-4">
+              <div class="card glass h-100">
+                <div class="card-body">
+                  <h3 class="h6 mb-3">Case Details</h3>
+                  <div class="small text-secondary">Case Name</div>
+                  <div class="mb-2"><?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?></div>
+                  <div class="small text-secondary">Person Name</div>
+                  <div class="mb-2"><?php echo htmlspecialchars($viewCase['person_name'] ?? ''); ?></div>
+                  <div class="small text-secondary">TikTok Username</div>
+                  <div class="mb-2"><?php echo $viewCase['tiktok_username'] ? '@'.htmlspecialchars($viewCase['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
+                  <div class="small text-secondary">Status</div>
+                  <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($viewCase['status']); ?></span></div>
+                  <div class="small text-secondary">Sensitivity</div>
+                  <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($viewCase['sensitivity']); ?></span></div>
+                  <div class="small text-secondary">Opened</div>
+                  <div class="mb-2"><?php echo htmlspecialchars($viewCase['opened_at']); ?></div>
+                  <div class="small text-secondary">Summary</div>
+                  <div class="mb-0"><?php echo nl2br(htmlspecialchars($viewCase['initial_summary'] ?? '')); ?></div>
+                </div>
+              </div>
+            </div>
+            <div class="col-lg-8">
+              <div class="card glass">
+                <div class="card-body">
+                  <div class="d-flex align-items-center justify-content-between mb-2">
+                    <h3 class="h6 mb-0">Evidence</h3>
+                  </div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Type</th><th>Title</th><th>File</th><th class="d-none d-md-table-cell">MIME</th><th class="d-none d-md-table-cell">Size</th><th>Added</th></tr></thead>
+                      <tbody>
+                        <?php if ($viewEv) { foreach ($viewEv as $e) { ?>
+                          <tr>
+                            <td><?php echo htmlspecialchars($e['type']); ?></td>
+                            <td><?php echo htmlspecialchars($e['title']); ?></td>
+                            <td><a href="<?php echo htmlspecialchars($e['filepath']); ?>" target="_blank" class="link-light">Open</a></td>
+                            <td class="small text-secondary d-none d-md-table-cell"><?php echo htmlspecialchars($e['mime_type']); ?></td>
+                            <td class="small text-secondary d-none d-md-table-cell"><?php echo number_format((int)$e['size_bytes']); ?> B</td>
+                            <td class="small text-secondary"><?php echo htmlspecialchars($e['created_at']); ?></td>
+                          </tr>
+                        <?php } } else { ?>
+                          <tr><td colspan="6" class="text-secondary">No evidence available.</td></tr>
+                        <?php } ?>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        <?php else: ?>
+          <div class="alert alert-danger"><i class="bi bi-exclamation-octagon me-2"></i>Case not found or unavailable.</div>
+        <?php endif; ?>
+      </div>
+    </section>
   <?php endif; ?>
 
   <?php
