@@ -305,7 +305,10 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $hash = hash_file('sha256', $destAbs);
 
     try {
-        $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        // Resolve storage path (absolute directory where files are stored)
+        $storagePath = rtrim(getenv('EVIDENCE_STORAGE_PATH') ?: realpath($uploadDir), '/').'/';
+
+        $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
             $case_id,
             $type,
@@ -315,6 +318,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
             $safeName,
             $mime,
             $size,
+            $hash,
             $hash,
             $_SESSION['user']['id'] ?? null
         ]);
