@@ -31,7 +31,7 @@ $_SESSION['auth_last'] = $_SESSION['auth_last'] ?? 0;
 function current_user_role(){ return $_SESSION['user']['role'] ?? 'guest'; }
 function is_admin(){ return (current_user_role()==='admin'); }
 function is_logged_in(){ return !empty($_SESSION['user']); }
-$view = $_GET['view'] ?? 'home';
+$view = $_GET['view'] ?? 'cases';
 function throttle(){
     $now = time();
     if ($now - ($_SESSION['auth_last'] ?? 0) < 3) { sleep(1); }
@@ -367,7 +367,6 @@ if (isset($_GET['logout'])) {
       <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topNav"><span class="navbar-toggler-icon"></span></button>
       <div class="collapse navbar-collapse" id="topNav">
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-<li class="nav-item"><a class="nav-link <?php echo ($view==='home')?'active':''; ?>" href="?view=home">Dashboard</a></li>
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='add')?'active':''; ?>" href="?view=add#add">Add Content</a></li>
@@ -406,108 +405,10 @@ if (isset($_GET['logout'])) {
     </div>
   </nav>
 
-  <!-- Hero / Search -->
-  <?php if ($view === 'home'): ?>
-  <header class="hero border-bottom py-5">
-    <div class="container-xl">
-      <div class="row g-4 align-items-center">
-        <div class="col-lg-7">
-          <h1 class="display-5 fw-bold">Manage Cases & Evidence with Security, Legality & Auditability</h1>
-          <p class="lead text-secondary">A privacy-first workspace for vetted teams to collect, preserve, and review case materials related to alleged predatory activity on TikTok.</p>
-          <div class="input-group input-group-lg mt-4">
-            <span class="input-group-text"><i class="bi bi-search"></i></span>
-            <input type="search" class="form-control" placeholder="Search cases by ID, subject, keyword, tag…" aria-label="Search cases">
-            <button class="btn btn-primary"><i class="bi bi-filter me-1"></i> Filters</button>
-          </div>
-          <div class="mt-3 d-flex gap-2 flex-wrap">
-            <span class="badge text-bg-dark border"><i class="bi bi-hash me-1"></i> grooming</span>
-            <span class="badge text-bg-dark border"><i class="bi bi-hash me-1"></i> messages</span>
-            <span class="badge text-bg-dark border"><i class="bi bi-hash me-1"></i> screenshots</span>
-            <span class="badge text-bg-dark border"><i class="bi bi-hash me-1"></i> escalation</span>
-          </div>
-        </div>
-        <div class="col-lg-5">
-          <!-- Mockup: dashboard preview tile -->
-          <div class="placeholder-tile shadow-sm">
-            <div class="text">
-              <div class="text-center">
-                <i class="bi bi-grid-1x2 display-5 d-block"></i>
-                <span class="small">Dashboard Preview</span>
-              </div>
-            </div>
-          </div>
-          <div class="row g-2 mt-2">
-            <div class="col-6"><div class="placeholder-tile"><div class="text"><span>Case Card</span></div></div></div>
-            <div class="col-6"><div class="placeholder-tile"><div class="text"><span>Media Tile</span></div></div></div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </header>
 
-  <!-- KPI Cards -->
-  <section class="py-4">
-    <div class="container-xl">
-      <div class="row g-3 row-cols-2 row-cols-md-4">
-        <div class="col">
-          <div class="card h-100 glass">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center">
-                <div>
-                  <div class="text-secondary small">Open Cases</div>
-                  <div class="h3 mb-0">42</div>
-                </div>
-                <i class="bi bi-folder2-open fs-3 text-primary"></i>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="col">
-          <div class="card h-100 glass">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center">
-                <div>
-                  <div class="text-secondary small">Items in Review</div>
-                  <div class="h3 mb-0">118</div>
-                </div>
-                <i class="bi bi-eye fs-3"></i>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="col">
-          <div class="card h-100 glass">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center">
-                <div>
-                  <div class="text-secondary small">Flagged</div>
-                  <div class="h3 mb-0">9</div>
-                </div>
-                <i class="bi bi-flag fs-3 text-danger"></i>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="col">
-          <div class="card h-100 glass">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center">
-                <div>
-                  <div class="text-secondary small">Chain-of-Custody OK</div>
-                  <div class="h3 mb-0">99.2%</div>
-                </div>
-                <i class="bi bi-shield-check fs-3 text-success"></i>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-  <?php endif; ?>
 
   <!-- Cases Grid + Right Rail -->
-  <?php if (in_array($view, ['home','cases'], true)): ?>
+  <?php if ($view === 'cases'): ?>
   <main class="py-4" id="cases">
     <div class="container-xl">
       <div class="row g-4">
