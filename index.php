@@ -248,6 +248,8 @@ if (($_POST['action'] ?? '') === 'add_case_note') {
 
     if ($case_id <= 0 || $note === '') {
         flash('error', 'Note text is required.');
+        $redirUrl = trim($_POST['redirect_url'] ?? '');
+        if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
         header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
     }
 
@@ -259,6 +261,8 @@ if (($_POST['action'] ?? '') === 'add_case_note') {
         $_SESSION['sql_error'] = $e->getMessage();
         flash('error', 'Unable to add note.');
     }
+    $redirUrl = trim($_POST['redirect_url'] ?? '');
+    if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
     header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
 }
 
@@ -277,6 +281,8 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
 
     if ($case_id <= 0 || empty($_FILES['evidence_file']['name'])) {
         flash('error', 'Please choose a file.');
+        $redirUrl = trim($_POST['redirect_url'] ?? '');
+        if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
         header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
     }
 
@@ -284,12 +290,12 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     if (!is_dir($uploadDir)) { @mkdir($uploadDir, 0755, true); }
 
     $f = $_FILES['evidence_file'];
-    if ($f['error'] !== UPLOAD_ERR_OK) { flash('error', 'Upload failed with code: '. (int)$f['error']); header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit; }
+    if ($f['error'] !== UPLOAD_ERR_OK) { flash('error', 'Upload failed with code: '. (int)$f['error']); $redirUrl = trim($_POST['redirect_url'] ?? ''); if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; } header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit; }
 
     $safeName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', basename($f['name']));
     $destRel = 'uploads/' . uniqid('ev_', true) . '_' . $safeName;
     $destAbs = __DIR__ . '/' . $destRel;
-    if (!move_uploaded_file($f['tmp_name'], $destAbs)) { flash('error', 'Unable to save uploaded file.'); header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit; }
+    if (!move_uploaded_file($f['tmp_name'], $destAbs)) { flash('error', 'Unable to save uploaded file.'); $redirUrl = trim($_POST['redirect_url'] ?? ''); if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; } header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit; }
 
     $mime = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
     $size = filesize($destAbs) ?: 0;
@@ -303,6 +309,8 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         $_SESSION['sql_error'] = $e->getMessage();
         flash('error', 'Unable to save evidence.');
     }
+    $redirUrl = trim($_POST['redirect_url'] ?? '');
+    if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
     header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
 }
 
@@ -612,8 +620,79 @@ if ($rs && count($rs) > 0):
       <div class="container-xl">
         <div class="d-flex align-items-center justify-content-between mb-3">
           <h2 class="h4 mb-0">Case <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
-          <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+          <div class="d-flex gap-2">
+            <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
+              <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence / Note</button>
+            <?php endif; ?>
+            <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+          </div>
         </div>
+        <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
+  <div class="modal fade" id="addEvidenceModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-cloud-plus me-2"></i>Add Evidence or Note</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <ul class="nav nav-tabs" id="addEvTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+              <button class="nav-link active" id="ev-upload-tab" data-bs-toggle="tab" data-bs-target="#ev-upload-pane" type="button" role="tab">Upload Evidence</button>
+            </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" id="ev-note-tab" data-bs-toggle="tab" data-bs-target="#ev-note-pane" type="button" role="tab">Add Note</button>
+            </li>
+          </ul>
+          <div class="tab-content pt-3">
+            <div class="tab-pane fade show active" id="ev-upload-pane" role="tabpanel">
+              <form class="mb-2" method="post" action="" enctype="multipart/form-data" id="evUploadForm">
+                <input type="hidden" name="action" value="upload_evidence">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+                <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                <div class="row g-2 align-items-end">
+                  <div class="col-md-5">
+                    <label class="form-label">Title</label>
+                    <input type="text" name="title" class="form-control" placeholder="Optional title">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Type</label>
+                    <select name="type" class="form-select">
+                      <option value="image">Image</option>
+                      <option value="pdf">PDF</option>
+                    </select>
+                  </div>
+                  <div class="col-md-4">
+                    <label class="form-label">File</label>
+                    <input type="file" name="evidence_file" class="form-control" accept="image/*,application/pdf" required>
+                  </div>
+                </div>
+              </form>
+            </div>
+            <div class="tab-pane fade" id="ev-note-pane" role="tabpanel">
+              <form class="mb-2" method="post" action="" id="evNoteForm">
+                <input type="hidden" name="action" value="add_case_note">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+                <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                <label class="form-label">Note Text</label>
+                <textarea name="note_text" class="form-control" rows="4" placeholder="Write a concise internal note..." required></textarea>
+              </form>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+          <button class="btn btn-primary" type="submit" form="evUploadForm"><i class="bi bi-cloud-arrow-up me-1"></i> Save Upload</button>
+          <button class="btn btn-success" type="submit" form="evNoteForm"><i class="bi bi-journal-plus me-1"></i> Save Note</button>
+        </div>
+      </div>
+    </div>
+  </div>
+<?php endif; ?>
         <?php if ($viewCase): ?>
           <div class="row g-4">
             <div class="col-lg-4">
