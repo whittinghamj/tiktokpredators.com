@@ -239,6 +239,54 @@ if (($_POST['action'] ?? '') === 'create_case') {
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
 
+// Handle update case (admin only)
+if (($_POST['action'] ?? '') === 'update_case') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $case_code = trim($_POST['case_code'] ?? '');
+    $case_name = trim($_POST['case_name'] ?? '');
+    $person_name = trim($_POST['person_name'] ?? '');
+    $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
+    $initial_summary = trim($_POST['initial_summary'] ?? '');
+    $sensitivity = $_POST['sensitivity'] ?? '';
+    $status = $_POST['status'] ?? '';
+
+    $allowed_sensitivity = ['Standard','Restricted','Sealed'];
+    $allowed_status = ['Open','In Review','Verified','Closed'];
+
+    if ($case_id <= 0 || $case_code === '') {
+        flash('error', 'Invalid case reference.');
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if ($case_name === '' || $initial_summary === '') {
+        flash('error', 'Case name and summary are required.');
+        header('Location: ?admin_case=' . urlencode($case_code) . '#admin-case'); exit;
+    }
+    if (!in_array($sensitivity, $allowed_sensitivity, true)) { $sensitivity = 'Standard'; }
+    if (!in_array($status, $allowed_status, true)) { $status = 'Open'; }
+
+    try {
+        $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
+        $u->execute([
+            $case_name,
+            ($person_name !== '' ? $person_name : null),
+            ($tiktok_username !== '' ? $tiktok_username : null),
+            $initial_summary,
+            $sensitivity,
+            $status,
+            $case_id
+        ]);
+        flash('success', 'Case updated.');
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to update case.');
+    }
+    header('Location: ?admin_case=' . urlencode($case_code) . '#admin-case'); exit;
+}
+
 // Handle add case note (admin only)
 if (($_POST['action'] ?? '') === 'add_case_note') {
     throttle();
@@ -900,7 +948,10 @@ if ($rs && count($rs) > 0):
       <div class="col-lg-4">
         <div class="card glass h-100">
           <div class="card-body">
-            <h3 class="h6 mb-3">Case Details</h3>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <h3 class="h6 mb-0">Case Details</h3>
+              <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal"><i class="bi bi-pencil me-1"></i> Edit</button>
+            </div>
             <div class="small text-secondary">Case Name</div>
             <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
             <div class="small text-secondary">Person Name</div>
@@ -1070,6 +1121,68 @@ if ($rs && count($rs) > 0):
         </div>
       </div>
     </div>
+      <!-- Edit Case Modal (Admin) -->
+      <div class="modal fade" id="editCaseModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>Edit Case Details</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <form method="post" action="" id="editCaseForm">
+                <input type="hidden" name="action" value="update_case">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+                <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($adminCaseCode); ?>">
+                <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
+
+                <div class="row g-2">
+                  <div class="col-md-6">
+                    <label class="form-label">Case Name</label>
+                    <input type="text" name="case_name" class="form-control" value="<?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?>" required>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">TikTok Username</label>
+                    <div class="input-group">
+                      <span class="input-group-text">@</span>
+                      <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars($caseRow['tiktok_username'] ?? ''); ?>">
+                    </div>
+                  </div>
+                </div>
+
+                <div class="row g-2 mt-2">
+                  <div class="col-md-6">
+                    <label class="form-label">Person Name</label>
+                    <input type="text" name="person_name" class="form-control" value="<?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?>">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Sensitivity</label>
+                    <select name="sensitivity" class="form-select" required>
+                      <?php $sensOpts = ['Standard','Restricted','Sealed']; foreach ($sensOpts as $opt) { $sel = (($caseRow['sensitivity'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                    </select>
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Status</label>
+                    <select name="status" class="form-select" required>
+                      <?php $statOpts = ['Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($caseRow['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="mt-3">
+                  <label class="form-label">Initial Summary</label>
+                  <textarea name="initial_summary" class="form-control" rows="4" required><?php echo htmlspecialchars($caseRow['initial_summary'] ?? ''); ?></textarea>
+                </div>
+              </form>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+              <button class="btn btn-primary" type="submit" form="editCaseForm"><i class="bi bi-save me-1"></i> Save Changes</button>
+            </div>
+          </div>
+        </div>
+      </div>
     <?php } else { ?>
       <div class="alert alert-danger"><i class="bi bi-exclamation-octagon me-2"></i>Case not found or unavailable.</div>
     <?php } ?>
