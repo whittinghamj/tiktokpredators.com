@@ -369,7 +369,6 @@ if (isset($_GET['logout'])) {
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='home')?'active':''; ?>" href="?view=home">Dashboard</a></li>
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
-<li class="nav-item"><a class="nav-link <?php echo ($view==='reports')?'active':''; ?>" href="?view=reports#reports">Reports</a></li>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='add')?'active':''; ?>" href="?view=add#add">Add Content</a></li>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
@@ -860,42 +859,6 @@ if (isset($_GET['logout'])) {
 </section>
 <?php } ?>
 
-  <!-- Reports Section (Mock) -->
-  <?php if ($view === 'reports'): ?>
-  <section class="py-5 border-top" id="reports">
-    <div class="container-xl">
-      <div class="d-flex align-items-center justify-content-between mb-3">
-        <h2 class="h4 mb-0">Reports</h2>
-        <div class="btn-group">
-          <button class="btn btn-outline-light btn-sm"><i class="bi bi-download me-1"></i> Export</button>
-          <button class="btn btn-outline-light btn-sm"><i class="bi bi-printer me-1"></i> Print</button>
-        </div>
-      </div>
-      <div class="row g-3">
-        <div class="col-lg-8">
-          <div class="card glass">
-            <div class="card-body">
-              <h3 class="h6">Monthly Activity</h3>
-              <div class="placeholder-tile" style="aspect-ratio: 21/9">
-                <div class="text"><i class="bi bi-graph-up-arrow me-1"></i> Chart placeholder</div>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div class="col-lg-4">
-          <div class="card glass">
-            <div class="card-body">
-              <h3 class="h6">Breakdown</h3>
-              <div class="placeholder-tile" style="aspect-ratio: 1/1">
-                <div class="text"><i class="bi bi-pie-chart me-1"></i> Pie chart placeholder</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-  <?php endif; ?>
 
   <!-- Admin Section (Mock) -->
   <?php if ($view === 'admin' && is_admin()): ?>
