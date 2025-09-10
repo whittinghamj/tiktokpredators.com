@@ -424,52 +424,76 @@ if (isset($_GET['logout'])) {
             </div>
           </div>
           <div class="row g-3 row-cols-1 row-cols-md-2">
-            <!-- Case Card (repeat server-side) -->
-            <div class="col">
-              <div class="card h-100">
-                <div class="card-body">
-                  <div class="d-flex justify-content-between align-items-start">
-                    <div>
-                      <a href="#" class="stretched-link text-decoration-none"><h3 class="h6 mb-1">CASE-2025-0001</h3></a>
-                      <div class="small text-secondary">Subject: <span class="text-white">@example_user123</span></div>
-                    </div>
-                    <span class="badge rounded-pill text-bg-warning-subtle border"><i class="bi bi-hourglass-split me-1"></i> In Review</span>
-                  </div>
-                  <div class="mt-3 d-flex gap-2 flex-wrap">
-                    <span class="badge text-bg-dark border">DMs</span>
-                    <span class="badge text-bg-dark border">Screenshots</span>
-                    <span class="badge text-bg-dark border">Under 18</span>
-                  </div>
-                </div>
-                <div class="card-footer d-flex justify-content-between small">
-                  <span><i class="bi bi-clock"></i> Updated 2h ago</span>
-                  <span><i class="bi bi-people"></i> 3 assignees</span>
-                </div>
-              </div>
+<?php
+try {
+  // Pull recent cases by latest activity (evidence added) or opened date
+  $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+                 COALESCE(ev.cnt, 0) AS evidence_count,
+                 COALESCE(ev.last_added, c.opened_at) AS last_activity
+          FROM cases c
+          LEFT JOIN (
+            SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
+            FROM evidence
+            GROUP BY case_id
+          ) ev ON ev.case_id = c.id
+          ORDER BY last_activity DESC
+          LIMIT 20";
+  $rs = $pdo->query($sql)->fetchAll();
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $e->getMessage();
+  $rs = [];
+}
+
+if ($rs && count($rs) > 0):
+  foreach ($rs as $row):
+    $code  = $row['case_code'];
+    $name  = $row['case_name'] ?: $row['case_code'];
+    $person= $row['person_name'] ?: '';
+    $tuser = $row['tiktok_username'] ? '@'.htmlspecialchars($row['tiktok_username']) : '';
+    $sum   = trim($row['initial_summary'] ?? '');
+    $sum   = $sum !== '' ? mb_strimwidth($sum, 0, 180, '…', 'UTF-8') : 'No summary provided.';
+    $evc   = (int)($row['evidence_count'] ?? 0);
+    $status= $row['status'] ?? 'Open';
+    $sens  = $row['sensitivity'] ?? 'Standard';
+    $opened= $row['opened_at'] ?? '';
+    $last  = $row['last_activity'] ?? $opened;
+?>
+  <div class="col">
+    <div class="card h-100">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-start">
+          <div>
+            <a href="?admin_case=<?php echo urlencode($code); ?>#admin-case" class="stretched-link text-decoration-none"><h3 class="h6 mb-1"><?php echo htmlspecialchars($name); ?></h3></a>
+            <div class="small text-secondary">
+              <?php if ($person !== ''): ?>Subject: <span class="text-white"><?php echo htmlspecialchars($person); ?></span><?php endif; ?>
+              <?php if ($tuser !== ''): ?><?php if($person!==''): ?>&nbsp;•&nbsp;<?php endif; ?><span class="text-white"><?php echo $tuser; ?></span><?php endif; ?>
             </div>
-            <div class="col">
-              <div class="card h-100">
-                <div class="card-body">
-                  <div class="d-flex justify-content-between align-items-start">
-                    <div>
-                      <a href="#" class="stretched-link text-decoration-none"><h3 class="h6 mb-1">CASE-2025-0002</h3></a>
-                      <div class="small text-secondary">Subject: <span class="text-white">@subject_handle</span></div>
-                    </div>
-                    <span class="badge rounded-pill text-bg-success-subtle border"><i class="bi bi-check2-circle me-1"></i> Verified</span>
-                  </div>
-                  <div class="mt-3 d-flex gap-2 flex-wrap">
-                    <span class="badge text-bg-dark border">Video</span>
-                    <span class="badge text-bg-dark border">Metadata</span>
-                  </div>
-                </div>
-                <div class="card-footer d-flex justify-content-between small">
-                  <span><i class="bi bi-clock"></i> Updated yesterday</span>
-                  <span><i class="bi bi-people"></i> 1 assignee</span>
-                </div>
-              </div>
-            </div>
-            <!-- /Case Card -->
           </div>
+          <span class="badge rounded-pill text-bg-dark border"><?php echo htmlspecialchars($status); ?></span>
+        </div>
+        <p class="small mt-3 mb-2 text-secondary"><?php echo htmlspecialchars($sum); ?></p>
+        <div class="mt-2 d-flex gap-2 flex-wrap">
+          <span class="badge text-bg-dark border"><i class="bi bi-files me-1"></i><?php echo $evc; ?> evidence</span>
+          <span class="badge text-bg-dark border"><i class="bi bi-shield-lock me-1"></i><?php echo htmlspecialchars($sens); ?></span>
+          <span class="badge text-bg-dark border" title="Last activity">
+            <i class="bi bi-clock-history me-1"></i><?php echo htmlspecialchars(date('d M Y H:i', strtotime($last))); ?>
+          </span>
+        </div>
+      </div>
+      <div class="card-footer d-flex justify-content-between align-items-center small">
+        <span><i class="bi bi-hash"></i> <?php echo htmlspecialchars($code); ?></span>
+        <div class="d-flex gap-2">
+          <a class="btn btn-sm btn-outline-light" href="?admin_case=<?php echo urlencode($code); ?>#admin-case" title="Open case for details"><i class="bi bi-box-arrow-up-right me-1"></i>Open</a>
+        </div>
+      </div>
+    </div>
+  </div>
+<?php endforeach; else: ?>
+  <div class="col-12">
+    <div class="alert alert-secondary">No cases found yet.</div>
+  </div>
+<?php endif; ?>
+</div>
 
           <!-- Evidence Gallery Mock -->
           <div id="evidence" class="mt-4">
