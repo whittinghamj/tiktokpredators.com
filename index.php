@@ -10,7 +10,7 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // Evidence storage path (absolute directory where files are stored, outside web root if possible)
-$storagePath = '/var/www/html/tiktokpredators.com/uploads/';
+$GLOBALS['storagePath'] = '/var/www/html/tiktokpredators.com/uploads/';
 
 // Flash helper
 function flash(string $key, ?string $val = null){
@@ -305,16 +305,14 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $hash = hash_file('sha256', $destAbs);
 
     try {
-        // Resolve storage path (absolute directory where files are stored)
-        $storagePath = rtrim(getenv('EVIDENCE_STORAGE_PATH') ?: realpath($uploadDir), '/').'/';
-
+        // Use global storage path
         $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
             $case_id,
             $type,
             ($title !== '' ? $title : $safeName),
             $destRel,
-            $storagePath,
+            $GLOBALS['storagePath'],
             $safeName,
             $mime,
             $size,
