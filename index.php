@@ -28,6 +28,10 @@ function check_csrf(){ return isset($_POST['csrf_token']) && hash_equals($_SESSI
 // VERY simple throttle (per-session)
 $_SESSION['auth_attempts'] = $_SESSION['auth_attempts'] ?? 0;
 $_SESSION['auth_last'] = $_SESSION['auth_last'] ?? 0;
+function current_user_role(){ return $_SESSION['user']['role'] ?? 'guest'; }
+function is_admin(){ return (current_user_role()==='admin'); }
+function is_logged_in(){ return !empty($_SESSION['user']); }
+$view = $_GET['view'] ?? 'home';
 function throttle(){
     $now = time();
     if ($now - ($_SESSION['auth_last'] ?? 0) < 3) { sleep(1); }
@@ -363,11 +367,14 @@ if (isset($_GET['logout'])) {
       <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topNav"><span class="navbar-toggler-icon"></span></button>
       <div class="collapse navbar-collapse" id="topNav">
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
-          <li class="nav-item"><a class="nav-link active" href="#">Dashboard</a></li>
-          <li class="nav-item"><a class="nav-link" href="#cases">Cases</a></li>
-          <li class="nav-item"><a class="nav-link" href="#evidence">Evidence</a></li>
-          <li class="nav-item"><a class="nav-link" href="#reports">Reports</a></li>
-          <li class="nav-item"><a class="nav-link" href="#admin">Admin</a></li>
+<li class="nav-item"><a class="nav-link <?php echo ($view==='home')?'active':''; ?>" href="?view=home">Dashboard</a></li>
+<li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
+<li class="nav-item"><a class="nav-link <?php echo ($view==='reports')?'active':''; ?>" href="?view=reports#reports">Reports</a></li>
+<?php if (is_admin()): ?>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='add')?'active':''; ?>" href="?view=add#add">Add Content</a></li>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='admin')?'active':''; ?>" href="?view=admin#admin">Admin</a></li>
+<?php endif; ?>
         </ul>
         <div class="d-flex align-items-center gap-2">
           <!-- Theme toggle + auth state -->
@@ -376,6 +383,9 @@ if (isset($_GET['logout'])) {
             <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i> Register</button>
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
           <?php else: ?>
+            <?php if (is_admin()): ?>
+              <a class="btn btn-success btn-sm" href="?view=add#add"><i class="bi bi-cloud-plus me-1"></i> Add</a>
+            <?php endif; ?>
             <div class="dropdown">
               <?php $dn = $_SESSION['user']['display_name'] ?? ''; $label = $dn !== '' ? $dn : ($_SESSION['user']['email'] ?? 'Account'); ?>
               <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
@@ -398,6 +408,7 @@ if (isset($_GET['logout'])) {
   </nav>
 
   <!-- Hero / Search -->
+  <?php if ($view === 'home'): ?>
   <header class="hero border-bottom py-5">
     <div class="container-xl">
       <div class="row g-4 align-items-center">
@@ -494,8 +505,10 @@ if (isset($_GET['logout'])) {
       </div>
     </div>
   </section>
+  <?php endif; ?>
 
   <!-- Cases Grid + Right Rail -->
+  <?php if (in_array($view, ['home','cases'], true)): ?>
   <main class="py-4" id="cases">
     <div class="container-xl">
       <div class="row g-4">
@@ -649,6 +662,7 @@ if (isset($_GET['logout'])) {
       </div>
     </div>
   </main>
+  <?php endif; ?>
 
   <?php
   $adminCaseCode = $_GET['admin_case'] ?? '';
@@ -847,6 +861,7 @@ if (isset($_GET['logout'])) {
 <?php } ?>
 
   <!-- Reports Section (Mock) -->
+  <?php if ($view === 'reports'): ?>
   <section class="py-5 border-top" id="reports">
     <div class="container-xl">
       <div class="d-flex align-items-center justify-content-between mb-3">
@@ -880,8 +895,10 @@ if (isset($_GET['logout'])) {
       </div>
     </div>
   </section>
+  <?php endif; ?>
 
   <!-- Admin Section (Mock) -->
+  <?php if ($view === 'admin' && is_admin()): ?>
   <section class="py-5 border-top" id="admin">
     <div class="container-xl">
       <div class="row g-4">
@@ -930,6 +947,118 @@ if (isset($_GET['logout'])) {
       </div>
     </div>
   </section>
+  <?php endif; ?>
+
+  <?php if ($view === 'add'): ?>
+    <?php if (!is_admin()): ?>
+      <section class="py-5 border-top" id="add">
+        <div class="container-xl">
+          <div class="alert alert-danger"><i class="bi bi-shield-lock me-2"></i>Unauthorized. Admins only.</div>
+        </div>
+      </section>
+    <?php else: ?>
+      <section class="py-5 border-top" id="add">
+        <div class="container-xl">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <h2 class="h4 mb-0">Add Content / Upload Evidence</h2>
+            <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-grid-1x2 me-1"></i> Back to Cases</a>
+          </div>
+          <div class="card glass">
+            <div class="card-body">
+              <form class="mb-3" method="post" action="" enctype="multipart/form-data">
+                <input type="hidden" name="action" value="upload_evidence">
+                <?php csrf_field(); ?>
+                <div class="row g-2 align-items-end">
+                  <div class="col-md-3">
+                    <label class="form-label">Case ID (numeric)</label>
+                    <input type="number" name="case_id" class="form-control" placeholder="e.g., 123" required>
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Case Code</label>
+                    <input type="text" name="case_code" class="form-control" placeholder="e.g., CASE-2025-AB12CD34" required>
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Title</label>
+                    <input type="text" name="title" class="form-control" placeholder="Optional title">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Type</label>
+                    <select name="type" class="form-select">
+                      <option value="image">Image</option>
+                      <option value="video">Video</option>
+                      <option value="audio">Audio</option>
+                      <option value="pdf">PDF</option>
+                      <option value="doc">Document</option>
+                      <option value="other" selected>Other</option>
+                    </select>
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label">File</label>
+                    <input type="file" name="evidence_file" class="form-control" required>
+                  </div>
+                </div>
+                <div class="text-end mt-3"><button class="btn btn-primary" type="submit"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button></div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+    <?php endif; ?>
+  <?php endif; ?>
+
+  <?php if ($view === 'users'): ?>
+    <?php if (!is_admin()): ?>
+      <section class="py-5 border-top" id="users">
+        <div class="container-xl">
+          <div class="alert alert-danger"><i class="bi bi-shield-lock me-2"></i>Unauthorized. Admins only.</div>
+        </div>
+      </section>
+    <?php else: ?>
+      <section class="py-5 border-top" id="users">
+        <div class="container-xl">
+          <div class="row g-4">
+            <div class="col-lg-8">
+              <div class="card glass h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-2">
+                    <h2 class="h6 mb-0">User Management</h2>
+                    <button class="btn btn-sm btn-primary"><i class="bi bi-person-plus me-1"></i> Invite</button>
+                  </div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>User</th><th>Role</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
+                      <tbody>
+                        <tr>
+                          <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> Jane Doe</td>
+                          <td><span class="badge rounded-pill badge-role">Analyst</span></td>
+                          <td><span class="badge text-bg-success-subtle border">Active</span></td>
+                          <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
+                        </tr>
+                        <tr>
+                          <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> John Smith</td>
+                          <td><span class="badge rounded-pill text-bg-secondary">Viewer</span></td>
+                          <td><span class="badge text-bg-warning-subtle border">Pending</span></td>
+                          <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col-lg-4">
+              <div class="card glass h-100">
+                <div class="card-body">
+                  <h2 class="h6 mb-2">Notes</h2>
+                  <div class="alert alert-warning small"><i class="bi bi-info-circle me-2"></i>Role management coming soon.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    <?php endif; ?>
+  <?php endif; ?>
 
   <footer class="border-top py-4">
     <div class="container-xl d-flex flex-wrap justify-content-between align-items-center gap-3">
