@@ -628,26 +628,6 @@ if ($rs && count($rs) > 0):
 <?php endif; ?>
 </div>
 
-          <!-- Evidence Gallery Mock -->
-          <div id="evidence" class="mt-4">
-            <div class="d-flex align-items-center justify-content-between mb-2">
-              <h2 class="h5 mb-0">Evidence Gallery</h2>
-              <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
-                <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#uploadModal">
-                  <i class="bi bi-cloud-arrow-up me-1"></i> Upload
-                </button>
-              <?php endif; ?>
-            </div>
-            <div class="row g-2 row-cols-2 row-cols-md-3">
-              <!-- Mock tiles -->
-              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-file-earmark-image me-1"></i> image_001.png</div></div></div>
-              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-film me-1"></i> clip_12.mp4</div></div></div>
-              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-chat-dots me-1"></i> dm_export.json</div></div></div>
-              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-filetype-pdf me-1"></i> warrant.pdf</div></div></div>
-              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-mic me-1"></i> call_05.m4a</div></div></div>
-              <div class="col"><div class="placeholder-tile"><div class="text"><i class="bi bi-filetype-log me-1"></i> chain.log</div></div></div>
-            </div>
-          </div>
         </div>
 
         <!-- Right Rail: Case Detail / Audit -->
