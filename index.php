@@ -543,6 +543,15 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         $mime = 'text/url';
         $size = 0;
         $hash = hash('sha256', $url);
+        // Derive a non-null "original_filename" from the URL to satisfy NOT NULL constraint
+        $urlPath = (string)parse_url($url, PHP_URL_PATH);
+        $origName = basename($urlPath);
+        if ($origName === '' || $origName === '/' || $origName === '.') {
+            $host = (string)parse_url($url, PHP_URL_HOST);
+            $origName = ($host !== '' ? $host : 'url') . '.link';
+        }
+        // Ensure it is a safe filename
+        $origName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', $origName);
         try {
             $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
             $stmt->execute([
@@ -551,7 +560,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
                 ($title !== '' ? $title : $url),
                 $url,                 // store destination URL in filepath
                 $storagePath,
-                null,
+                $origName,
                 $mime,
                 $size,
                 $hash,
@@ -574,7 +583,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
                         ($title !== '' ? $title : $url),
                         $url,
                         $storagePath,
-                        null,
+                        $origName,
                         $mime,
                         $size,
                         $hash,
@@ -670,16 +679,24 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
                 if ($ru!==''){ header('Location: '.$ru); exit; }
                 header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
             }
+            // Recompute a safe original filename for URL updates
+            $urlPath = (string)parse_url($url, PHP_URL_PATH);
+            $origName = basename($urlPath);
+            if ($origName === '' || $origName === '/' || $origName === '.') {
+                $host = (string)parse_url($url, PHP_URL_HOST);
+                $origName = ($host !== '' ? $host : 'url') . '.link';
+            }
+            $origName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', $origName);
             try {
-                $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ?, filepath = ?, mime_type = "text/url" WHERE id = ? AND case_id = ? LIMIT 1');
-                $u->execute([$title, $type, $url, $evidence_id, $case_id]);
+                $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ?, filepath = ?, original_filename = ?, mime_type = "text/url" WHERE id = ? AND case_id = ? LIMIT 1');
+                $u->execute([$title, $type, $url, $origName, $evidence_id, $case_id]);
             } catch (Throwable $e) {
                 $_SESSION['sql_error'] = $e->getMessage();
                 $msg = strtolower($e->getMessage());
                 $enumIssue = (strpos($msg, 'incorrect enum value') !== false) || (strpos($msg, 'data truncated for column') !== false);
                 if ($enumIssue) {
-                    $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ?, filepath = ?, mime_type = "text/url" WHERE id = ? AND case_id = ? LIMIT 1');
-                    $u->execute([$title, 'other', $url, $evidence_id, $case_id]);
+                    $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ?, filepath = ?, original_filename = ?, mime_type = "text/url" WHERE id = ? AND case_id = ? LIMIT 1');
+                    $u->execute([$title, 'other', $url, $origName, $evidence_id, $case_id]);
                     flash('success', 'Evidence updated (stored as type "other" due to DB enum).');
                 } else {
                     throw $e;
