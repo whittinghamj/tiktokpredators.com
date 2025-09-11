@@ -597,7 +597,7 @@ if (isset($_GET['logout'])) {
   <main class="py-4" id="cases">
     <div class="container-xl">
       <div class="row g-4">
-        <div class="col-lg-8 case-grid">
+        <div class="col-12 case-grid">
           <div class="d-flex align-items-center justify-content-between mb-2">
             <h2 class="h4 mb-0">Recent Cases</h2>
             <div class="btn-group">
@@ -681,8 +681,6 @@ if ($rs && count($rs) > 0):
 </div>
 
         </div>
-
-        <!-- Right Rail: Case Detail / Audit -->
       </div>
     </div>
   </main>
