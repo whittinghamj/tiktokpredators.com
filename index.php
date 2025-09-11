@@ -865,7 +865,14 @@ if ($rs && count($rs) > 0):
             <div class="col-lg-4">
               <div class="card glass h-100">
                 <div class="card-body">
-                  <h3 class="h6 mb-3">Case Details</h3>
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h3 class="h6 mb-0">Case Details</h3>
+                    <?php if (is_admin()): ?>
+                      <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal">
+                        <i class="bi bi-pencil me-1"></i> Edit
+                      </button>
+                    <?php endif; ?>
+                  </div>
                   <div class="small text-secondary">Case Name</div>
                   <div class="mb-2"><?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?></div>
                   <div class="small text-secondary">Person Name</div>
@@ -939,6 +946,69 @@ if ($rs && count($rs) > 0):
               </div>
             </div>
           </div>
+<?php if (is_admin() && $viewCase): ?>
+  <div class="modal fade" id="editCaseModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>Edit Case Details</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <form method="post" action="" id="editCaseFormView">
+            <input type="hidden" name="action" value="update_case">
+            <?php csrf_field(); ?>
+            <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+            <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+            <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+
+            <div class="row g-2">
+              <div class="col-md-6">
+                <label class="form-label">Case Name</label>
+                <input type="text" name="case_name" class="form-control" value="<?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?>" required>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">TikTok Username</label>
+                <div class="input-group">
+                  <span class="input-group-text">@</span>
+                  <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars($viewCase['tiktok_username'] ?? ''); ?>">
+                </div>
+              </div>
+            </div>
+
+            <div class="row g-2 mt-2">
+              <div class="col-md-6">
+                <label class="form-label">Person Name</label>
+                <input type="text" name="person_name" class="form-control" value="<?php echo htmlspecialchars($viewCase['person_name'] ?? ''); ?>">
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">Sensitivity</label>
+                <select name="sensitivity" class="form-select" required>
+                  <?php $sensOpts = ['Standard','Restricted','Sealed']; foreach ($sensOpts as $opt) { $sel = (($viewCase['sensitivity'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                </select>
+              </div>
+              <div class="col-md-3">
+                <label class="form-label">Status</label>
+                <select name="status" class="form-select" required>
+                  <?php $statOpts = ['Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($viewCase['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                </select>
+              </div>
+            </div>
+
+            <div class="mt-3">
+              <label class="form-label">Initial Summary</label>
+              <textarea name="initial_summary" class="form-control" rows="4" required><?php echo htmlspecialchars($viewCase['initial_summary'] ?? ''); ?></textarea>
+            </div>
+          </form>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit" form="editCaseFormView"><i class="bi bi-save me-1"></i> Save Changes</button>
+        </div>
+      </div>
+    </div>
+  </div>
+<?php endif; ?>
         <?php else: ?>
           <div class="alert alert-danger"><i class="bi bi-exclamation-octagon me-2"></i>Case not found or unavailable.</div>
         <?php endif; ?>
