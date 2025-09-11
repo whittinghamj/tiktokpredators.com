@@ -415,11 +415,11 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
     if (!$hash) { $hash = hash('sha256', $note); }
 
     try {
-        // Store as an evidence row of type 'note'
+        // Store as an evidence row of type 'other'
         $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
             $case_id,
-            'note',
+            'other',
             $title,
             $destRel,
             $storagePath,
@@ -981,7 +981,7 @@ if ($rs && count($rs) > 0):
                             <td><?php echo htmlspecialchars($e['type']); ?></td>
                             <td><?php echo htmlspecialchars($e['title']); ?></td>
                             <td>
-                              <?php if (($e['type'] ?? '') === 'note') { ?>
+                              <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain' && strpos($e['filepath'], 'uploads/notes/') === 0)) { ?>
                                 <span class="small text-secondary" title="Evidence note">📝 <?php echo htmlspecialchars(mb_strimwidth($e['title'] ?? '', 0, 80, '…', 'UTF-8')); ?></span>
                               <?php } else { ?>
                                 <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
@@ -1253,7 +1253,7 @@ if ($rs && count($rs) > 0):
                       <td><?php echo htmlspecialchars($e['type']); ?></td>
                       <td><?php echo htmlspecialchars($e['title']); ?></td>
                       <td>
-                        <?php if (($e['type'] ?? '') === 'note') { ?>
+                        <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain' && strpos($e['filepath'], 'uploads/notes/') === 0)) { ?>
                           <span class="small text-secondary" title="Evidence note">📝 <?php echo htmlspecialchars(mb_strimwidth($e['title'] ?? '', 0, 80, '…', 'UTF-8')); ?></span>
                         <?php } else { ?>
                           <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
