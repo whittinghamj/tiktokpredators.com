@@ -82,6 +82,84 @@ catch (Throwable $e) {
     $_SESSION['auth_tab'] = 'register';
 }
 
+// Secure evidence streaming endpoint
+if (($_GET['action'] ?? '') === 'serve_evidence') {
+    $eid = (int)($_GET['id'] ?? 0);
+    if ($eid <= 0) { http_response_code(400); exit('Bad request'); }
+    try {
+        $q = $pdo->prepare('SELECT e.id, e.filepath, e.mime_type, e.type, e.case_id, c.sensitivity FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? LIMIT 1');
+        $q->execute([$eid]);
+        $row = $q->fetch();
+    } catch (Throwable $e) {
+        http_response_code(500); exit('Server error');
+    }
+    if (!$row) { http_response_code(404); exit('Not found'); }
+    $rel = $row['filepath'] ?? '';
+    $mime = $row['mime_type'] ?? 'application/octet-stream';
+    $type = $row['type'] ?? 'other';
+    $sens = $row['sensitivity'] ?? 'Standard';
+    $abs  = __DIR__ . '/' . ltrim($rel, '/');
+    $uploadsRoot = realpath(__DIR__ . '/uploads');
+    $absReal = @realpath($abs);
+    // Basic path safety
+    if (!$absReal || !$uploadsRoot || strncmp($absReal, $uploadsRoot, strlen($uploadsRoot)) !== 0) {
+        http_response_code(403); exit('Forbidden');
+    }
+    if (!is_file($absReal)) { http_response_code(404); exit('Not found'); }
+
+    // Send restrictive headers
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: private, no-transform');
+
+    $isImage = (strpos($mime, 'image/') === 0);
+    $isAdmin = is_admin();
+    $isRestricted = ($sens === 'Restricted');
+
+    // For restricted cases: non-admins must not get raw images.
+    if ($isRestricted && !$isAdmin) {
+        if ($isImage) {
+            // Render a blurred, reduced version server-side using GD
+            $data = @file_get_contents($absReal);
+            if ($data === false) { http_response_code(404); exit('Not found'); }
+            $img = @imagecreatefromstring($data);
+            if (!$img) { http_response_code(415); exit('Unsupported media'); }
+
+            // Downscale to max width 640 (keeping aspect)
+            $w = imagesx($img); $h = imagesy($img);
+            $maxW = 640;
+            if ($w > $maxW) {
+                $nw = $maxW; $nh = (int)round($h * ($maxW / $w));
+                $small = imagecreatetruecolor($nw, $nh);
+                imagecopyresampled($small, $img, 0, 0, 0, 0, $nw, $nh, $w, $h);
+                imagedestroy($img);
+                $img = $small;
+            }
+            // Apply heavy gaussian blur
+            for ($i = 0; $i < 6; $i++) { @imagefilter($img, IMG_FILTER_GAUSSIAN_BLUR); }
+
+            header('Content-Type: image/jpeg');
+            // Prevent download as "real" with generic filename
+            header('Content-Disposition: inline; filename="restricted.jpg"');
+            imagejpeg($img, null, 60);
+            imagedestroy($img);
+            exit;
+        } else {
+            // For non-images in restricted cases, block direct access
+            http_response_code(403); exit('Restricted');
+        }
+    }
+
+    // Non-restricted OR admin: stream raw file
+    $size = @filesize($absReal);
+    header('Content-Type: ' . $mime);
+    if ($size) { header('Content-Length: ' . $size); }
+    header('Content-Disposition: inline; filename="' . basename($absReal) . '"');
+    $fp = fopen($absReal, 'rb');
+    if ($fp) { fpassthru($fp); fclose($fp); }
+    else { readfile($absReal); }
+    exit;
+}
+
 // Handle login POST
 if (($_POST['action'] ?? '') === 'login') {
     throttle();
@@ -1011,7 +1089,7 @@ if ($rs && count($rs) > 0):
                                         data-bs-toggle="modal" data-bs-target="#evidenceModal"
                                         data-id="<?php echo (int)$e['id']; ?>"
                                         data-case-id="<?php echo (int)$viewCaseId; ?>"
-                                        data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                        data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
                                         data-title="<?php echo htmlspecialchars($e['title']); ?>"
                                         data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
                                         data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
@@ -1020,7 +1098,7 @@ if ($rs && count($rs) > 0):
                                 <?php if (is_admin()): ?>
                                   <div class="btn-group ms-1">
                                     <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
                                       Edit
                                     </button>
                                     <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
@@ -1303,7 +1381,7 @@ if ($rs && count($rs) > 0):
                                   data-bs-toggle="modal" data-bs-target="#evidenceModal"
                                   data-id="<?php echo (int)$e['id']; ?>"
                                   data-case-id="<?php echo (int)$caseId; ?>"
-                                  data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                  data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
                                   data-title="<?php echo htmlspecialchars($e['title']); ?>"
                                   data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
                                   data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
@@ -1311,7 +1389,7 @@ if ($rs && count($rs) > 0):
                           </button>
                           <div class="btn-group ms-1">
                             <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                    data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                    data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
                               Edit
                             </button>
                             <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
@@ -1343,7 +1421,7 @@ if ($rs && count($rs) > 0):
               <?php if ($ev) { $hasImg=false; foreach ($ev as $e) { if ($e['type']==='image') { $hasImg=true; ?>
                 <div class="col-6 col-md-4">
                   <div class="card h-100">
-                    <img src="<?php echo htmlspecialchars($e['filepath']); ?>" class="card-img-top<?php echo (!empty($tp_isRestrictedForNonAdmin) && $tp_isRestrictedForNonAdmin) ? ' restricted-blur' : ''; ?>" alt="">
+                    <img src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" class="card-img-top<?php echo (!empty($tp_isRestrictedForNonAdmin) && $tp_isRestrictedForNonAdmin) ? ' restricted-blur' : ''; ?>" alt="">
                     <div class="card-body p-2">
                       <div class="small text-truncate" title="<?php echo htmlspecialchars($e['title']); ?>"><?php echo htmlspecialchars($e['title']); ?></div>
                     </div>
