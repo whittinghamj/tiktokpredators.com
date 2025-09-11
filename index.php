@@ -918,7 +918,6 @@ if (isset($_GET['logout'])) {
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='admin')?'active':''; ?>" href="?view=admin#admin">Admin</a></li>
 <?php endif; ?>
         </ul>
         <div class="d-flex align-items-center gap-2">
