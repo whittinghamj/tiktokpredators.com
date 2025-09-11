@@ -671,8 +671,7 @@ if (isset($_GET['logout'])) {
 <?php endif; ?>
         </ul>
         <div class="d-flex align-items-center gap-2">
-          <!-- Theme toggle + auth state -->
-          <button id="themeToggle" class="btn btn-outline-light btn-sm" title="Toggle theme"><i class="bi bi-moon-stars"></i></button>
+          <!-- Auth state -->
           <?php if (empty($_SESSION['user'])): ?>
             <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i> Register</button>
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
