@@ -135,7 +135,7 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
                 $img = $small;
             }
             // Apply heavy gaussian blur
-            for ($i = 0; $i < 6; $i++) { @imagefilter($img, IMG_FILTER_GAUSSIAN_BLUR); }
+            for ($i = 0; $i < 8; $i++) { @imagefilter($img, IMG_FILTER_GAUSSIAN_BLUR); }
 
             header('Content-Type: image/jpeg');
             // Prevent download as "real" with generic filename
