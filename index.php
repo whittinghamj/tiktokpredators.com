@@ -393,19 +393,38 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
         header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
     }
 
+    // Prepare safe title (truncate to 255 chars to avoid DB overflow)
+    $title = mb_substr($note, 0, 255, 'UTF-8');
+
+    // Persist full note text to a file (so we don't lose long notes)
+    $notesDir = __DIR__ . '/uploads/notes';
+    if (!is_dir($notesDir)) { @mkdir($notesDir, 0755, true); }
+    $filename = 'note_' . uniqid('', true) . '.txt';
+    $destAbs = $notesDir . '/' . $filename;
+    $destRel = 'uploads/notes/' . $filename;
+    $writeOk = @file_put_contents($destAbs, $note);
+    if ($writeOk === false) {
+        flash('error', 'Unable to store note file.');
+        if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
+        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+    }
+
+    $mime = 'text/plain';
+    $size = filesize($destAbs) ?: strlen($note);
+    $hash = @hash_file('sha256', $destAbs);
+    if (!$hash) { $hash = hash('sha256', $note); }
+
     try {
-        $hash = hash('sha256', $note);
-        $size = strlen($note);
-        // Save as an evidence row of type 'note'. Store text in title; no file path needed.
+        // Store as an evidence row of type 'note'
         $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
             $case_id,
             'note',
-            $note,
-            '',                 // filepath
+            $title,
+            $destRel,
             $storagePath,
-            'note.txt',         // original filename placeholder
-            'text/plain',       // mime type
+            $filename,
+            $mime,
             $size,
             $hash,
             $hash,
