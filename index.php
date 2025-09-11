@@ -982,7 +982,30 @@ if ($rs && count($rs) > 0):
                             <td><?php echo htmlspecialchars($e['title']); ?></td>
                             <td>
                               <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain' && strpos($e['filepath'], 'uploads/notes/') === 0)) { ?>
-                                <span class="small text-secondary" title="Evidence note">📝 <?php echo htmlspecialchars(mb_strimwidth($e['title'] ?? '', 0, 80, '…', 'UTF-8')); ?></span>
+                                <button type="button" class="btn btn-sm btn-outline-light btn-view-note"
+                                        data-bs-toggle="modal" data-bs-target="#noteModal"
+                                        data-id="<?php echo (int)$e['id']; ?>"
+                                        data-case-id="<?php echo (int)$viewCaseId; ?>"
+                                        data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                        data-title="<?php echo htmlspecialchars($e['title'] ?? 'Note'); ?>">
+                                  View
+                                </button>
+                                <?php if (is_admin()): ?>
+                                  <div class="btn-group ms-1">
+                                    <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                      Edit
+                                    </button>
+                                    <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                      <input type="hidden" name="action" value="delete_evidence">
+                                      <?php csrf_field(); ?>
+                                      <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                      <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                                      <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                                      <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                    </form>
+                                  </div>
+                                <?php endif; ?>
                               <?php } else { ?>
                                 <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
                                         data-bs-toggle="modal" data-bs-target="#evidenceModal"
@@ -1254,7 +1277,28 @@ if ($rs && count($rs) > 0):
                       <td><?php echo htmlspecialchars($e['title']); ?></td>
                       <td>
                         <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain' && strpos($e['filepath'], 'uploads/notes/') === 0)) { ?>
-                          <span class="small text-secondary" title="Evidence note">📝 <?php echo htmlspecialchars(mb_strimwidth($e['title'] ?? '', 0, 80, '…', 'UTF-8')); ?></span>
+                          <button type="button" class="btn btn-sm btn-outline-light btn-view-note"
+                                  data-bs-toggle="modal" data-bs-target="#noteModal"
+                                  data-id="<?php echo (int)$e['id']; ?>"
+                                  data-case-id="<?php echo (int)$caseId; ?>"
+                                  data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                  data-title="<?php echo htmlspecialchars($e['title'] ?? 'Note'); ?>">
+                            View
+                          </button>
+                          <div class="btn-group ms-1">
+                            <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                    data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                              Edit
+                            </button>
+                            <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                              <input type="hidden" name="action" value="delete_evidence">
+                              <?php csrf_field(); ?>
+                              <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                              <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+                              <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
+                              <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                            </form>
+                          </div>
                         <?php } else { ?>
                           <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
                                   data-bs-toggle="modal" data-bs-target="#evidenceModal"
@@ -1835,5 +1879,51 @@ if ($rs && count($rs) > 0):
     })();
   });
   </script>
+
+  <script>
+document.addEventListener('click', function (ev) {
+  var btn = ev.target.closest('.btn-view-note');
+  if (!btn) return;
+  var src = btn.getAttribute('data-src') || '';
+  var title = btn.getAttribute('data-title') || 'Note';
+  var contentEl = document.getElementById('noteModalContent');
+  var titleEl = document.getElementById('noteModalTitle');
+  var rawEl = document.getElementById('noteModalOpenRaw');
+  if (contentEl) contentEl.textContent = 'Loading…';
+  if (titleEl) titleEl.textContent = title;
+  if (rawEl) rawEl.href = src;
+
+  if (src) {
+    fetch(src, { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.text() : Promise.reject(new Error('Unable to load note')); })
+      .then(function (txt) { if (contentEl) contentEl.textContent = txt; })
+      .catch(function () { if (contentEl) contentEl.textContent = 'Unable to load note.'; });
+  } else {
+    if (contentEl) contentEl.textContent = 'No note source found.';
+  }
+}, false);
+</script>
+
+  <div class="modal fade" id="noteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-journal-text me-2"></i><span id="noteModalTitle">Note</span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="border rounded p-3 bg-body-tertiary" style="max-height:60vh;overflow:auto;">
+          <pre class="mb-0" id="noteModalContent" style="white-space:pre-wrap;word-wrap:break-word;"></pre>
+        </div>
+        <div class="mt-2 small">
+          <a id="noteModalOpenRaw" href="#" target="_blank" rel="noopener">Open raw file</a>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
   </body>
   </html>
