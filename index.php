@@ -300,7 +300,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
     }
     if ($case_name === '' || $initial_summary === '') {
         flash('error', 'Case name and summary are required.');
-        header('Location: ?admin_case=' . urlencode($case_code) . '#admin-case'); exit;
+        header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
     }
     if (!in_array($sensitivity, $allowed_sensitivity, true)) { $sensitivity = 'Standard'; }
     if (!in_array($status, $allowed_status, true)) { $status = 'Open'; }
@@ -343,7 +343,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
         $_SESSION['sql_error'] = $e->getMessage();
         flash('error', 'Unable to update case.');
     }
-    header('Location: ?admin_case=' . urlencode($case_code) . '#admin-case'); exit;
+    header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
 }
 
 // Handle add case note (admin only)
