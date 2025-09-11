@@ -805,6 +805,38 @@ if (($_POST['action'] ?? '') === 'delete_case') {
     header('Location: ?view=cases#cases'); exit;
 }
 
+// Handle delete user (admin only)
+if (($_POST['action'] ?? '') === 'delete_user') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $user_id = (int)($_POST['user_id'] ?? 0);
+    $ru = trim($_POST['redirect_url'] ?? '?view=users#users');
+
+    if ($user_id <= 0) { flash('error', 'Invalid user.'); header('Location: '. $ru); exit; }
+    if (($user_id === (int)($_SESSION['user']['id'] ?? 0))) { flash('error', 'You cannot delete your own account.'); header('Location: '. $ru); exit; }
+
+    try {
+        // Best-effort nullify foreign keys if they exist (avoid FK constraint errors)
+        try { $pdo->prepare('UPDATE evidence SET uploaded_by = NULL WHERE uploaded_by = ?')->execute([$user_id]); } catch (Throwable $e) {}
+        try { $pdo->prepare('UPDATE evidence SET created_by = NULL WHERE created_by = ?')->execute([$user_id]); } catch (Throwable $e) {}
+        try { $pdo->prepare('UPDATE case_notes SET created_by = NULL WHERE created_by = ?')->execute([$user_id]); } catch (Throwable $e) {}
+
+        $d = $pdo->prepare('DELETE FROM users WHERE id = ? LIMIT 1');
+        $d->execute([$user_id]);
+        if ($d->rowCount() > 0) {
+            flash('success', 'User deleted.');
+        } else {
+            flash('error', 'User not found or could not be deleted.');
+        }
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to delete user.');
+    }
+    header('Location: '. $ru); exit;
+}
+
 // Handle logout
 if (isset($_GET['logout'])) {
     $_SESSION = [];
@@ -1014,6 +1046,78 @@ if ($rs && count($rs) > 0):
 
         </div>
       </div>
+    </div>
+  </main>
+  <?php endif; ?>
+
+  <?php if ($view === 'users'): ?>
+  <main class="py-4" id="users">
+    <div class="container-xl">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <h2 class="h4 mb-0">Registered Users</h2>
+        <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+      </div>
+
+      <?php if (!is_admin()): ?>
+        <div class="alert alert-danger">Unauthorized. Admins only.</div>
+      <?php else: ?>
+        <div class="card glass">
+          <div class="card-body">
+            <?php
+            $users = [];
+            try {
+              $q = $pdo->query('SELECT id, email, display_name, role, is_active, created_at FROM users ORDER BY created_at DESC');
+              $users = $q->fetchAll();
+            } catch (Throwable $e) {
+              $_SESSION['sql_error'] = $e->getMessage();
+              $users = [];
+            }
+            ?>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Display Name</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Created</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php if ($users && count($users) > 0): foreach ($users as $u): ?>
+                    <tr>
+                      <td><?php echo (int)$u['id']; ?></td>
+                      <td><?php echo htmlspecialchars($u['display_name'] ?? ''); ?></td>
+                      <td><?php echo htmlspecialchars($u['email'] ?? ''); ?></td>
+                      <td><span class="badge text-bg-dark border"><?php echo htmlspecialchars($u['role'] ?? 'viewer'); ?></span></td>
+                      <td><?php echo ((int)($u['is_active'] ?? 0) ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Disabled</span>'); ?></td>
+                      <td><?php echo htmlspecialchars($u['created_at'] ?? ''); ?></td>
+                      <td>
+                        <?php if ((int)$u['id'] !== (int)($_SESSION['user']['id'] ?? 0)): ?>
+                          <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this user permanently? This cannot be undone.');">
+                            <input type="hidden" name="action" value="delete_user">
+                            <?php csrf_field(); ?>
+                            <input type="hidden" name="user_id" value="<?php echo (int)$u['id']; ?>">
+                            <input type="hidden" name="redirect_url" value="?view=users#users">
+                            <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-person-x me-1"></i>Delete</button>
+                          </form>
+                        <?php else: ?>
+                          <span class="text-secondary small">(You)</span>
+                        <?php endif; ?>
+                      </td>
+                    </tr>
+                  <?php endforeach; else: ?>
+                    <tr><td colspan="7" class="text-secondary">No users found.</td></tr>
+                  <?php endif; ?>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      <?php endif; ?>
     </div>
   </main>
   <?php endif; ?>
