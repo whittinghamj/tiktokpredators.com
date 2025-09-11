@@ -439,6 +439,61 @@ if (($_POST['action'] ?? '') === 'delete_evidence') {
     if($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
 
+// Handle delete case (admin only)
+if (($_POST['action'] ?? '') === 'delete_case') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $case_code = trim($_POST['case_code'] ?? '');
+
+    if ($case_id <= 0) { flash('error', 'Invalid case.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    // Collect file paths for later removal
+    $files = [];
+    try {
+        $s = $pdo->prepare('SELECT filepath FROM evidence WHERE case_id = ?');
+        $s->execute([$case_id]);
+        $files = $s->fetchAll();
+    } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+
+    try {
+        $pdo->beginTransaction();
+        // Delete evidence, notes, then case row
+        $d1 = $pdo->prepare('DELETE FROM evidence WHERE case_id = ?');
+        $d1->execute([$case_id]);
+        $d2 = $pdo->prepare('DELETE FROM case_notes WHERE case_id = ?');
+        $d2->execute([$case_id]);
+        $d3 = $pdo->prepare('DELETE FROM cases WHERE id = ? LIMIT 1');
+        $d3->execute([$case_id]);
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to delete case.');
+        header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
+    }
+
+    // Best-effort file cleanup after DB commit
+    if ($files) {
+        foreach ($files as $row) {
+            $rel = $row['filepath'] ?? '';
+            if ($rel !== '') {
+                $abs = __DIR__ . '/' . ltrim($rel, '/');
+                $uploadsRoot = realpath(__DIR__ . '/uploads');
+                $absReal = @realpath($abs);
+                if ($uploadsRoot && $absReal && strncmp($absReal, $uploadsRoot, strlen($uploadsRoot)) === 0 && is_file($absReal)) {
+                    @unlink($absReal);
+                }
+            }
+        }
+    }
+
+    flash('success', 'Case and all associated evidence/notes deleted.');
+    header('Location: ?view=cases#cases'); exit;
+}
+
 // Handle logout
 if (isset($_GET['logout'])) {
     $_SESSION = [];
@@ -728,6 +783,13 @@ if ($rs && count($rs) > 0):
           <div class="d-flex gap-2">
             <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
               <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence / Note</button>
+              <form method="post" action="" class="d-inline" onsubmit="return confirm('This will permanently delete the entire case and all evidence/notes. This cannot be undone. Continue?');">
+                <input type="hidden" name="action" value="delete_case">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+                <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-trash me-1"></i> Delete Case</button>
+              </form>
             <?php endif; ?>
             <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
           </div>
