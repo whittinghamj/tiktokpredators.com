@@ -868,7 +868,7 @@ if ($rs && count($rs) > 0):
                   <div class="d-flex justify-content-between align-items-center mb-3">
                     <h3 class="h6 mb-0">Case Details</h3>
                     <?php if (is_admin()): ?>
-                      <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal">
+                      <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModalView">
                         <i class="bi bi-pencil me-1"></i> Edit
                       </button>
                     <?php endif; ?>
@@ -947,7 +947,7 @@ if ($rs && count($rs) > 0):
             </div>
           </div>
 <?php if (is_admin() && $viewCase): ?>
-  <div class="modal fade" id="editCaseModal" tabindex="-1" aria-hidden="true">
+  <div class="modal fade" id="editCaseModalView" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header">
@@ -1062,7 +1062,7 @@ if ($rs && count($rs) > 0):
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-3">
               <h3 class="h6 mb-0">Case Details</h3>
-              <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal"><i class="bi bi-pencil me-1"></i> Edit</button>
+              <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModalAdmin"><i class="bi bi-pencil me-1"></i> Edit</button>
             </div>
             <div class="small text-secondary">Case Name</div>
             <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
@@ -1234,7 +1234,7 @@ if ($rs && count($rs) > 0):
       </div>
     </div>
       <!-- Edit Case Modal (Admin) -->
-      <div class="modal fade" id="editCaseModal" tabindex="-1" aria-hidden="true">
+      <div class="modal fade" id="editCaseModalAdmin" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-lg modal-dialog-centered">
           <div class="modal-content">
             <div class="modal-header">
@@ -1441,7 +1441,9 @@ if ($rs && count($rs) > 0):
                           <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
                         </tr>
                         <tr>
-</file>
+<!-- REMOVE ALL STRAY </file> LINES -->
+<!-- REMOVE ALL EXISTING Evidence Viewer Modal blocks (including their JS) -->
+</body>
   <!-- Evidence Viewer Modal (shared for all roles) -->
   <div class="modal fade" id="evidenceModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-centered">
@@ -1491,7 +1493,7 @@ if ($rs && count($rs) > 0):
     </div>
   </div>
 
-  <!-- Scripts: Bootstrap and modal logic -->
+  <!-- Bootstrap bundle (includes Popper) -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
     (function(){
@@ -1523,7 +1525,7 @@ if ($rs && count($rs) > 0):
         const type  = btn.getAttribute('data-type') || '';
         document.getElementById('evModalTitle').textContent = title;
         renderPreview(src, mime, type);
-        // ensure edit form hidden for viewers
+        // hide edit form for viewers
         document.getElementById('evEditForm').classList.add('d-none');
       }
 
@@ -1553,15 +1555,19 @@ if ($rs && count($rs) > 0):
         if(te){ openForEdit(te); }
       }, true);
 
-      // Clear preview when modal hides
-      document.addEventListener('hidden.bs.modal', function(evt){
-        if(evt.target && evt.target.id === 'evidenceModal'){
+      // Clear preview when the modal actually hides
+      var evModal = document.getElementById('evidenceModal');
+      if (evModal) {
+        evModal.addEventListener('hidden.bs.modal', function(){
           const wrap = document.getElementById('evPreview');
           if(wrap) wrap.innerHTML = '<div class="text-secondary">Loading preview…</div>';
           const f = document.getElementById('evEditForm');
           if(f) f.classList.add('d-none');
-        }
-      });
+        });
+      }
     })();
   </script>
 </body>
+<?php if (stripos(file_get_contents(__FILE__), '</html>') === false): ?>
+</html>
+<?php endif; ?>
