@@ -40,6 +40,20 @@ function throttle(){
     if ($now - ($_SESSION['auth_last'] ?? 0) < 3) { sleep(1); }
 }
 
+// Helper: find person photo URL by case code (tries common extensions)
+function find_person_photo_url(string $caseCode): string {
+    $baseDir = __DIR__ . '/uploads/people/';
+    $baseRel = 'uploads/people/';
+    $exts = ['jpg','jpeg','png','webp'];
+    foreach ($exts as $ext) {
+        $abs = $baseDir . $caseCode . '.' . $ext;
+        if (is_file($abs)) {
+            return $baseRel . $caseCode . '.' . $ext;
+        }
+    }
+    return '';
+}
+
 // Generate a unique case code like CASE-2025-AB12CD34 (random, collision-checked)
 function generate_case_code(PDO $pdo): string {
     $year = date('Y');
@@ -227,6 +241,29 @@ if (($_POST['action'] ?? '') === 'create_case') {
             $_SESSION['user']['id'] ?? null
         ]);
         $case_id = (int)$pdo->lastInsertId();
+        // Optional: handle person photo upload
+        if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
+            $pf = $_FILES['person_photo'];
+            $pmime = $pf['type'] ?? '';
+            $allowedImg = ['image/jpeg'=>'jpg','image/png'=>'png','image/webp'=>'webp'];
+            $ext = $allowedImg[$pmime] ?? null;
+            if (!$ext) {
+                // Try mime_content_type for safer detection
+                $det = @mime_content_type($pf['tmp_name']) ?: '';
+                $ext = $allowedImg[$det] ?? null;
+            }
+            if ($ext) {
+                $peopleDir = __DIR__ . '/uploads/people';
+                if (!is_dir($peopleDir)) { @mkdir($peopleDir, 0755, true); }
+                $destAbs = $peopleDir . '/' . $case_code . '.' . $ext;
+                // Remove other ext variants to keep a single current file
+                foreach (['jpg','jpeg','png','webp'] as $rmext) {
+                    $cand = $peopleDir . '/' . $case_code . '.' . $rmext;
+                    if (is_file($cand)) { @unlink($cand); }
+                }
+                @move_uploaded_file($pf['tmp_name'], $destAbs);
+            }
+        }
         flash('success', 'Case created successfully. ID: ' . htmlspecialchars($case_code));
         // jump to full admin case view
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?admin_case=' . urlencode($case_code) . '#admin-case');
@@ -263,10 +300,32 @@ if (($_POST['action'] ?? '') === 'update_case') {
     }
     if ($case_name === '' || $initial_summary === '') {
         flash('error', 'Case name and summary are required.');
-        header('Location: ?admin_case=' . urlencode($case_code) . '#admin-case'); exit;
+        header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
     }
     if (!in_array($sensitivity, $allowed_sensitivity, true)) { $sensitivity = 'Standard'; }
     if (!in_array($status, $allowed_status, true)) { $status = 'Open'; }
+
+    // Optional: update person photo
+    if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
+        $pf = $_FILES['person_photo'];
+        $pmime = $pf['type'] ?? '';
+        $allowedImg = ['image/jpeg'=>'jpg','image/png'=>'png','image/webp'=>'webp'];
+        $ext = $allowedImg[$pmime] ?? null;
+        if (!$ext) {
+            $det = @mime_content_type($pf['tmp_name']) ?: '';
+            $ext = $allowedImg[$det] ?? null;
+        }
+        if ($ext) {
+            $peopleDir = __DIR__ . '/uploads/people';
+            if (!is_dir($peopleDir)) { @mkdir($peopleDir, 0755, true); }
+            $destAbs = $peopleDir . '/' . $case_code . '.' . $ext;
+            foreach (['jpg','jpeg','png','webp'] as $rmext) {
+                $cand = $peopleDir . '/' . $case_code . '.' . $rmext;
+                if (is_file($cand)) { @unlink($cand); }
+            }
+            @move_uploaded_file($pf['tmp_name'], $destAbs);
+        }
+    }
 
     try {
         $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
@@ -284,7 +343,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
         $_SESSION['sql_error'] = $e->getMessage();
         flash('error', 'Unable to update case.');
     }
-    header('Location: ?admin_case=' . urlencode($case_code) . '#admin-case'); exit;
+    header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
 }
 
 // Handle add case note (admin only)
@@ -642,9 +701,15 @@ if ($rs && count($rs) > 0):
     $sens  = $row['sensitivity'] ?? 'Standard';
     $opened= $row['opened_at'] ?? '';
     $last  = $row['last_activity'] ?? $opened;
+    $photoUrl = '';
+    $photoPath = find_person_photo_url($code);
+    if ($photoPath !== '') { $photoUrl = $photoPath; }
 ?>
   <div class="col">
     <div class="card h-100">
+      <?php if (!empty($photoUrl)) { ?>
+        <img src="<?php echo htmlspecialchars($photoUrl); ?>" class="card-img-top" alt="" style="aspect-ratio:16/9; object-fit:cover;">
+      <?php } ?>
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-start">
           <div>
@@ -803,6 +868,11 @@ if ($rs && count($rs) > 0):
                       </button>
                     <?php endif; ?>
                   </div>
+                  <?php $casePhoto = find_person_photo_url($caseCode); if ($casePhoto !== '') { ?>
+                    <div class="mb-3">
+                      <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
+                    </div>
+                  <?php } ?>
                   <div class="small text-secondary">Case Name</div>
                   <div class="mb-2"><?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?></div>
                   <div class="small text-secondary">Person Name</div>
@@ -885,7 +955,7 @@ if ($rs && count($rs) > 0):
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <form method="post" action="" id="editCaseFormView">
+          <form method="post" action="" id="editCaseFormView" enctype="multipart/form-data">
             <input type="hidden" name="action" value="update_case">
             <?php csrf_field(); ?>
             <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
@@ -922,6 +992,14 @@ if ($rs && count($rs) > 0):
                 <select name="status" class="form-select" required>
                   <?php $statOpts = ['Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($viewCase['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                 </select>
+              </div>
+            </div>
+
+            <div class="row g-2 mt-2">
+              <div class="col-md-6">
+                <label class="form-label">Update Person Photo</label>
+                <input type="file" name="person_photo" class="form-control" accept="image/*">
+                <small class="text-secondary">Leave blank to keep current</small>
               </div>
             </div>
 
@@ -989,25 +1067,30 @@ if ($rs && count($rs) > 0):
     <div class="row g-4">
       <div class="col-lg-4">
         <div class="card glass h-100">
-          <div class="card-body">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-              <h3 class="h6 mb-0">Case Details</h3>
-              <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal"><i class="bi bi-pencil me-1"></i> Edit</button>
-            </div>
-            <div class="small text-secondary">Case Name</div>
-            <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
-            <div class="small text-secondary">Person Name</div>
-            <div class="mb-2"><?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?></div>
-            <div class="small text-secondary">TikTok Username</div>
-            <div class="mb-2"><?php echo $caseRow['tiktok_username'] ? '@'.htmlspecialchars($caseRow['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
-            <div class="small text-secondary">Status</div>
-            <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['status']); ?></span></div>
-            <div class="small text-secondary">Sensitivity</div>
-            <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['sensitivity']); ?></span></div>
-            <div class="small text-secondary">Opened</div>
-            <div class="mb-2"><?php echo htmlspecialchars($caseRow['opened_at']); ?></div>
-            <div class="small text-secondary">Initial Summary</div>
-            <div class="mb-0"><?php echo nl2br(htmlspecialchars($caseRow['initial_summary'] ?? '')); ?></div>
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h3 class="h6 mb-0">Case Details</h3>
+                    <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal"><i class="bi bi-pencil me-1"></i> Edit</button>
+                  </div>
+                  <?php $adminCasePhoto = find_person_photo_url($caseRow['case_code'] ?? ''); if ($adminCasePhoto !== '') { ?>
+                    <div class="mb-3">
+                      <img src="<?php echo htmlspecialchars($adminCasePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
+                    </div>
+                  <?php } ?>
+                  <div class="small text-secondary">Case Name</div>
+                  <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
+                  <div class="small text-secondary">Person Name</div>
+                  <div class="mb-2"><?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?></div>
+                  <div class="small text-secondary">TikTok Username</div>
+                  <div class="mb-2"><?php echo $caseRow['tiktok_username'] ? '@'.htmlspecialchars($caseRow['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
+                  <div class="small text-secondary">Status</div>
+                  <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['status']); ?></span></div>
+                  <div class="small text-secondary">Sensitivity</div>
+                  <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['sensitivity']); ?></span></div>
+                  <div class="small text-secondary">Opened</div>
+                  <div class="mb-2"><?php echo htmlspecialchars($caseRow['opened_at']); ?></div>
+                  <div class="small text-secondary">Initial Summary</div>
+                  <div class="mb-0"><?php echo nl2br(htmlspecialchars($caseRow['initial_summary'] ?? '')); ?></div>
           </div>
         </div>
       </div>
@@ -1172,7 +1255,7 @@ if ($rs && count($rs) > 0):
               <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
-              <form method="post" action="" id="editCaseForm">
+              <form method="post" action="" id="editCaseForm" enctype="multipart/form-data">
                 <input type="hidden" name="action" value="update_case">
                 <?php csrf_field(); ?>
                 <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
@@ -1209,6 +1292,14 @@ if ($rs && count($rs) > 0):
                     <select name="status" class="form-select" required>
                       <?php $statOpts = ['Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($caseRow['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                     </select>
+                  </div>
+                </div>
+
+                <div class="row g-2 mt-2">
+                  <div class="col-md-6">
+                    <label class="form-label">Update Person Photo</label>
+                    <input type="file" name="person_photo" class="form-control" accept="image/*">
+                    <small class="text-secondary">Leave blank to keep current</small>
                   </div>
                 </div>
 
@@ -1415,7 +1506,7 @@ if ($rs && count($rs) > 0):
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <form method="post" action="" id="createCaseForm">
+          <form method="post" action="" id="createCaseForm" enctype="multipart/form-data">
             <input type="hidden" name="action" value="create_case">
             <?php csrf_field(); ?>
             <div class="row g-2">
@@ -1454,6 +1545,13 @@ if ($rs && count($rs) > 0):
                 </select>
               </div>
             </div>
+            <div class="row g-2 mt-2">
+              <div class="col-md-6">
+                <label class="form-label">Person Photo (optional)</label>
+                <input type="file" name="person_photo" class="form-control" accept="image/*">
+                <small class="text-secondary">JPEG, PNG, or WEBP</small>
+              </div>
+            </div>
             <div class="mt-3">
               <label class="form-label">Initial Summary</label>
               <textarea name="initial_summary" class="form-control" rows="4" placeholder="Short summary of allegations and current state…" required></textarea>
@@ -1487,6 +1585,7 @@ if ($rs && count($rs) > 0):
             </li>
           </ul>
           <div class="tab-content pt-3">
+            <!-- Login Pane -->
             <div class="tab-pane fade <?php echo ($openAuth==='login')?'show active':''; ?>" id="login-pane" role="tabpanel">
               <form method="post" action="">
                 <input type="hidden" name="action" value="login">
@@ -1504,6 +1603,7 @@ if ($rs && count($rs) > 0):
                 </div>
               </form>
             </div>
+            <!-- Register Pane -->
             <div class="tab-pane fade <?php echo ($openAuth==='register')?'show active':''; ?>" id="register-pane" role="tabpanel">
               <form method="post" action="">
                 <input type="hidden" name="action" value="register">
@@ -1538,73 +1638,97 @@ if ($rs && count($rs) > 0):
       </div>
     </div>
   </div>
-
-  <footer class="border-top py-4 mt-5 text-center text-secondary">
-    <div class="container">
-      <div class="small">© <?php echo date('Y'); ?> TikTokPredators • All rights reserved.</div>
-    </div>
-  </footer>
-
-  <!-- Scripts -->
+  
+  <!-- Bootstrap JS Bundle -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
-  // Evidence modal dynamic preview + admin edit wiring
   document.addEventListener('DOMContentLoaded', function () {
-    var evModal = document.getElementById('evidenceModal');
-    if (evModal) {
+    // Evidence modal dynamic preview + admin edit wiring
+    (function () {
+      var evModal = document.getElementById('evidenceModal');
+      if (!evModal) return;
+  
       evModal.addEventListener('show.bs.modal', function (event) {
         var btn = event.relatedTarget;
         if (!btn) return;
         var src = btn.getAttribute('data-src') || '';
-        var title = btn.getAttribute('data-title') || 'Evidence';
+        var title = btn.getAttribute('data-title') || '';
         var mime = btn.getAttribute('data-mime') || '';
-        var type = btn.getAttribute('data-type') || 'other';
+        var type = btn.getAttribute('data-type') || '';
         var id = btn.getAttribute('data-id') || '';
         var caseId = btn.getAttribute('data-case-id') || '';
-        document.getElementById('evModalTitle').textContent = title;
-        document.getElementById('evMime').textContent = mime || type;
-        document.getElementById('evSize').textContent = '';
-        var preview = document.getElementById('evPreview');
-        preview.innerHTML = '';
-        // Choose renderer
-        if (type === 'image' || (mime.indexOf('image/') === 0)) {
-          var img = document.createElement('img');
-          img.src = src; img.className = 'img-fluid rounded';
-          preview.classList.remove('ratio','ratio-16x9'); preview.appendChild(img);
-        } else if (type === 'video' || mime.indexOf('video/') === 0) {
-          preview.classList.add('ratio','ratio-16x9');
-          preview.innerHTML = '<video controls src="'+src+'" class="w-100 h-100"></video>';
-        } else if (type === 'audio' || mime.indexOf('audio/') === 0) {
-          preview.classList.remove('ratio','ratio-16x9');
-          preview.innerHTML = '<audio controls class="w-100"><source src="'+src+'"></audio>';
-        } else if (type === 'pdf' || mime === 'application/pdf') {
-          preview.classList.add('ratio','ratio-16x9');
-          preview.innerHTML = '<iframe src="'+src+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
-        } else {
-          preview.classList.add('ratio','ratio-16x9');
-          preview.innerHTML = '<iframe src="'+src+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
+  
+        // Fallbacks
+        if (!type && mime.indexOf('/') > -1) type = mime.split('/')[0];
+        if (!title || title.trim() === '') {
+          // Derive from filename as last resort
+          try { title = src.split('/').pop(); } catch (e) { title = 'Evidence'; }
         }
+  
+        // Set header fields
+        var titleEl = document.getElementById('evModalTitle');
+        if (titleEl) titleEl.textContent = title;
+        var mimeEl = document.getElementById('evMime');
+        if (mimeEl) mimeEl.textContent = mime || (type || '—');
+        var sizeEl = document.getElementById('evSize');
+        if (sizeEl) sizeEl.textContent = '';
+  
+        // Render preview
+        var preview = document.getElementById('evPreview');
+        if (preview) {
+          preview.classList.add('ratio','ratio-16x9');
+          preview.innerHTML = '';
+          var safeSrc = src;
+          if (type === 'image' || (mime.indexOf('image/') === 0)) {
+            preview.classList.remove('ratio','ratio-16x9');
+            var img = document.createElement('img');
+            img.src = safeSrc;
+            img.alt = title;
+            img.className = 'img-fluid rounded';
+            preview.appendChild(img);
+          } else if (type === 'video' || mime.indexOf('video/') === 0) {
+            preview.innerHTML = '<video controls class="w-100 h-100"><source src="'+safeSrc+'" type="'+mime+'"></video>';
+          } else if (type === 'audio' || mime.indexOf('audio/') === 0) {
+            preview.classList.remove('ratio','ratio-16x9');
+            preview.innerHTML = '<audio controls class="w-100"><source src="'+safeSrc+'" type="'+mime+'"></audio>';
+          } else if (type === 'pdf' || mime === 'application/pdf') {
+            preview.innerHTML = '<iframe src="'+safeSrc+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
+          } else {
+            preview.innerHTML = '<iframe src="'+safeSrc+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
+          }
+        }
+  
         // Admin edit fields (if present)
         var evId = document.getElementById('evId');
         var evCaseId = document.getElementById('evCaseId');
         var evTitle = document.getElementById('evTitle');
         var evType = document.getElementById('evType');
         if (evId && evCaseId && evTitle && evType) {
-          evId.value = id; evCaseId.value = caseId; evTitle.value = title; evType.value = type;
+          evId.value = id;
+          evCaseId.value = caseId;
+          evTitle.value = title;
+          if (evType.querySelector('option[value="'+type+'"]')) {
+            evType.value = type;
+          }
         }
       });
+  
       evModal.addEventListener('hidden.bs.modal', function () {
         var preview = document.getElementById('evPreview');
-        if (preview) { preview.innerHTML = '<div class="text-secondary small">No preview available</div>'; preview.classList.add('ratio','ratio-16x9'); }
+        if (preview) {
+          preview.innerHTML = '<div class="text-secondary small">No preview available</div>';
+          preview.classList.add('ratio','ratio-16x9');
+        }
       });
-    }
-
+    })();
+  
     // Auth modal tab behavior based on triggers and server-side preference
-    var authModalEl = document.getElementById('authModal');
-    if (authModalEl) {
+    (function () {
+      var authModalEl = document.getElementById('authModal');
+      if (!authModalEl) return;
       authModalEl.addEventListener('show.bs.modal', function (event) {
         var trigger = event.relatedTarget;
-        var preferred = trigger &amp;&amp; trigger.getAttribute('data-auth-tab') ? trigger.getAttribute('data-auth-tab') : 'login';
+        var preferred = trigger && trigger.getAttribute('data-auth-tab') ? trigger.getAttribute('data-auth-tab') : 'login';
         var btn = document.querySelector('#authModal [data-bs-target="#' + (preferred === 'register' ? 'register-pane' : 'login-pane') + '"]');
         if (btn) { new bootstrap.Tab(btn).show(); }
       });
@@ -1615,126 +1739,19 @@ if ($rs && count($rs) > 0):
         var btn = document.querySelector('#authModal [data-bs-target="#' + (openPref === 'register' ? 'register-pane' : 'login-pane') + '"]');
         if (btn) { new bootstrap.Tab(btn).show(); }
       }
-    }
-
+    })();
+  
     // Theme toggle
-    var themeToggle = document.getElementById('themeToggle');
-    if (themeToggle) {
+    (function () {
+      var themeToggle = document.getElementById('themeToggle');
+      if (!themeToggle) return;
       themeToggle.addEventListener('click', function () {
         var html = document.documentElement;
         var current = html.getAttribute('data-bs-theme') || 'dark';
         html.setAttribute('data-bs-theme', current === 'dark' ? 'light' : 'dark');
       });
-    }
-
-    // Auto-open Create Case modal on validation error
-    <?php if (!empty($openModal) && $openModal === 'createCase'): ?>
-      var cc = document.getElementById('createCaseModal');
-      if (cc) { new bootstrap.Modal(cc).show(); }
-    <?php endif; ?>
+    })();
   });
   </script>
-
-  <!-- Auth Modal -->
-<div class="modal fade" id="authModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title"><i class="bi bi-shield-lock me-2"></i>Account</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <ul class="nav nav-tabs" id="authTabs" role="tablist">
-          <li class="nav-item" role="presentation">
-            <button class="nav-link <?php echo ($openAuth==='login')?'active':''; ?>" data-bs-toggle="tab" data-bs-target="#login-pane" type="button" role="tab">Login</button>
-          </li>
-          <li class="nav-item" role="presentation">
-            <button class="nav-link <?php echo ($openAuth==='register')?'active':''; ?>" data-bs-toggle="tab" data-bs-target="#register-pane" type="button" role="tab">Register</button>
-          </li>
-        </ul>
-
-        <div class="tab-content pt-3">
-          <!-- Login -->
-          <div class="tab-pane fade <?php echo ($openAuth==='login')?'show active':''; ?>" id="login-pane" role="tabpanel">
-            <form method="post" action="">
-              <input type="hidden" name="action" value="login">
-              <?php csrf_field(); ?>
-              <div class="mb-2">
-                <label class="form-label">Email</label>
-                <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
-              </div>
-              <div class="mb-2">
-                <label class="form-label">Password</label>
-                <input type="password" name="password" class="form-control" minlength="8" required>
-              </div>
-              <div class="d-grid">
-                <button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
-              </div>
-            </form>
-          </div>
-
-          <!-- Register -->
-          <div class="tab-pane fade <?php echo ($openAuth==='register')?'show active':''; ?>" id="register-pane" role="tabpanel">
-            <form method="post" action="">
-              <input type="hidden" name="action" value="register">
-              <?php csrf_field(); ?>
-              <div class="mb-2">
-                <label class="form-label">Email</label>
-                <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
-              </div>
-              <div class="mb-2">
-                <label class="form-label">Display Name</label>
-                <input type="text" name="display_name" class="form-control" placeholder="Your name" required>
-              </div>
-              <div class="mb-2">
-                <label class="form-label">Password</label>
-                <input type="password" name="password" class="form-control" minlength="8" required>
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Confirm Password</label>
-                <input type="password" name="password_confirm" class="form-control" minlength="8" required>
-              </div>
-              <div class="form-check mb-3">
-                <input class="form-check-input" type="checkbox" name="agree" id="agreeTerms" required>
-                <label class="form-check-label small" for="agreeTerms">I agree to the terms and privacy policy.</label>
-              </div>
-              <div class="d-grid">
-                <button class="btn btn-success" type="submit"><i class="bi bi-person-plus me-1"></i> Create Account</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div> <!-- /modal-body -->
-    </div>
-  </div>
-</div>
-
-<!-- Bootstrap JS (needed for modals) -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-document.addEventListener('DOMContentLoaded', function () {
-  var authModalEl = document.getElementById('authModal');
-  if (!authModalEl) return;
-
-  // Switch tab based on the button that opened the modal
-  authModalEl.addEventListener('show.bs.modal', function (event) {
-    var trigger = event.relatedTarget;
-    var preferred = trigger && trigger.getAttribute('data-auth-tab') ? trigger.getAttribute('data-auth-tab') : 'login';
-    var selector = '#authModal [data-bs-target="#' + (preferred === 'register' ? 'register-pane' : 'login-pane') + '"]';
-    var btn = document.querySelector(selector);
-    if (btn) { new bootstrap.Tab(btn).show(); }
-  });
-
-  // If server set a preference (e.g. validation error), open the modal & tab
-  var openPref = <?php echo json_encode($openAuth); ?>;
-  if (openPref === 'login' || openPref === 'register') {
-    var modal = new bootstrap.Modal(authModalEl);
-    modal.show();
-    var btn = document.querySelector('#authModal [data-bs-target="#' + (openPref === 'register' ? 'register-pane' : 'login-pane') + '"]');
-    if (btn) { new bootstrap.Tab(btn).show(); }
-  }
-});
-</script>
-
-</body>
-</html>
+  </body>
+  </html>

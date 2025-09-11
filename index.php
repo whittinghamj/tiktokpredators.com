@@ -596,6 +596,10 @@ if (isset($_GET['logout'])) {
     .timeline { border-left: 2px solid rgba(255,255,255,.1); padding-left: 1rem; }
     .timeline .item { position: relative; margin-bottom: 1rem; }
     .timeline .item::before { content: ""; position: absolute; left: -1.1rem; top: .25rem; width: .65rem; height: .65rem; background: var(--tp-primary); border-radius: 50%; box-shadow: 0 0 0 3px rgba(124,77,255,.25); }
+    /* Restricted-mode media blurring (non-admins on Restricted cases) */
+    .restricted-blur { filter: blur(14px) saturate(0.6) brightness(0.7); }
+    body[data-restricted="1"] #evPreview img,
+    body[data-restricted="1"] #evPreview video { filter: blur(14px) saturate(0.6) brightness(0.7); }
     footer a { color: inherit }
   </style>
 </head>
@@ -708,7 +712,7 @@ if ($rs && count($rs) > 0):
   <div class="col">
     <div class="card h-100">
       <?php if (!empty($photoUrl)) { ?>
-        <img src="<?php echo htmlspecialchars($photoUrl); ?>" class="card-img-top" alt="" style="aspect-ratio:16/9; object-fit:cover;">
+        <img src="<?php echo htmlspecialchars($photoUrl); ?>" class="card-img-top<?php echo ($sens==='Restricted' && !is_admin()) ? ' restricted-blur' : ''; ?>" alt="" style="aspect-ratio:16/9; object-fit:cover;">
       <?php } ?>
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-start">
@@ -769,6 +773,15 @@ if ($rs && count($rs) > 0):
             $viewEv = $st2->fetchAll();
           } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
         }
+      }
+    ?>
+    <?php
+      $tp_isRestrictedForNonAdmin = false;
+      if (!empty($viewCase)) {
+        $tp_isRestrictedForNonAdmin = (($viewCase['sensitivity'] ?? '') === 'Restricted') && !is_admin();
+      }
+      if ($tp_isRestrictedForNonAdmin) {
+        echo '<script>document.addEventListener("DOMContentLoaded",function(){document.body.dataset.restricted="1";});</script>';
       }
     ?>
     <section class="py-5 border-top" id="case-view">
@@ -870,7 +883,7 @@ if ($rs && count($rs) > 0):
                   </div>
                   <?php $casePhoto = find_person_photo_url($caseCode); if ($casePhoto !== '') { ?>
                     <div class="mb-3">
-                      <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
+                      <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded<?php echo (!empty($tp_isRestrictedForNonAdmin) && $tp_isRestrictedForNonAdmin) ? ' restricted-blur' : ''; ?>" style="width:96px;height:96px;object-fit:cover;">
                     </div>
                   <?php } ?>
                   <div class="small text-secondary">Case Name</div>
@@ -1218,7 +1231,7 @@ if ($rs && count($rs) > 0):
               <?php if ($ev) { $hasImg=false; foreach ($ev as $e) { if ($e['type']==='image') { $hasImg=true; ?>
                 <div class="col-6 col-md-4">
                   <div class="card h-100">
-                    <img src="<?php echo htmlspecialchars($e['filepath']); ?>" class="card-img-top" alt="">
+                    <img src="<?php echo htmlspecialchars($e['filepath']); ?>" class="card-img-top<?php echo (!empty($tp_isRestrictedForNonAdmin) && $tp_isRestrictedForNonAdmin) ? ' restricted-blur' : ''; ?>" alt="">
                     <div class="card-body p-2">
                       <div class="small text-truncate" title="<?php echo htmlspecialchars($e['title']); ?>"><?php echo htmlspecialchars($e['title']); ?></div>
                     </div>
