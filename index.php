@@ -684,54 +684,6 @@ if ($rs && count($rs) > 0):
 
         <!-- Right Rail: Case Detail / Audit -->
         <div class="col-lg-4">
-          <div class="card glass">
-            <div class="card-body">
-              <div class="d-flex align-items-center justify-content-between">
-                <h2 class="h6 mb-0">Case Snapshot</h2>
-                <button class="btn btn-sm btn-outline-light"><i class="bi bi-pencil"></i></button>
-              </div>
-              <div class="mt-3">
-                <div class="d-flex align-items-center gap-2 mb-2">
-                  <img src="https://placehold.co/72x72" alt="Subject avatar" class="rounded" width="48" height="48" />
-                  <div>
-                    <div class="fw-semibold">@example_user123</div>
-                    <div class="small text-secondary">TikTok Subject</div>
-                  </div>
-                </div>
-                <div class="row g-2 small">
-                  <div class="col-6"><span class="text-secondary">Case ID</span><div>CASE-2025-0001</div></div>
-                  <div class="col-6"><span class="text-secondary">Status</span><div><span class="badge text-bg-warning-subtle border">In Review</span></div></div>
-                  <div class="col-6"><span class="text-secondary">Opened</span><div>09 Sep 2025</div></div>
-                  <div class="col-6"><span class="text-secondary">Custodian</span><div>J. Doe</div></div>
-                  <div class="col-12 mt-2"><span class="text-secondary">Summary</span>
-                    <p class="mb-2">Alleged inappropriate DM exchanges. Evidence includes screenshots, screen recordings, and exported chat logs. Pending metadata verification.</p>
-                  </div>
-                </div>
-              </div>
-              <hr />
-              <div>
-                <div class="d-flex align-items-center justify-content-between mb-2">
-                  <h3 class="h6 mb-0">Chain of Custody</h3>
-                  <button class="btn btn-sm btn-outline-success"><i class="bi bi-plus-lg"></i></button>
-                </div>
-                <div class="timeline small">
-                  <div class="item">
-                    <div class="fw-semibold">Evidence imported</div>
-                    <div class="text-secondary">by Jane • 09 Sep 2025 10:14</div>
-                  </div>
-                  <div class="item">
-                    <div class="fw-semibold">Hash verified (SHA-256)</div>
-                    <div class="text-secondary">by System • 09 Sep 2025 10:15</div>
-                  </div>
-                  <div class="item">
-                    <div class="fw-semibold">Access granted to analyst team</div>
-                    <div class="text-secondary">by Admin • 09 Sep 2025 10:20</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <div class="card mt-3 glass">
             <div class="card-body">
               <div class="d-flex justify-content-between align-items-center mb-2">
