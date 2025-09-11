@@ -558,6 +558,7 @@ if (isset($_GET['logout'])) {
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
 <?php if (is_admin()): ?>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='add')?'active':''; ?>" href="?view=add#add">Add Content</a></li>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='admin')?'active':''; ?>" href="?view=admin#admin">Admin</a></li>
 <?php endif; ?>
@@ -569,6 +570,9 @@ if (isset($_GET['logout'])) {
             <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i> Register</button>
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
           <?php else: ?>
+            <?php if (is_admin()): ?>
+              <a class="btn btn-success btn-sm" href="?view=add#add"><i class="bi bi-cloud-plus me-1"></i> Add</a>
+            <?php endif; ?>
             <div class="dropdown">
               <?php $dn = $_SESSION['user']['display_name'] ?? ''; $label = $dn !== '' ? $dn : ($_SESSION['user']['email'] ?? 'Account'); ?>
               <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
@@ -1352,7 +1356,62 @@ if ($rs && count($rs) > 0):
   </section>
   <?php endif; ?>
 
-
+  <?php if ($view === 'add'): ?>
+    <?php if (!is_admin()): ?>
+      <section class="py-5 border-top" id="add">
+        <div class="container-xl">
+          <div class="alert alert-danger"><i class="bi bi-shield-lock me-2"></i>Unauthorized. Admins only.</div>
+        </div>
+      </section>
+    <?php else: ?>
+      <section class="py-5 border-top" id="add">
+        <div class="container-xl">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <h2 class="h4 mb-0">Add Content / Upload Evidence</h2>
+            <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-grid-1x2 me-1"></i> Back to Cases</a>
+          </div>
+          <div class="card glass">
+            <div class="card-body">
+              <form class="mb-3" method="post" action="" enctype="multipart/form-data">
+                <input type="hidden" name="action" value="upload_evidence">
+                <?php csrf_field(); ?>
+                <div class="row g-2 align-items-end">
+                  <div class="col-md-3">
+                    <label class="form-label">Case ID (numeric)</label>
+                    <input type="number" name="case_id" class="form-control" placeholder="e.g., 123" required>
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Case Code</label>
+                    <input type="text" name="case_code" class="form-control" placeholder="e.g., CASE-2025-AB12CD34" required>
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Title</label>
+                    <input type="text" name="title" class="form-control" placeholder="Optional title">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Type</label>
+                    <select name="type" class="form-select">
+                      <option value="image">Image</option>
+                      <option value="video">Video</option>
+                      <option value="audio">Audio</option>
+                      <option value="pdf">PDF</option>
+                      <option value="doc">Document</option>
+                      <option value="other" selected>Other</option>
+                    </select>
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label">File</label>
+                    <input type="file" name="evidence_file" class="form-control" required>
+                  </div>
+                </div>
+                <div class="text-end mt-3"><button class="btn btn-primary" type="submit"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button></div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+    <?php endif; ?>
+  <?php endif; ?>
 
   <?php if ($view === 'users'): ?>
     <?php if (!is_admin()): ?>
