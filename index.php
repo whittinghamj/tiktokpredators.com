@@ -1054,7 +1054,10 @@ if ($rs && count($rs) > 0):
     <div class="container-xl">
       <div class="d-flex align-items-center justify-content-between mb-3">
         <h2 class="h4 mb-0">Registered Users</h2>
-        <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+        <div class="d-flex gap-2">
+          <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addUserModal"><i class="bi bi-person-plus me-1"></i> Add User</button>
+          <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+        </div>
       </div>
 
       <?php if (!is_admin()): ?>
