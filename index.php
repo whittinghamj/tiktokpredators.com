@@ -267,6 +267,67 @@ if (($_POST['action'] ?? '') === 'register') {
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
 
+// Handle admin add user (admin only)
+if (($_POST['action'] ?? '') === 'admin_add_user') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. trim($_POST['redirect_url'] ?? '?view=users#users')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) {
+        flash('error', 'Unauthorized. Admins only.');
+        header('Location: '. trim($_POST['redirect_url'] ?? '?view=users#users')); exit;
+    }
+
+    $email = trim($_POST['email'] ?? '');
+    $displayName = trim($_POST['display_name'] ?? '');
+    $password = $_POST['password'] ?? '';
+    $confirm = $_POST['password_confirm'] ?? '';
+    $role = trim($_POST['role'] ?? 'viewer');
+    $isActive = isset($_POST['is_active']) ? 1 : 1; // default active
+
+    $allowedRoles = ['admin','viewer'];
+
+    $redir = trim($_POST['redirect_url'] ?? '?view=users#users');
+
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        flash('error', 'Please enter a valid email address.');
+        header('Location: '. $redir); exit;
+    }
+    if ($displayName === '') {
+        flash('error', 'Please enter a display name.');
+        header('Location: '. $redir); exit;
+    }
+    if (strlen($password) < 8) {
+        flash('error', 'Password must be at least 8 characters.');
+        header('Location: '. $redir); exit;
+    }
+    if (!hash_equals($password, $confirm)) {
+        flash('error', 'Passwords do not match.');
+        header('Location: '. $redir); exit;
+    }
+    if (!in_array($role, $allowedRoles, true)) { $role = 'viewer'; }
+
+    try {
+        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
+        $stmt->execute([$email]);
+        if ($stmt->fetch()) {
+            flash('error', 'That email is already registered.');
+            header('Location: '. $redir); exit;
+        }
+        $hash = password_hash($password, PASSWORD_DEFAULT);
+        $ins = $pdo->prepare('INSERT INTO users (email, display_name, password_hash, role, is_active, created_at) VALUES (?, ?, ?, ?, ?, NOW())');
+        $ins->execute([$email, $displayName, $hash, $role, $isActive]);
+        flash('success', 'User added successfully.');
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        $code = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+        if ($code === 1062) {
+            flash('error', 'That email is already registered.');
+        } else {
+            flash('error', 'Unable to add user.');
+        }
+    }
+    header('Location: '. $redir); exit;
+}
+
 // Handle create case POST (admin only)
 if (($_POST['action'] ?? '') === 'create_case') {
     throttle();
@@ -1120,6 +1181,61 @@ if ($rs && count($rs) > 0):
           </div>
         </div>
       <?php endif; ?>
+      <!-- Add User Modal -->
+      <div class="modal fade" id="addUserModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-md modal-dialog-centered">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title"><i class="bi bi-person-plus me-2"></i>Add User</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="post" action="" id="addUserForm" autocomplete="off">
+              <input type="hidden" name="action" value="admin_add_user">
+              <?php csrf_field(); ?>
+              <input type="hidden" name="redirect_url" value="?view=users#users">
+              <div class="modal-body">
+                <div class="mb-2">
+                  <label class="form-label">Display Name</label>
+                  <input type="text" name="display_name" class="form-control" placeholder="e.g. Jane Doe" required>
+                </div>
+                <div class="mb-2">
+                  <label class="form-label">Email</label>
+                  <input type="email" name="email" class="form-control" placeholder="name@example.com" required>
+                </div>
+                <div class="row g-2">
+                  <div class="col-md-6">
+                    <label class="form-label">Password</label>
+                    <input type="password" name="password" class="form-control" minlength="8" required>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Confirm Password</label>
+                    <input type="password" name="password_confirm" class="form-control" minlength="8" required>
+                  </div>
+                </div>
+                <div class="row g-2 mt-2">
+                  <div class="col-md-6">
+                    <label class="form-label">Account Role</label>
+                    <select name="role" class="form-select" required>
+                      <option value="viewer">Viewer</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                  <div class="col-md-6 d-flex align-items-end">
+                    <div class="form-check">
+                      <input class="form-check-input" type="checkbox" name="is_active" id="addUserActive" checked>
+                      <label class="form-check-label" for="addUserActive">Active</label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="modal-footer">
+                <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i> Save User</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
     </div>
   </main>
   <?php endif; ?>
