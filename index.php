@@ -562,7 +562,34 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
             flash('success', 'URL evidence added.');
         } catch (Throwable $e) {
             $_SESSION['sql_error'] = $e->getMessage();
-            flash('error', 'Unable to save URL evidence.');
+            // Fallback: some schemas have evidence.type as ENUM without 'url'
+            $msg = strtolower($e->getMessage());
+            $enumIssue = (strpos($msg, 'incorrect enum value') !== false) || (strpos($msg, 'data truncated for column') !== false);
+            if ($enumIssue) {
+                try {
+                    $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+                    $stmt->execute([
+                        $case_id,
+                        'other', // fallback
+                        ($title !== '' ? $title : $url),
+                        $url,
+                        $storagePath,
+                        null,
+                        $mime,
+                        $size,
+                        $hash,
+                        $hash,
+                        $_SESSION['user']['id'] ?? null,
+                        $_SESSION['user']['id'] ?? null
+                    ]);
+                    flash('success', 'URL evidence added (stored as type "other" due to DB enum).');
+                } catch (Throwable $e2) {
+                    $_SESSION['sql_error'] = $e2->getMessage();
+                    flash('error', 'Unable to save URL evidence.');
+                }
+            } else {
+                flash('error', 'Unable to save URL evidence.');
+            }
         }
         $redirUrl = trim($_POST['redirect_url'] ?? '');
         if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
@@ -643,13 +670,28 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
                 if ($ru!==''){ header('Location: '.$ru); exit; }
                 header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
             }
-            $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ?, filepath = ?, mime_type = "text/url" WHERE id = ? AND case_id = ? LIMIT 1');
-            $u->execute([$title, $type, $url, $evidence_id, $case_id]);
+            try {
+                $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ?, filepath = ?, mime_type = "text/url" WHERE id = ? AND case_id = ? LIMIT 1');
+                $u->execute([$title, $type, $url, $evidence_id, $case_id]);
+            } catch (Throwable $e) {
+                $_SESSION['sql_error'] = $e->getMessage();
+                $msg = strtolower($e->getMessage());
+                $enumIssue = (strpos($msg, 'incorrect enum value') !== false) || (strpos($msg, 'data truncated for column') !== false);
+                if ($enumIssue) {
+                    $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ?, filepath = ?, mime_type = "text/url" WHERE id = ? AND case_id = ? LIMIT 1');
+                    $u->execute([$title, 'other', $url, $evidence_id, $case_id]);
+                    flash('success', 'Evidence updated (stored as type "other" due to DB enum).');
+                } else {
+                    throw $e;
+                }
+            }
         } else {
             $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ? WHERE id = ? AND case_id = ? LIMIT 1');
             $u->execute([$title, $type, $evidence_id, $case_id]);
         }
-        flash('success', 'Evidence updated.');
+        if ($type !== 'url') {
+            flash('success', 'Evidence updated.');
+        }
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
         flash('error', 'Unable to update evidence.');
@@ -798,6 +840,14 @@ if (isset($_GET['logout'])) {
   <?php endif; ?>
   <?php if ($msg = flash('error')): ?>
     <div class="alert alert-danger border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
+  <?php endif; ?>
+  <?php if (is_admin() && !empty($_SESSION['sql_error'])): ?>
+    <div class="alert alert-warning border-0 rounded-0 mb-0 text-center">
+      <div><strong>SQL hint:</strong> <?php echo htmlspecialchars($_SESSION['sql_error']); unset($_SESSION['sql_error']); ?></div>
+      <div class="small">If this mentions an ENUM issue on <code>evidence.type</code>, run:
+        <code>ALTER TABLE evidence MODIFY COLUMN type ENUM('image','video','audio','pdf','doc','url','other') NOT NULL DEFAULT 'other';</code>
+      </div>
+    </div>
   <?php endif; ?>
   <?php $openAuth = $_SESSION['auth_tab'] ?? ''; unset($_SESSION['auth_tab']); ?>
   <?php $openModal = $_SESSION['open_modal'] ?? ''; unset($_SESSION['open_modal']); $formError = $_SESSION['form_error'] ?? ''; unset($_SESSION['form_error']); ?>
