@@ -1456,65 +1456,105 @@ if ($rs && count($rs) > 0):
             <div class="col-lg-4">
               <div class="card glass h-100">
                 <div class="card-body">
-                  <h2 class="h6 mb-2">Notes</h2>
-                  <div class="alert alert-warning small"><i class="bi bi-info-circle me-2"></i>Role management coming soon.</div>
+                  <h2 class="h6 mb-2">Roles</h2>
+                  <ul class="small mb-0">
+                    <li><span class="badge rounded-pill text-bg-secondary">Viewer</span> — can view cases and evidence.</li>
+                    <li><span class="badge rounded-pill badge-role">Analyst</span> — (reserved) internal analysis role.</li>
+                    <li><span class="badge rounded-pill text-bg-light text-dark">Admin</span> — full access, can add/edit/delete.</li>
+                  </ul>
                 </div>
               </div>
             </div>
-          </div>
+          </div> <!-- /row -->
         </div>
       </section>
     <?php endif; ?>
   <?php endif; ?>
 
-  <footer class="border-top py-4">
-    <div class="container-xl d-flex flex-wrap justify-content-between align-items-center gap-3">
-      <div class="small">© <span id="year"></span> TikTokPredators. For reporting and documentation only. Not affiliated with TikTok.</div>
-      <div class="d-flex gap-3 small">
-        <a href="#" data-bs-toggle="modal" data-bs-target="#privacyModal"><i class="bi bi-shield-lock me-1"></i> Privacy</a>
-        <a href="#" data-bs-toggle="modal" data-bs-target="#tosModal"><i class="bi bi-file-text me-1"></i> Terms</a>
-        <a href="#" data-bs-toggle="modal" data-bs-target="#disclaimerModal"><i class="bi bi-exclamation-octagon me-1"></i> Disclaimer</a>
-      </div>
-    </div>
-  </footer>
-  <?php if (getenv('APP_DEBUG') === '1'): ?>
-    <div class="container-xl my-3">
-      <details class="small">
-        <summary class="text-secondary">Debug info (visible only with APP_DEBUG=1)</summary>
-        <?php if (!empty($_SESSION['last_db_error'])): ?>
-          <div class="alert alert-warning mt-2">DB Error: <?php echo htmlspecialchars($_SESSION['last_db_error']); unset($_SESSION['last_db_error']); ?></div>
-        <?php endif; ?>
-        <?php if (!empty($_SESSION['last_register_error'])): ?>
-          <div class="alert alert-warning mt-2">Register Error: <?php echo htmlspecialchars($_SESSION['last_register_error']); unset($_SESSION['last_register_error']); ?></div>
-        <?php endif; ?>
-      </details>
-    </div>
-  <?php endif; ?>
-
-  <!-- Create Case Modal -->
-  <div class="modal fade" id="createCaseModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
+  <!-- Global Evidence Viewer / Editor Modal -->
+  <div class="modal fade" id="evidenceModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-folder-plus me-2"></i>Add Case</h5>
+          <h5 class="modal-title"><i class="bi bi-file-earmark-text me-2"></i><span id="evModalTitle">Evidence</span></h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <?php if (!empty($formError)): ?>
-            <div class="alert alert-danger small d-flex align-items-center"><i class="bi bi-exclamation-octagon me-2"></i><span><?php echo htmlspecialchars($formError); ?></span></div>
-          <?php endif; ?>
+          <div class="row g-3">
+            <div class="col-lg-8">
+              <div id="evPreview" class="ratio ratio-16x9 bg-dark d-flex align-items-center justify-content-center rounded">
+                <div class="text-secondary small">No preview available</div>
+              </div>
+              <div class="mt-2 small text-secondary"><span id="evMime">—</span> • <span id="evSize">—</span></div>
+            </div>
+            <div class="col-lg-4">
+              <?php if (is_admin()): ?>
+              <div class="card glass">
+                <div class="card-body">
+                  <h6 class="mb-2">Edit Evidence</h6>
+                  <form method="post" action="" id="evEditForm">
+                    <input type="hidden" name="action" value="update_evidence">
+                    <?php csrf_field(); ?>
+                    <input type="hidden" name="evidence_id" id="evId">
+                    <input type="hidden" name="case_id" id="evCaseId">
+                    <div class="mb-2">
+                      <label class="form-label">Title</label>
+                      <input type="text" name="title" id="evTitle" class="form-control">
+                    </div>
+                    <div class="mb-2">
+                      <label class="form-label">Type</label>
+                      <select name="type" id="evType" class="form-select">
+                        <option value="image">Image</option>
+                        <option value="video">Video</option>
+                        <option value="audio">Audio</option>
+                        <option value="pdf">PDF</option>
+                        <option value="doc">Document</option>
+                        <option value="other">Other</option>
+                      </select>
+                    </div>
+                    <div class="d-grid">
+                      <button class="btn btn-primary" type="submit"><i class="bi bi-save me-1"></i> Save</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+              <?php else: ?>
+              <div class="alert alert-secondary small mb-0">You are viewing this evidence in read-only mode.</div>
+              <?php endif; ?>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <?php if (is_admin()): ?>
+  <!-- Create Case Modal (Admin) -->
+  <div class="modal fade" id="createCaseModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-folder-plus me-2"></i>Create Case</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
           <form method="post" action="" id="createCaseForm">
             <input type="hidden" name="action" value="create_case">
             <?php csrf_field(); ?>
-            <div class="mb-3">
-              <label class="form-label">Case Name</label>
-              <input type="text" name="case_name" class="form-control" placeholder="E.g., CASE-2025-0003 – Alleged DM Grooming" required>
-            </div>
             <div class="row g-2">
               <div class="col-md-6">
-                <label class="form-label">Person Name</label>
-                <input type="text" name="person_name" class="form-control" placeholder="Full name (if known)">
+                <label class="form-label">Case Name</label>
+                <input type="text" name="case_name" class="form-control" placeholder="Case title" required>
               </div>
+              <div class="col-md-6">
+                <label class="form-label">Person Name</label>
+                <input type="text" name="person_name" class="form-control" placeholder="Optional">
+              </div>
+            </div>
+            <div class="row g-2 mt-2">
               <div class="col-md-6">
                 <label class="form-label">TikTok Username</label>
                 <div class="input-group">
@@ -1522,32 +1562,203 @@ if ($rs && count($rs) > 0):
                   <input type="text" name="tiktok_username" class="form-control" placeholder="username (no @)">
                 </div>
               </div>
-              <div class="mb-3">
-                <label class="form-label">Initial Summary</label>
-                <textarea name="initial_summary" class="form-control" rows="4" placeholder="Short summary of allegations and current state…" required></textarea>
+              <div class="col-md-3">
+                <label class="form-label">Sensitivity</label>
+                <select name="sensitivity" class="form-select" required>
+                  <option value="Standard" selected>Standard</option>
+                  <option value="Restricted">Restricted</option>
+                  <option value="Sealed">Sealed</option>
+                </select>
               </div>
-              <div class="row g-2">
-                <div class="col-md-6">
-                  <label class="form-label">Sensitivity</label>
-                  <select name="sensitivity" class="form-select" required>
-                    <option value="Standard" selected>Standard</option>
-                    <option value="Restricted">Restricted</option>
-                    <option value="Sealed">Sealed</option>
-                  </select>
-                </div>
-                <div class="col-md-6">
-                  <label class="form-label">Status</label>
-                  <select name="status" class="form-select" required>
-                    <option value="Open" selected>Open</option>
-                    <option value="In Review">In Review</option>
-                    <option value="Verified">Verified</option>
-                    <option value="Closed">Closed</option>
-                  </select>
-                </div>
+              <div class="col-md-3">
+                <label class="form-label">Status</label>
+                <select name="status" class="form-select" required>
+                  <option value="Open" selected>Open</option>
+                  <option value="In Review">In Review</option>
+                  <option value="Verified">Verified</option>
+                  <option value="Closed">Closed</option>
+                </select>
               </div>
-            </form>
+            </div>
+            <div class="mt-3">
+              <label class="form-label">Initial Summary</label>
+              <textarea name="initial_summary" class="form-control" rows="4" placeholder="Short summary of allegations and current state…" required></textarea>
+            </div>
+          </form>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit" form="createCaseForm"><i class="bi bi-save2 me-1"></i> Create Case</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <?php endif; ?>
+
+  <!-- Auth Modal -->
+  <div class="modal fade" id="authModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title"><i class="bi bi-shield-lock me-2"></i>Account</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <ul class="nav nav-tabs" id="authTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+              <button class="nav-link <?php echo ($openAuth==='login')?'active':''; ?>" data-bs-toggle="tab" data-bs-target="#login-pane" type="button" role="tab">Login</button>
+            </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link <?php echo ($openAuth==='register')?'active':''; ?>" data-bs-toggle="tab" data-bs-target="#register-pane" type="button" role="tab">Register</button>
+            </li>
+          </ul>
+          <div class="tab-content pt-3">
+            <div class="tab-pane fade <?php echo ($openAuth==='login')?'show active':''; ?>" id="login-pane" role="tabpanel">
+              <form method="post" action="">
+                <input type="hidden" name="action" value="login">
+                <?php csrf_field(); ?>
+                <div class="mb-2">
+                  <label class="form-label">Email</label>
+                  <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
+                </div>
+                <div class="mb-2">
+                  <label class="form-label">Password</label>
+                  <input type="password" name="password" class="form-control" minlength="8" required>
+                </div>
+                <div class="d-grid">
+                  <button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
+                </div>
+              </form>
+            </div>
+            <div class="tab-pane fade <?php echo ($openAuth==='register')?'show active':''; ?>" id="register-pane" role="tabpanel">
+              <form method="post" action="">
+                <input type="hidden" name="action" value="register">
+                <?php csrf_field(); ?>
+                <div class="mb-2">
+                  <label class="form-label">Email</label>
+                  <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
+                </div>
+                <div class="mb-2">
+                  <label class="form-label">Display Name</label>
+                  <input type="text" name="display_name" class="form-control" placeholder="Your name" required>
+                </div>
+                <div class="mb-2">
+                  <label class="form-label">Password</label>
+                  <input type="password" name="password" class="form-control" minlength="8" required>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">Confirm Password</label>
+                  <input type="password" name="password_confirm" class="form-control" minlength="8" required>
+                </div>
+                <div class="form-check mb-3">
+                  <input class="form-check-input" type="checkbox" name="agree" id="agreeTerms" required>
+                  <label class="form-check-label small" for="agreeTerms">I agree to the terms and privacy policy.</label>
+                </div>
+                <div class="d-grid">
+                  <button class="btn btn-success" type="submit"><i class="bi bi-person-plus me-1"></i> Create Account</button>
+                </div>
+              </form>
+            </div>
           </div>
-          <div class="modal-footer">
-            <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
-            <button class="btn btn-primary" type="submit" form="createCaseForm"><i class="bi bi-save2 me-1"></i> Create Case</button>
-          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer class="border-top py-4 mt-5 text-center text-secondary">
+    <div class="container">
+      <div class="small">© <?php echo date('Y'); ?> TikTokPredators • All rights reserved.</div>
+    </div>
+  </footer>
+
+  <!-- Scripts -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+  // Evidence modal dynamic preview + admin edit wiring
+  document.addEventListener('DOMContentLoaded', function () {
+    var evModal = document.getElementById('evidenceModal');
+    if (evModal) {
+      evModal.addEventListener('show.bs.modal', function (event) {
+        var btn = event.relatedTarget;
+        if (!btn) return;
+        var src = btn.getAttribute('data-src') || '';
+        var title = btn.getAttribute('data-title') || 'Evidence';
+        var mime = btn.getAttribute('data-mime') || '';
+        var type = btn.getAttribute('data-type') || 'other';
+        var id = btn.getAttribute('data-id') || '';
+        var caseId = btn.getAttribute('data-case-id') || '';
+        document.getElementById('evModalTitle').textContent = title;
+        document.getElementById('evMime').textContent = mime || type;
+        document.getElementById('evSize').textContent = '';
+        var preview = document.getElementById('evPreview');
+        preview.innerHTML = '';
+        // Choose renderer
+        if (type === 'image' || (mime.indexOf('image/') === 0)) {
+          var img = document.createElement('img');
+          img.src = src; img.className = 'img-fluid rounded';
+          preview.classList.remove('ratio','ratio-16x9'); preview.appendChild(img);
+        } else if (type === 'video' || mime.indexOf('video/') === 0) {
+          preview.classList.add('ratio','ratio-16x9');
+          preview.innerHTML = '<video controls src="'+src+'" class="w-100 h-100"></video>';
+        } else if (type === 'audio' || mime.indexOf('audio/') === 0) {
+          preview.classList.remove('ratio','ratio-16x9');
+          preview.innerHTML = '<audio controls class="w-100"><source src="'+src+'"></audio>';
+        } else if (type === 'pdf' || mime === 'application/pdf') {
+          preview.classList.add('ratio','ratio-16x9');
+          preview.innerHTML = '<iframe src="'+src+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
+        } else {
+          preview.classList.add('ratio','ratio-16x9');
+          preview.innerHTML = '<iframe src="'+src+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
+        }
+        // Admin edit fields (if present)
+        var evId = document.getElementById('evId');
+        var evCaseId = document.getElementById('evCaseId');
+        var evTitle = document.getElementById('evTitle');
+        var evType = document.getElementById('evType');
+        if (evId && evCaseId && evTitle && evType) {
+          evId.value = id; evCaseId.value = caseId; evTitle.value = title; evType.value = type;
+        }
+      });
+      evModal.addEventListener('hidden.bs.modal', function () {
+        var preview = document.getElementById('evPreview');
+        if (preview) { preview.innerHTML = '<div class="text-secondary small">No preview available</div>'; preview.classList.add('ratio','ratio-16x9'); }
+      });
+    }
+
+    // Auth modal tab behavior based on triggers and server-side preference
+    var authModalEl = document.getElementById('authModal');
+    if (authModalEl) {
+      authModalEl.addEventListener('show.bs.modal', function (event) {
+        var trigger = event.relatedTarget;
+        var preferred = trigger &amp;&amp; trigger.getAttribute('data-auth-tab') ? trigger.getAttribute('data-auth-tab') : 'login';
+        var btn = document.querySelector('#authModal [data-bs-target="#' + (preferred === 'register' ? 'register-pane' : 'login-pane') + '"]');
+        if (btn) { new bootstrap.Tab(btn).show(); }
+      });
+      var openPref = <?php echo json_encode($openAuth); ?>;
+      if (openPref === 'login' || openPref === 'register') {
+        var modal = new bootstrap.Modal(authModalEl);
+        modal.show();
+        var btn = document.querySelector('#authModal [data-bs-target="#' + (openPref === 'register' ? 'register-pane' : 'login-pane') + '"]');
+        if (btn) { new bootstrap.Tab(btn).show(); }
+      }
+    }
+
+    // Theme toggle
+    var themeToggle = document.getElementById('themeToggle');
+    if (themeToggle) {
+      themeToggle.addEventListener('click', function () {
+        var html = document.documentElement;
+        var current = html.getAttribute('data-bs-theme') || 'dark';
+        html.setAttribute('data-bs-theme', current === 'dark' ? 'light' : 'dark');
+      });
+    }
+
+    // Auto-open Create Case modal on validation error
+    <?php if (!empty($openModal) && $openModal === 'createCase'): ?>
+      var cc = document.getElementById('createCaseModal');
+      if (cc) { new bootstrap.Modal(cc).show(); }
+    <?php endif; ?>
+  });
+  </script>
+</body>
+</html>
