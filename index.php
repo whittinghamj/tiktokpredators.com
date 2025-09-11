@@ -40,6 +40,20 @@ function throttle(){
     if ($now - ($_SESSION['auth_last'] ?? 0) < 3) { sleep(1); }
 }
 
+// Helper: find person photo URL by case code (tries common extensions)
+function find_person_photo_url(string $caseCode): string {
+    $baseDir = __DIR__ . '/uploads/people/';
+    $baseRel = 'uploads/people/';
+    $exts = ['jpg','jpeg','png','webp'];
+    foreach ($exts as $ext) {
+        $abs = $baseDir . $caseCode . '.' . $ext;
+        if (is_file($abs)) {
+            return $baseRel . $caseCode . '.' . $ext;
+        }
+    }
+    return '';
+}
+
 // Generate a unique case code like CASE-2025-AB12CD34 (random, collision-checked)
 function generate_case_code(PDO $pdo): string {
     $year = date('Y');
@@ -227,6 +241,29 @@ if (($_POST['action'] ?? '') === 'create_case') {
             $_SESSION['user']['id'] ?? null
         ]);
         $case_id = (int)$pdo->lastInsertId();
+        // Optional: handle person photo upload
+        if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
+            $pf = $_FILES['person_photo'];
+            $pmime = $pf['type'] ?? '';
+            $allowedImg = ['image/jpeg'=>'jpg','image/png'=>'png','image/webp'=>'webp'];
+            $ext = $allowedImg[$pmime] ?? null;
+            if (!$ext) {
+                // Try mime_content_type for safer detection
+                $det = @mime_content_type($pf['tmp_name']) ?: '';
+                $ext = $allowedImg[$det] ?? null;
+            }
+            if ($ext) {
+                $peopleDir = __DIR__ . '/uploads/people';
+                if (!is_dir($peopleDir)) { @mkdir($peopleDir, 0755, true); }
+                $destAbs = $peopleDir . '/' . $case_code . '.' . $ext;
+                // Remove other ext variants to keep a single current file
+                foreach (['jpg','jpeg','png','webp'] as $rmext) {
+                    $cand = $peopleDir . '/' . $case_code . '.' . $rmext;
+                    if (is_file($cand)) { @unlink($cand); }
+                }
+                @move_uploaded_file($pf['tmp_name'], $destAbs);
+            }
+        }
         flash('success', 'Case created successfully. ID: ' . htmlspecialchars($case_code));
         // jump to full admin case view
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?admin_case=' . urlencode($case_code) . '#admin-case');
@@ -267,6 +304,28 @@ if (($_POST['action'] ?? '') === 'update_case') {
     }
     if (!in_array($sensitivity, $allowed_sensitivity, true)) { $sensitivity = 'Standard'; }
     if (!in_array($status, $allowed_status, true)) { $status = 'Open'; }
+
+    // Optional: update person photo
+    if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
+        $pf = $_FILES['person_photo'];
+        $pmime = $pf['type'] ?? '';
+        $allowedImg = ['image/jpeg'=>'jpg','image/png'=>'png','image/webp'=>'webp'];
+        $ext = $allowedImg[$pmime] ?? null;
+        if (!$ext) {
+            $det = @mime_content_type($pf['tmp_name']) ?: '';
+            $ext = $allowedImg[$det] ?? null;
+        }
+        if ($ext) {
+            $peopleDir = __DIR__ . '/uploads/people';
+            if (!is_dir($peopleDir)) { @mkdir($peopleDir, 0755, true); }
+            $destAbs = $peopleDir . '/' . $case_code . '.' . $ext;
+            foreach (['jpg','jpeg','png','webp'] as $rmext) {
+                $cand = $peopleDir . '/' . $case_code . '.' . $rmext;
+                if (is_file($cand)) { @unlink($cand); }
+            }
+            @move_uploaded_file($pf['tmp_name'], $destAbs);
+        }
+    }
 
     try {
         $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
@@ -642,9 +701,15 @@ if ($rs && count($rs) > 0):
     $sens  = $row['sensitivity'] ?? 'Standard';
     $opened= $row['opened_at'] ?? '';
     $last  = $row['last_activity'] ?? $opened;
+    $photoUrl = '';
+    $photoPath = find_person_photo_url($code);
+    if ($photoPath !== '') { $photoUrl = $photoPath; }
 ?>
   <div class="col">
     <div class="card h-100">
+      <?php if (!empty($photoUrl)) { ?>
+        <img src="<?php echo htmlspecialchars($photoUrl); ?>" class="card-img-top" alt="" style="aspect-ratio:16/9; object-fit:cover;">
+      <?php } ?>
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-start">
           <div>
@@ -803,6 +868,11 @@ if ($rs && count($rs) > 0):
                       </button>
                     <?php endif; ?>
                   </div>
+                  <?php $casePhoto = find_person_photo_url($caseCode); if ($casePhoto !== '') { ?>
+                    <div class="mb-3">
+                      <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
+                    </div>
+                  <?php } ?>
                   <div class="small text-secondary">Case Name</div>
                   <div class="mb-2"><?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?></div>
                   <div class="small text-secondary">Person Name</div>
@@ -885,7 +955,7 @@ if ($rs && count($rs) > 0):
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <form method="post" action="" id="editCaseFormView">
+          <form method="post" action="" id="editCaseFormView" enctype="multipart/form-data">
             <input type="hidden" name="action" value="update_case">
             <?php csrf_field(); ?>
             <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
@@ -922,6 +992,14 @@ if ($rs && count($rs) > 0):
                 <select name="status" class="form-select" required>
                   <?php $statOpts = ['Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($viewCase['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                 </select>
+              </div>
+            </div>
+
+            <div class="row g-2 mt-2">
+              <div class="col-md-6">
+                <label class="form-label">Update Person Photo</label>
+                <input type="file" name="person_photo" class="form-control" accept="image/*">
+                <small class="text-secondary">Leave blank to keep current</small>
               </div>
             </div>
 
@@ -989,25 +1067,30 @@ if ($rs && count($rs) > 0):
     <div class="row g-4">
       <div class="col-lg-4">
         <div class="card glass h-100">
-          <div class="card-body">
-            <div class="d-flex justify-content-between align-items-center mb-3">
-              <h3 class="h6 mb-0">Case Details</h3>
-              <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal"><i class="bi bi-pencil me-1"></i> Edit</button>
-            </div>
-            <div class="small text-secondary">Case Name</div>
-            <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
-            <div class="small text-secondary">Person Name</div>
-            <div class="mb-2"><?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?></div>
-            <div class="small text-secondary">TikTok Username</div>
-            <div class="mb-2"><?php echo $caseRow['tiktok_username'] ? '@'.htmlspecialchars($caseRow['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
-            <div class="small text-secondary">Status</div>
-            <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['status']); ?></span></div>
-            <div class="small text-secondary">Sensitivity</div>
-            <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['sensitivity']); ?></span></div>
-            <div class="small text-secondary">Opened</div>
-            <div class="mb-2"><?php echo htmlspecialchars($caseRow['opened_at']); ?></div>
-            <div class="small text-secondary">Initial Summary</div>
-            <div class="mb-0"><?php echo nl2br(htmlspecialchars($caseRow['initial_summary'] ?? '')); ?></div>
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h3 class="h6 mb-0">Case Details</h3>
+                    <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal"><i class="bi bi-pencil me-1"></i> Edit</button>
+                  </div>
+                  <?php $adminCasePhoto = find_person_photo_url($caseRow['case_code'] ?? ''); if ($adminCasePhoto !== '') { ?>
+                    <div class="mb-3">
+                      <img src="<?php echo htmlspecialchars($adminCasePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
+                    </div>
+                  <?php } ?>
+                  <div class="small text-secondary">Case Name</div>
+                  <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
+                  <div class="small text-secondary">Person Name</div>
+                  <div class="mb-2"><?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?></div>
+                  <div class="small text-secondary">TikTok Username</div>
+                  <div class="mb-2"><?php echo $caseRow['tiktok_username'] ? '@'.htmlspecialchars($caseRow['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
+                  <div class="small text-secondary">Status</div>
+                  <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['status']); ?></span></div>
+                  <div class="small text-secondary">Sensitivity</div>
+                  <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['sensitivity']); ?></span></div>
+                  <div class="small text-secondary">Opened</div>
+                  <div class="mb-2"><?php echo htmlspecialchars($caseRow['opened_at']); ?></div>
+                  <div class="small text-secondary">Initial Summary</div>
+                  <div class="mb-0"><?php echo nl2br(htmlspecialchars($caseRow['initial_summary'] ?? '')); ?></div>
           </div>
         </div>
       </div>
@@ -1172,7 +1255,7 @@ if ($rs && count($rs) > 0):
               <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
-              <form method="post" action="" id="editCaseForm">
+              <form method="post" action="" id="editCaseForm" enctype="multipart/form-data">
                 <input type="hidden" name="action" value="update_case">
                 <?php csrf_field(); ?>
                 <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
@@ -1209,6 +1292,14 @@ if ($rs && count($rs) > 0):
                     <select name="status" class="form-select" required>
                       <?php $statOpts = ['Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($caseRow['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                     </select>
+                  </div>
+                </div>
+
+                <div class="row g-2 mt-2">
+                  <div class="col-md-6">
+                    <label class="form-label">Update Person Photo</label>
+                    <input type="file" name="person_photo" class="form-control" accept="image/*">
+                    <small class="text-secondary">Leave blank to keep current</small>
                   </div>
                 </div>
 
@@ -1415,7 +1506,7 @@ if ($rs && count($rs) > 0):
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <form method="post" action="" id="createCaseForm">
+          <form method="post" action="" id="createCaseForm" enctype="multipart/form-data">
             <input type="hidden" name="action" value="create_case">
             <?php csrf_field(); ?>
             <div class="row g-2">
@@ -1452,6 +1543,13 @@ if ($rs && count($rs) > 0):
                   <option value="Verified">Verified</option>
                   <option value="Closed">Closed</option>
                 </select>
+              </div>
+            </div>
+            <div class="row g-2 mt-2">
+              <div class="col-md-6">
+                <label class="form-label">Person Photo (optional)</label>
+                <input type="file" name="person_photo" class="form-control" accept="image/*">
+                <small class="text-secondary">JPEG, PNG, or WEBP</small>
               </div>
             </div>
             <div class="mt-3">
