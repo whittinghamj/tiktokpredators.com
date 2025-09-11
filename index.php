@@ -868,7 +868,7 @@ if ($rs && count($rs) > 0):
                   <div class="d-flex justify-content-between align-items-center mb-3">
                     <h3 class="h6 mb-0">Case Details</h3>
                     <?php if (is_admin()): ?>
-                      <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModalView">
+                      <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal">
                         <i class="bi bi-pencil me-1"></i> Edit
                       </button>
                     <?php endif; ?>
@@ -947,7 +947,7 @@ if ($rs && count($rs) > 0):
             </div>
           </div>
 <?php if (is_admin() && $viewCase): ?>
-  <div class="modal fade" id="editCaseModalView" tabindex="-1" aria-hidden="true">
+  <div class="modal fade" id="editCaseModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header">
@@ -1062,7 +1062,7 @@ if ($rs && count($rs) > 0):
           <div class="card-body">
             <div class="d-flex justify-content-between align-items-center mb-3">
               <h3 class="h6 mb-0">Case Details</h3>
-              <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModalAdmin"><i class="bi bi-pencil me-1"></i> Edit</button>
+              <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal"><i class="bi bi-pencil me-1"></i> Edit</button>
             </div>
             <div class="small text-secondary">Case Name</div>
             <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
@@ -1234,7 +1234,7 @@ if ($rs && count($rs) > 0):
       </div>
     </div>
       <!-- Edit Case Modal (Admin) -->
-      <div class="modal fade" id="editCaseModalAdmin" tabindex="-1" aria-hidden="true">
+      <div class="modal fade" id="editCaseModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-lg modal-dialog-centered">
           <div class="modal-content">
             <div class="modal-header">
@@ -1441,133 +1441,81 @@ if ($rs && count($rs) > 0):
                           <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
                         </tr>
                         <tr>
-<!-- REMOVE ALL STRAY </file> LINES -->
-<!-- REMOVE ALL EXISTING Evidence Viewer Modal blocks (including their JS) -->
-</body>
-  <!-- Evidence Viewer Modal (shared for all roles) -->
-  <div class="modal fade" id="evidenceModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-xl modal-dialog-centered">
+                          <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> John Smith</td>
+                          <td><span class="badge rounded-pill text-bg-secondary">Viewer</span></td>
+                          <td><span class="badge text-bg-warning-subtle border">Pending</span></td>
+                          <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col-lg-4">
+              <div class="card glass h-100">
+                <div class="card-body">
+                  <h2 class="h6 mb-2">Notes</h2>
+                  <div class="alert alert-warning small"><i class="bi bi-info-circle me-2"></i>Role management coming soon.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    <?php endif; ?>
+  <?php endif; ?>
+
+  <footer class="border-top py-4">
+    <div class="container-xl d-flex flex-wrap justify-content-between align-items-center gap-3">
+      <div class="small">© <span id="year"></span> TikTokPredators. For reporting and documentation only. Not affiliated with TikTok.</div>
+      <div class="d-flex gap-3 small">
+        <a href="#" data-bs-toggle="modal" data-bs-target="#privacyModal"><i class="bi bi-shield-lock me-1"></i> Privacy</a>
+        <a href="#" data-bs-toggle="modal" data-bs-target="#tosModal"><i class="bi bi-file-text me-1"></i> Terms</a>
+        <a href="#" data-bs-toggle="modal" data-bs-target="#disclaimerModal"><i class="bi bi-exclamation-octagon me-1"></i> Disclaimer</a>
+      </div>
+    </div>
+  </footer>
+  <?php if (getenv('APP_DEBUG') === '1'): ?>
+    <div class="container-xl my-3">
+      <details class="small">
+        <summary class="text-secondary">Debug info (visible only with APP_DEBUG=1)</summary>
+        <?php if (!empty($_SESSION['last_db_error'])): ?>
+          <div class="alert alert-warning mt-2">DB Error: <?php echo htmlspecialchars($_SESSION['last_db_error']); unset($_SESSION['last_db_error']); ?></div>
+        <?php endif; ?>
+        <?php if (!empty($_SESSION['last_register_error'])): ?>
+          <div class="alert alert-warning mt-2">Register Error: <?php echo htmlspecialchars($_SESSION['last_register_error']); unset($_SESSION['last_register_error']); ?></div>
+        <?php endif; ?>
+      </details>
+    </div>
+  <?php endif; ?>
+
+  <!-- Create Case Modal -->
+  <div class="modal fade" id="createCaseModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-eye me-2"></i><span id="evModalTitle">View Evidence</span></h5>
+          <h5 class="modal-title"><i class="bi bi-folder-plus me-2"></i>Add Case</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <div id="evPreview" class="ratio ratio-16x9 border rounded d-flex align-items-center justify-content-center bg-body-tertiary">
-            <div class="text-secondary">Loading preview…</div>
-          </div>
-
-          <!-- Admin-only edit form (shown only when opened via .btn-edit-evidence) -->
-          <form class="mt-3 d-none" id="evEditForm" method="post" action="">
-            <input type="hidden" name="action" value="update_evidence">
+          <?php if (!empty($formError)): ?>
+            <div class="alert alert-danger small d-flex align-items-center"><i class="bi bi-exclamation-octagon me-2"></i><span><?php echo htmlspecialchars($formError); ?></span></div>
+          <?php endif; ?>
+          <form method="post" action="" id="createCaseForm">
+            <input type="hidden" name="action" value="create_case">
             <?php csrf_field(); ?>
-            <input type="hidden" name="evidence_id" id="evEditEvidenceId" value="">
-            <input type="hidden" name="case_id" id="evEditCaseId" value="">
-            <input type="hidden" name="redirect_url" id="evEditRedirectUrl" value="">
-            <div class="row g-2 align-items-end">
-              <div class="col-md-6">
-                <label class="form-label">Title</label>
-                <input type="text" class="form-control" name="title" id="evEditTitle" value="">
-              </div>
-              <div class="col-md-3">
-                <label class="form-label">Type</label>
-                <select class="form-select" name="type" id="evEditType">
-                  <option value="image">Image</option>
-                  <option value="video">Video</option>
-                  <option value="audio">Audio</option>
-                  <option value="pdf">PDF</option>
-                  <option value="doc">Document</option>
-                  <option value="other">Other</option>
-                </select>
-              </div>
-              <div class="col-md-3 text-end">
-                <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save Changes</button>
-              </div>
+            <div class="mb-3">
+              <label class="form-label">Case Name</label>
+              <input type="text" name="case_name" class="form-control" placeholder="E.g., CASE-2025-0003 – Alleged DM Grooming" required>
             </div>
-          </form>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Bootstrap bundle (includes Popper) -->
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script>
-    (function(){
-      function renderPreview(src, mime, type){
-        const wrap = document.getElementById('evPreview');
-        if(!wrap) return;
-        const safeSrc = src;
-        let html = '';
-        const m = (mime || '').toLowerCase();
-        const t = (type || '').toLowerCase();
-        if(m.startsWith('image/') || t === 'image'){
-          html = '<img src="'+safeSrc+'" alt="evidence" class="w-100 h-100 object-fit-contain">';
-        } else if(m === 'application/pdf' || t === 'pdf'){
-          html = '<iframe src="'+safeSrc+'#toolbar=0" class="w-100 h-100" title="PDF"></iframe>';
-        } else if(m.startsWith('video/') || t === 'video'){
-          html = '<video controls class="w-100 h-100"><source src="'+safeSrc+'" type="'+(m||'video/mp4')+'">Your browser does not support the video tag.</video>';
-        } else if(m.startsWith('audio/') || t === 'audio'){
-          html = '<audio controls class="w-100"><source src="'+safeSrc+'" type="'+(m||'audio/mpeg')+'">Your browser does not support the audio element.</audio>';
-        } else {
-          html = '<iframe src="'+safeSrc+'" class="w-100 h-100" title="Preview"></iframe>';
-        }
-        wrap.innerHTML = html;
-      }
-
-      function openForView(btn){
-        const title = btn.getAttribute('data-title') || 'View Evidence';
-        const src   = btn.getAttribute('data-src') || '';
-        const mime  = btn.getAttribute('data-mime') || '';
-        const type  = btn.getAttribute('data-type') || '';
-        document.getElementById('evModalTitle').textContent = title;
-        renderPreview(src, mime, type);
-        // hide edit form for viewers
-        document.getElementById('evEditForm').classList.add('d-none');
-      }
-
-      function openForEdit(btn){
-        const title = btn.getAttribute('data-title') || 'Edit Evidence';
-        const src   = btn.getAttribute('data-src') || '';
-        const mime  = btn.getAttribute('data-mime') || '';
-        const type  = btn.getAttribute('data-type') || '';
-        const evid  = btn.getAttribute('data-id') || '';
-        const caseId= btn.getAttribute('data-case-id') || '';
-        document.getElementById('evModalTitle').textContent = title + ' (Edit)';
-        renderPreview(src, mime, type);
-        // populate admin form
-        const f = document.getElementById('evEditForm');
-        f.classList.remove('d-none');
-        document.getElementById('evEditEvidenceId').value = evid;
-        document.getElementById('evEditCaseId').value = caseId;
-        document.getElementById('evEditTitle').value = btn.getAttribute('data-title') || '';
-        document.getElementById('evEditType').value = (type || 'other');
-        document.getElementById('evEditRedirectUrl').value = window.location.pathname + window.location.search + (window.location.hash || '');
-      }
-
-      document.addEventListener('click', function(e){
-        const t = e.target.closest('.btn-view-evidence');
-        if(t){ openForView(t); }
-        const te = e.target.closest('.btn-edit-evidence');
-        if(te){ openForEdit(te); }
-      }, true);
-
-      // Clear preview when the modal actually hides
-      var evModal = document.getElementById('evidenceModal');
-      if (evModal) {
-        evModal.addEventListener('hidden.bs.modal', function(){
-          const wrap = document.getElementById('evPreview');
-          if(wrap) wrap.innerHTML = '<div class="text-secondary">Loading preview…</div>';
-          const f = document.getElementById('evEditForm');
-          if(f) f.classList.add('d-none');
-        });
-      }
-    })();
-  </script>
-</body>
-<?php if (stripos(file_get_contents(__FILE__), '</html>') === false): ?>
-</html>
-<?php endif; ?>
+            <div class="row g-2">
+              <div class="col-md-6">
+                <label class="form-label">Person Name</label>
+                <input type="text" name="person_name" class="form-control" placeholder="Full name (if known)">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">TikTok Username</label>
+                <div class="input-group">
+                  <span class="input-group-text">@</span>
+      <truncated__content/>
