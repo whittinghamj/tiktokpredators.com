@@ -955,7 +955,7 @@ if ($rs && count($rs) > 0):
                   </div>
                   <div class="table-responsive">
                     <table class="table table-sm align-middle">
-                      <thead><tr><th>Type</th><th>Title</th><th>File</th><th class="d-none d-md-table-cell">MIME</th><th class="d-none d-md-table-cell">Size</th><th>Added</th></tr></thead>
+                      <thead><tr><th>Type</th><th>Title</th><th>File</th><th>Added</th></tr></thead>
                       <tbody>
                         <?php if ($viewEv) { foreach ($viewEv as $e) { ?>
                           <tr>
@@ -993,12 +993,10 @@ if ($rs && count($rs) > 0):
                                 <?php endif; ?>
                               <?php } ?>
                             </td>
-                            <td class="small text-secondary d-none d-md-table-cell"><?php echo htmlspecialchars($e['mime_type']); ?></td>
-                            <td class="small text-secondary d-none d-md-table-cell"><?php echo number_format((int)$e['size_bytes']); ?> B</td>
                             <td class="small text-secondary"><?php echo htmlspecialchars($e['created_at']); ?></td>
                           </tr>
                         <?php } } else { ?>
-                          <tr><td colspan="6" class="text-secondary">No evidence available.</td></tr>
+                          <tr><td colspan="4" class="text-secondary">No evidence available.</td></tr>
                         <?php } ?>
                       </tbody>
                     </table>
