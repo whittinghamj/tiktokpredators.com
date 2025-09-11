@@ -847,6 +847,14 @@ if (isset($_GET['logout'])) {
     .timeline { border-left: 2px solid rgba(255,255,255,.1); padding-left: 1rem; }
     .timeline .item { position: relative; margin-bottom: 1rem; }
     .timeline .item::before { content: ""; position: absolute; left: -1.1rem; top: .25rem; width: .65rem; height: .65rem; background: var(--tp-primary); border-radius: 50%; box-shadow: 0 0 0 3px rgba(124,77,255,.25); }
+    
+    /* Evidence modal: full-width media */
+    .evidence-modal .modal-dialog { max-width: 95vw; }
+    .evidence-modal .modal-body { padding: 0; }
+    .evidence-modal img,
+    .evidence-modal video,
+    .evidence-modal iframe { width: 100%; height: auto; display: block; object-fit: contain; }
+    
     /* Restricted-mode media blurring (non-admins on Restricted cases) */
     footer a { color: inherit }
   </style>
@@ -1846,7 +1854,7 @@ if ($rs && count($rs) > 0):
   <?php endif; ?>
 
   <!-- Global Evidence Viewer / Editor Modal -->
-  <div class="modal fade" id="evidenceModal" tabindex="-1" aria-hidden="true">
+  <div class="modal fade evidence-modal" id="evidenceModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header">
@@ -1893,7 +1901,7 @@ if ($rs && count($rs) > 0):
                 </div>
               </div>
               <?php else: ?>
-              <div class="alert alert-secondary small mb-0">You are viewing this evidence in read-only mode.</div>
+              
               <?php endif; ?>
             </div>
           </div>
