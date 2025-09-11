@@ -883,7 +883,7 @@ if ($rs && count($rs) > 0):
                   </div>
                   <?php $casePhoto = find_person_photo_url($caseCode); if ($casePhoto !== '') { ?>
                     <div class="mb-3">
-                      <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded<?php echo (!empty($tp_isRestrictedForNonAdmin) && $tp_isRestrictedForNonAdmin) ? ' restricted-blur' : ''; ?>" style="width:96px;height:96px;object-fit:cover;">
+                      <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
                     </div>
                   <?php } ?>
                   <div class="small text-secondary">Case Name</div>
