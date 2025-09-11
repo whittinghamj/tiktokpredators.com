@@ -683,23 +683,6 @@ if ($rs && count($rs) > 0):
         </div>
 
         <!-- Right Rail: Case Detail / Audit -->
-        <div class="col-lg-4">
-          <div class="card mt-3 glass">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center mb-2">
-                <h3 class="h6 mb-0">Audit Log</h3>
-                <button class="btn btn-sm btn-outline-light"><i class="bi bi-arrow-clockwise"></i></button>
-              </div>
-              <ul class="list-group list-group-flush audit-list">
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-key me-2"></i>Login success • <span class="text-secondary">10:35</span></li>
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-eye me-2"></i>Viewed case CASE-2025-0001 • <span class="text-secondary">10:36</span></li>
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-cloud-arrow-up me-2"></i>Uploaded file clip_12.mp4 • <span class="text-secondary">10:40</span></li>
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-shield-check me-2"></i>Checksum verified • <span class="text-secondary">10:41</span></li>
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-pen me-2"></i>Updated status to In Review • <span class="text-secondary">10:45</span></li>
-              </ul>
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   </main>
