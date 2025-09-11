@@ -1867,7 +1867,7 @@ if ($rs && count($rs) > 0):
               <div id="evPreview" class="ratio ratio-16x9 bg-dark d-flex align-items-center justify-content-center rounded">
                 <div class="text-secondary small">No preview available</div>
               </div>
-              <div class="mt-2 small text-secondary"><span id="evMime">—</span> • <span id="evSize">—</span></div>
+              <div class="mt-2 small text-secondary"><span id="evSize">—</span></div>
             </div>
             <div class="col-lg-4">
               <?php if (is_admin()): ?>
@@ -2085,8 +2085,6 @@ if ($rs && count($rs) > 0):
         // Set header fields
         var titleEl = document.getElementById('evModalTitle');
         if (titleEl) titleEl.textContent = title;
-        var mimeEl = document.getElementById('evMime');
-        if (mimeEl) mimeEl.textContent = mime || (type || '—');
         var sizeEl = document.getElementById('evSize');
         if (sizeEl) sizeEl.textContent = '';
   
