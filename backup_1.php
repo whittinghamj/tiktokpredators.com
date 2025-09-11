@@ -558,7 +558,6 @@ if (isset($_GET['logout'])) {
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
 <?php if (is_admin()): ?>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='add')?'active':''; ?>" href="?view=add#add">Add Content</a></li>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='admin')?'active':''; ?>" href="?view=admin#admin">Admin</a></li>
 <?php endif; ?>
@@ -570,9 +569,6 @@ if (isset($_GET['logout'])) {
             <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i> Register</button>
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
           <?php else: ?>
-            <?php if (is_admin()): ?>
-              <a class="btn btn-success btn-sm" href="?view=add#add"><i class="bi bi-cloud-plus me-1"></i> Add</a>
-            <?php endif; ?>
             <div class="dropdown">
               <?php $dn = $_SESSION['user']['display_name'] ?? ''; $label = $dn !== '' ? $dn : ($_SESSION['user']['email'] ?? 'Account'); ?>
               <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
@@ -601,7 +597,7 @@ if (isset($_GET['logout'])) {
   <main class="py-4" id="cases">
     <div class="container-xl">
       <div class="row g-4">
-        <div class="col-lg-8 case-grid">
+        <div class="col-12 case-grid">
           <div class="d-flex align-items-center justify-content-between mb-2">
             <h2 class="h4 mb-0">Recent Cases</h2>
             <div class="btn-group">
@@ -684,73 +680,6 @@ if ($rs && count($rs) > 0):
 <?php endif; ?>
 </div>
 
-        </div>
-
-        <!-- Right Rail: Case Detail / Audit -->
-        <div class="col-lg-4">
-          <div class="card glass">
-            <div class="card-body">
-              <div class="d-flex align-items-center justify-content-between">
-                <h2 class="h6 mb-0">Case Snapshot</h2>
-                <button class="btn btn-sm btn-outline-light"><i class="bi bi-pencil"></i></button>
-              </div>
-              <div class="mt-3">
-                <div class="d-flex align-items-center gap-2 mb-2">
-                  <img src="https://placehold.co/72x72" alt="Subject avatar" class="rounded" width="48" height="48" />
-                  <div>
-                    <div class="fw-semibold">@example_user123</div>
-                    <div class="small text-secondary">TikTok Subject</div>
-                  </div>
-                </div>
-                <div class="row g-2 small">
-                  <div class="col-6"><span class="text-secondary">Case ID</span><div>CASE-2025-0001</div></div>
-                  <div class="col-6"><span class="text-secondary">Status</span><div><span class="badge text-bg-warning-subtle border">In Review</span></div></div>
-                  <div class="col-6"><span class="text-secondary">Opened</span><div>09 Sep 2025</div></div>
-                  <div class="col-6"><span class="text-secondary">Custodian</span><div>J. Doe</div></div>
-                  <div class="col-12 mt-2"><span class="text-secondary">Summary</span>
-                    <p class="mb-2">Alleged inappropriate DM exchanges. Evidence includes screenshots, screen recordings, and exported chat logs. Pending metadata verification.</p>
-                  </div>
-                </div>
-              </div>
-              <hr />
-              <div>
-                <div class="d-flex align-items-center justify-content-between mb-2">
-                  <h3 class="h6 mb-0">Chain of Custody</h3>
-                  <button class="btn btn-sm btn-outline-success"><i class="bi bi-plus-lg"></i></button>
-                </div>
-                <div class="timeline small">
-                  <div class="item">
-                    <div class="fw-semibold">Evidence imported</div>
-                    <div class="text-secondary">by Jane • 09 Sep 2025 10:14</div>
-                  </div>
-                  <div class="item">
-                    <div class="fw-semibold">Hash verified (SHA-256)</div>
-                    <div class="text-secondary">by System • 09 Sep 2025 10:15</div>
-                  </div>
-                  <div class="item">
-                    <div class="fw-semibold">Access granted to analyst team</div>
-                    <div class="text-secondary">by Admin • 09 Sep 2025 10:20</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="card mt-3 glass">
-            <div class="card-body">
-              <div class="d-flex justify-content-between align-items-center mb-2">
-                <h3 class="h6 mb-0">Audit Log</h3>
-                <button class="btn btn-sm btn-outline-light"><i class="bi bi-arrow-clockwise"></i></button>
-              </div>
-              <ul class="list-group list-group-flush audit-list">
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-key me-2"></i>Login success • <span class="text-secondary">10:35</span></li>
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-eye me-2"></i>Viewed case CASE-2025-0001 • <span class="text-secondary">10:36</span></li>
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-cloud-arrow-up me-2"></i>Uploaded file clip_12.mp4 • <span class="text-secondary">10:40</span></li>
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-shield-check me-2"></i>Checksum verified • <span class="text-secondary">10:41</span></li>
-                <li class="list-group-item bg-transparent text-white small"><i class="bi bi-pen me-2"></i>Updated status to In Review • <span class="text-secondary">10:45</span></li>
-              </ul>
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -1356,62 +1285,7 @@ if ($rs && count($rs) > 0):
   </section>
   <?php endif; ?>
 
-  <?php if ($view === 'add'): ?>
-    <?php if (!is_admin()): ?>
-      <section class="py-5 border-top" id="add">
-        <div class="container-xl">
-          <div class="alert alert-danger"><i class="bi bi-shield-lock me-2"></i>Unauthorized. Admins only.</div>
-        </div>
-      </section>
-    <?php else: ?>
-      <section class="py-5 border-top" id="add">
-        <div class="container-xl">
-          <div class="d-flex align-items-center justify-content-between mb-3">
-            <h2 class="h4 mb-0">Add Content / Upload Evidence</h2>
-            <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-grid-1x2 me-1"></i> Back to Cases</a>
-          </div>
-          <div class="card glass">
-            <div class="card-body">
-              <form class="mb-3" method="post" action="" enctype="multipart/form-data">
-                <input type="hidden" name="action" value="upload_evidence">
-                <?php csrf_field(); ?>
-                <div class="row g-2 align-items-end">
-                  <div class="col-md-3">
-                    <label class="form-label">Case ID (numeric)</label>
-                    <input type="number" name="case_id" class="form-control" placeholder="e.g., 123" required>
-                  </div>
-                  <div class="col-md-3">
-                    <label class="form-label">Case Code</label>
-                    <input type="text" name="case_code" class="form-control" placeholder="e.g., CASE-2025-AB12CD34" required>
-                  </div>
-                  <div class="col-md-3">
-                    <label class="form-label">Title</label>
-                    <input type="text" name="title" class="form-control" placeholder="Optional title">
-                  </div>
-                  <div class="col-md-3">
-                    <label class="form-label">Type</label>
-                    <select name="type" class="form-select">
-                      <option value="image">Image</option>
-                      <option value="video">Video</option>
-                      <option value="audio">Audio</option>
-                      <option value="pdf">PDF</option>
-                      <option value="doc">Document</option>
-                      <option value="other" selected>Other</option>
-                    </select>
-                  </div>
-                  <div class="col-12">
-                    <label class="form-label">File</label>
-                    <input type="file" name="evidence_file" class="form-control" required>
-                  </div>
-                </div>
-                <div class="text-end mt-3"><button class="btn btn-primary" type="submit"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button></div>
-              </form>
-            </div>
-          </div>
-        </div>
-      </section>
-    <?php endif; ?>
-  <?php endif; ?>
+
 
   <?php if ($view === 'users'): ?>
     <?php if (!is_admin()): ?>

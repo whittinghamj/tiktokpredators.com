@@ -1487,6 +1487,7 @@ if ($rs && count($rs) > 0):
             </li>
           </ul>
           <div class="tab-content pt-3">
+            <!-- Login Pane -->
             <div class="tab-pane fade <?php echo ($openAuth==='login')?'show active':''; ?>" id="login-pane" role="tabpanel">
               <form method="post" action="">
                 <input type="hidden" name="action" value="login">
@@ -1504,6 +1505,7 @@ if ($rs && count($rs) > 0):
                 </div>
               </form>
             </div>
+            <!-- Register Pane -->
             <div class="tab-pane fade <?php echo ($openAuth==='register')?'show active':''; ?>" id="register-pane" role="tabpanel">
               <form method="post" action="">
                 <input type="hidden" name="action" value="register">
@@ -1538,73 +1540,97 @@ if ($rs && count($rs) > 0):
       </div>
     </div>
   </div>
-
-  <footer class="border-top py-4 mt-5 text-center text-secondary">
-    <div class="container">
-      <div class="small">© <?php echo date('Y'); ?> TikTokPredators • All rights reserved.</div>
-    </div>
-  </footer>
-
-  <!-- Scripts -->
+  
+  <!-- Bootstrap JS Bundle -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
-  // Evidence modal dynamic preview + admin edit wiring
   document.addEventListener('DOMContentLoaded', function () {
-    var evModal = document.getElementById('evidenceModal');
-    if (evModal) {
+    // Evidence modal dynamic preview + admin edit wiring
+    (function () {
+      var evModal = document.getElementById('evidenceModal');
+      if (!evModal) return;
+  
       evModal.addEventListener('show.bs.modal', function (event) {
         var btn = event.relatedTarget;
         if (!btn) return;
         var src = btn.getAttribute('data-src') || '';
-        var title = btn.getAttribute('data-title') || 'Evidence';
+        var title = btn.getAttribute('data-title') || '';
         var mime = btn.getAttribute('data-mime') || '';
-        var type = btn.getAttribute('data-type') || 'other';
+        var type = btn.getAttribute('data-type') || '';
         var id = btn.getAttribute('data-id') || '';
         var caseId = btn.getAttribute('data-case-id') || '';
-        document.getElementById('evModalTitle').textContent = title;
-        document.getElementById('evMime').textContent = mime || type;
-        document.getElementById('evSize').textContent = '';
-        var preview = document.getElementById('evPreview');
-        preview.innerHTML = '';
-        // Choose renderer
-        if (type === 'image' || (mime.indexOf('image/') === 0)) {
-          var img = document.createElement('img');
-          img.src = src; img.className = 'img-fluid rounded';
-          preview.classList.remove('ratio','ratio-16x9'); preview.appendChild(img);
-        } else if (type === 'video' || mime.indexOf('video/') === 0) {
-          preview.classList.add('ratio','ratio-16x9');
-          preview.innerHTML = '<video controls src="'+src+'" class="w-100 h-100"></video>';
-        } else if (type === 'audio' || mime.indexOf('audio/') === 0) {
-          preview.classList.remove('ratio','ratio-16x9');
-          preview.innerHTML = '<audio controls class="w-100"><source src="'+src+'"></audio>';
-        } else if (type === 'pdf' || mime === 'application/pdf') {
-          preview.classList.add('ratio','ratio-16x9');
-          preview.innerHTML = '<iframe src="'+src+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
-        } else {
-          preview.classList.add('ratio','ratio-16x9');
-          preview.innerHTML = '<iframe src="'+src+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
+  
+        // Fallbacks
+        if (!type && mime.indexOf('/') > -1) type = mime.split('/')[0];
+        if (!title || title.trim() === '') {
+          // Derive from filename as last resort
+          try { title = src.split('/').pop(); } catch (e) { title = 'Evidence'; }
         }
+  
+        // Set header fields
+        var titleEl = document.getElementById('evModalTitle');
+        if (titleEl) titleEl.textContent = title;
+        var mimeEl = document.getElementById('evMime');
+        if (mimeEl) mimeEl.textContent = mime || (type || '—');
+        var sizeEl = document.getElementById('evSize');
+        if (sizeEl) sizeEl.textContent = '';
+  
+        // Render preview
+        var preview = document.getElementById('evPreview');
+        if (preview) {
+          preview.classList.add('ratio','ratio-16x9');
+          preview.innerHTML = '';
+          var safeSrc = src;
+          if (type === 'image' || (mime.indexOf('image/') === 0)) {
+            preview.classList.remove('ratio','ratio-16x9');
+            var img = document.createElement('img');
+            img.src = safeSrc;
+            img.alt = title;
+            img.className = 'img-fluid rounded';
+            preview.appendChild(img);
+          } else if (type === 'video' || mime.indexOf('video/') === 0) {
+            preview.innerHTML = '<video controls class="w-100 h-100"><source src="'+safeSrc+'" type="'+mime+'"></video>';
+          } else if (type === 'audio' || mime.indexOf('audio/') === 0) {
+            preview.classList.remove('ratio','ratio-16x9');
+            preview.innerHTML = '<audio controls class="w-100"><source src="'+safeSrc+'" type="'+mime+'"></audio>';
+          } else if (type === 'pdf' || mime === 'application/pdf') {
+            preview.innerHTML = '<iframe src="'+safeSrc+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
+          } else {
+            preview.innerHTML = '<iframe src="'+safeSrc+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
+          }
+        }
+  
         // Admin edit fields (if present)
         var evId = document.getElementById('evId');
         var evCaseId = document.getElementById('evCaseId');
         var evTitle = document.getElementById('evTitle');
         var evType = document.getElementById('evType');
         if (evId && evCaseId && evTitle && evType) {
-          evId.value = id; evCaseId.value = caseId; evTitle.value = title; evType.value = type;
+          evId.value = id;
+          evCaseId.value = caseId;
+          evTitle.value = title;
+          if (evType.querySelector('option[value="'+type+'"]')) {
+            evType.value = type;
+          }
         }
       });
+  
       evModal.addEventListener('hidden.bs.modal', function () {
         var preview = document.getElementById('evPreview');
-        if (preview) { preview.innerHTML = '<div class="text-secondary small">No preview available</div>'; preview.classList.add('ratio','ratio-16x9'); }
+        if (preview) {
+          preview.innerHTML = '<div class="text-secondary small">No preview available</div>';
+          preview.classList.add('ratio','ratio-16x9');
+        }
       });
-    }
-
+    })();
+  
     // Auth modal tab behavior based on triggers and server-side preference
-    var authModalEl = document.getElementById('authModal');
-    if (authModalEl) {
+    (function () {
+      var authModalEl = document.getElementById('authModal');
+      if (!authModalEl) return;
       authModalEl.addEventListener('show.bs.modal', function (event) {
         var trigger = event.relatedTarget;
-        var preferred = trigger &amp;&amp; trigger.getAttribute('data-auth-tab') ? trigger.getAttribute('data-auth-tab') : 'login';
+        var preferred = trigger && trigger.getAttribute('data-auth-tab') ? trigger.getAttribute('data-auth-tab') : 'login';
         var btn = document.querySelector('#authModal [data-bs-target="#' + (preferred === 'register' ? 'register-pane' : 'login-pane') + '"]');
         if (btn) { new bootstrap.Tab(btn).show(); }
       });
@@ -1615,126 +1641,19 @@ if ($rs && count($rs) > 0):
         var btn = document.querySelector('#authModal [data-bs-target="#' + (openPref === 'register' ? 'register-pane' : 'login-pane') + '"]');
         if (btn) { new bootstrap.Tab(btn).show(); }
       }
-    }
-
+    })();
+  
     // Theme toggle
-    var themeToggle = document.getElementById('themeToggle');
-    if (themeToggle) {
+    (function () {
+      var themeToggle = document.getElementById('themeToggle');
+      if (!themeToggle) return;
       themeToggle.addEventListener('click', function () {
         var html = document.documentElement;
         var current = html.getAttribute('data-bs-theme') || 'dark';
         html.setAttribute('data-bs-theme', current === 'dark' ? 'light' : 'dark');
       });
-    }
-
-    // Auto-open Create Case modal on validation error
-    <?php if (!empty($openModal) && $openModal === 'createCase'): ?>
-      var cc = document.getElementById('createCaseModal');
-      if (cc) { new bootstrap.Modal(cc).show(); }
-    <?php endif; ?>
+    })();
   });
   </script>
-
-  <!-- Auth Modal -->
-<div class="modal fade" id="authModal" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 class="modal-title"><i class="bi bi-shield-lock me-2"></i>Account</h5>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <ul class="nav nav-tabs" id="authTabs" role="tablist">
-          <li class="nav-item" role="presentation">
-            <button class="nav-link <?php echo ($openAuth==='login')?'active':''; ?>" data-bs-toggle="tab" data-bs-target="#login-pane" type="button" role="tab">Login</button>
-          </li>
-          <li class="nav-item" role="presentation">
-            <button class="nav-link <?php echo ($openAuth==='register')?'active':''; ?>" data-bs-toggle="tab" data-bs-target="#register-pane" type="button" role="tab">Register</button>
-          </li>
-        </ul>
-
-        <div class="tab-content pt-3">
-          <!-- Login -->
-          <div class="tab-pane fade <?php echo ($openAuth==='login')?'show active':''; ?>" id="login-pane" role="tabpanel">
-            <form method="post" action="">
-              <input type="hidden" name="action" value="login">
-              <?php csrf_field(); ?>
-              <div class="mb-2">
-                <label class="form-label">Email</label>
-                <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
-              </div>
-              <div class="mb-2">
-                <label class="form-label">Password</label>
-                <input type="password" name="password" class="form-control" minlength="8" required>
-              </div>
-              <div class="d-grid">
-                <button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
-              </div>
-            </form>
-          </div>
-
-          <!-- Register -->
-          <div class="tab-pane fade <?php echo ($openAuth==='register')?'show active':''; ?>" id="register-pane" role="tabpanel">
-            <form method="post" action="">
-              <input type="hidden" name="action" value="register">
-              <?php csrf_field(); ?>
-              <div class="mb-2">
-                <label class="form-label">Email</label>
-                <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
-              </div>
-              <div class="mb-2">
-                <label class="form-label">Display Name</label>
-                <input type="text" name="display_name" class="form-control" placeholder="Your name" required>
-              </div>
-              <div class="mb-2">
-                <label class="form-label">Password</label>
-                <input type="password" name="password" class="form-control" minlength="8" required>
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Confirm Password</label>
-                <input type="password" name="password_confirm" class="form-control" minlength="8" required>
-              </div>
-              <div class="form-check mb-3">
-                <input class="form-check-input" type="checkbox" name="agree" id="agreeTerms" required>
-                <label class="form-check-label small" for="agreeTerms">I agree to the terms and privacy policy.</label>
-              </div>
-              <div class="d-grid">
-                <button class="btn btn-success" type="submit"><i class="bi bi-person-plus me-1"></i> Create Account</button>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div> <!-- /modal-body -->
-    </div>
-  </div>
-</div>
-
-<!-- Bootstrap JS (needed for modals) -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-document.addEventListener('DOMContentLoaded', function () {
-  var authModalEl = document.getElementById('authModal');
-  if (!authModalEl) return;
-
-  // Switch tab based on the button that opened the modal
-  authModalEl.addEventListener('show.bs.modal', function (event) {
-    var trigger = event.relatedTarget;
-    var preferred = trigger && trigger.getAttribute('data-auth-tab') ? trigger.getAttribute('data-auth-tab') : 'login';
-    var selector = '#authModal [data-bs-target="#' + (preferred === 'register' ? 'register-pane' : 'login-pane') + '"]';
-    var btn = document.querySelector(selector);
-    if (btn) { new bootstrap.Tab(btn).show(); }
-  });
-
-  // If server set a preference (e.g. validation error), open the modal & tab
-  var openPref = <?php echo json_encode($openAuth); ?>;
-  if (openPref === 'login' || openPref === 'register') {
-    var modal = new bootstrap.Modal(authModalEl);
-    modal.show();
-    var btn = document.querySelector('#authModal [data-bs-target="#' + (openPref === 'register' ? 'register-pane' : 'login-pane') + '"]');
-    if (btn) { new bootstrap.Tab(btn).show(); }
-  }
-});
-</script>
-
-</body>
-</html>
+  </body>
+  </html>
