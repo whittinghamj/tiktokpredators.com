@@ -1441,291 +1441,33 @@ if ($rs && count($rs) > 0):
                           <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
                         </tr>
                         <tr>
-                          <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> John Smith</td>
-                          <td><span class="badge rounded-pill text-bg-secondary">Viewer</span></td>
-                          <td><span class="badge text-bg-warning-subtle border">Pending</span></td>
-                          <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="col-lg-4">
-              <div class="card glass h-100">
-                <div class="card-body">
-                  <h2 class="h6 mb-2">Notes</h2>
-                  <div class="alert alert-warning small"><i class="bi bi-info-circle me-2"></i>Role management coming soon.</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-    <?php endif; ?>
-  <?php endif; ?>
-
-  <footer class="border-top py-4">
-    <div class="container-xl d-flex flex-wrap justify-content-between align-items-center gap-3">
-      <div class="small">© <span id="year"></span> TikTokPredators. For reporting and documentation only. Not affiliated with TikTok.</div>
-      <div class="d-flex gap-3 small">
-        <a href="#" data-bs-toggle="modal" data-bs-target="#privacyModal"><i class="bi bi-shield-lock me-1"></i> Privacy</a>
-        <a href="#" data-bs-toggle="modal" data-bs-target="#tosModal"><i class="bi bi-file-text me-1"></i> Terms</a>
-        <a href="#" data-bs-toggle="modal" data-bs-target="#disclaimerModal"><i class="bi bi-exclamation-octagon me-1"></i> Disclaimer</a>
-      </div>
-    </div>
-  </footer>
-  <?php if (getenv('APP_DEBUG') === '1'): ?>
-    <div class="container-xl my-3">
-      <details class="small">
-        <summary class="text-secondary">Debug info (visible only with APP_DEBUG=1)</summary>
-        <?php if (!empty($_SESSION['last_db_error'])): ?>
-          <div class="alert alert-warning mt-2">DB Error: <?php echo htmlspecialchars($_SESSION['last_db_error']); unset($_SESSION['last_db_error']); ?></div>
-        <?php endif; ?>
-        <?php if (!empty($_SESSION['last_register_error'])): ?>
-          <div class="alert alert-warning mt-2">Register Error: <?php echo htmlspecialchars($_SESSION['last_register_error']); unset($_SESSION['last_register_error']); ?></div>
-        <?php endif; ?>
-      </details>
-    </div>
-  <?php endif; ?>
-
-  <!-- Create Case Modal -->
-  <div class="modal fade" id="createCaseModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-folder-plus me-2"></i>Add Case</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <?php if (!empty($formError)): ?>
-            <div class="alert alert-danger small d-flex align-items-center"><i class="bi bi-exclamation-octagon me-2"></i><span><?php echo htmlspecialchars($formError); ?></span></div>
-          <?php endif; ?>
-          <form method="post" action="" id="createCaseForm">
-            <input type="hidden" name="action" value="create_case">
-            <?php csrf_field(); ?>
-            <div class="mb-3">
-              <label class="form-label">Case Name</label>
-              <input type="text" name="case_name" class="form-control" placeholder="E.g., CASE-2025-0003 – Alleged DM Grooming" required>
-            </div>
-            <div class="row g-2">
-              <div class="col-md-6">
-                <label class="form-label">Person Name</label>
-                <input type="text" name="person_name" class="form-control" placeholder="Full name (if known)">
-              </div>
-              <div class="col-md-6">
-                <label class="form-label">TikTok Username</label>
-                <div class="input-group">
-                  <span class="input-group-text">@</span>
-                  <input type="text" name="tiktok_username" class="form-control" placeholder="handle">
-                </div>
-              </div>
-            </div>
-            <div class="mt-3 mb-3">
-              <label class="form-label">Initial Summary</label>
-              <textarea name="initial_summary" class="form-control" rows="3" placeholder="Short description of the allegation and evidence context" required></textarea>
-            </div>
-            <div class="row g-2">
-              <div class="col-md-6">
-                <label class="form-label">Sensitivity</label>
-                <select name="sensitivity" class="form-select" required>
-                  <option value="Standard">Standard</option>
-                  <option value="Restricted">Restricted</option>
-                  <option value="Sealed">Sealed</option>
-                </select>
-              </div>
-              <div class="col-md-6">
-                <label class="form-label">Status</label>
-                <select name="status" class="form-select" required>
-                  <option value="Open">Open</option>
-                  <option value="In Review">In Review</option>
-                  <option value="Verified">Verified</option>
-                  <option value="Closed">Closed</option>
-                </select>
-              </div>
-            </div>
-          </form>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary" type="submit" form="createCaseForm"><i class="bi bi-save me-1"></i> Save</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Upload Modal -->
-  <div class="modal fade" id="uploadModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-cloud-arrow-up me-2"></i>Upload Evidence</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <div class="alert alert-warning small"><i class="bi bi-shield-lock me-2"></i>Ensure personally identifiable information (PII) is handled lawfully. All uploads are hashed and timestamped.</div>
-          <div class="dropzone" role="button" tabindex="0">
-            <i class="bi bi-cloud-upload display-6 d-block"></i>
-            <p class="mb-1">Drag & drop files here or click to browse</p>
-            <small class="text-secondary">Max 1GB per file • Allowed: PNG, JPG, MP4, MOV, WAV, MP3, PDF, TXT, JSON</small>
-          </div>
-          <div class="mt-3 small text-secondary">Selected files (mock list)</div>
-          <ul class="list-group list-group-flush">
-            <li class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center">
-              <span><i class="bi bi-file-earmark-image me-2"></i> screenshot_01.png</span>
-              <span class="badge text-bg-dark border">12.4 MB</span>
-            </li>
-          </ul>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
-          <button class="btn btn-primary"><i class="bi bi-arrow-right-circle me-1"></i> Continue</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Auth Modal (Register / Login) -->
-  <div class="modal fade" id="authModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-shield-lock me-2"></i>Account Access</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <ul class="nav nav-tabs" id="authTabs" role="tablist">
-            <li class="nav-item" role="presentation">
-              <button class="nav-link active" id="login-tab" data-bs-toggle="tab" data-bs-target="#login-pane" type="button" role="tab" aria-controls="login-pane" aria-selected="true"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
-            </li>
-            <li class="nav-item" role="presentation">
-              <button class="nav-link" id="register-tab" data-bs-toggle="tab" data-bs-target="#register-pane" type="button" role="tab" aria-controls="register-pane" aria-selected="false"><i class="bi bi-person-plus me-1"></i> Register</button>
-            </li>
-          </ul>
-          <div class="tab-content pt-3">
-            <div class="tab-pane fade show active" id="login-pane" role="tabpanel" aria-labelledby="login-tab">
-              <form method="post" action="">
-                <input type="hidden" name="action" value="login">
-                <?php csrf_field(); ?>
-                <div class="mb-3">
-                  <label class="form-label">Email</label>
-                  <input type="email" name="email" class="form-control" placeholder="you@org.org" required />
-                </div>
-                <div class="mb-3">
-                  <label class="form-label">Password</label>
-                  <input type="password" name="password" class="form-control" placeholder="••••••••" minlength="8" required />
-                </div>
-                <div class="d-flex justify-content-between align-items-center">
-                  <small class="text-secondary">Use your account email & password.</small>
-                  <a class="small disabled" tabindex="-1" aria-disabled="true" href="#" title="Not available on public site">Forgot password?</a>
-                </div>
-                <div class="mt-3 d-grid">
-                  <button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-in-right me-2"></i>Sign in</button>
-                </div>
-              </form>
-            </div>
-            <div class="tab-pane fade" id="register-pane" role="tabpanel" aria-labelledby="register-tab">
-              <form method="post" action="">
-                <input type="hidden" name="action" value="register">
-                <?php csrf_field(); ?>
-                <div class="mb-3">
-                  <label class="form-label">Display Name</label>
-                  <input type="text" name="display_name" class="form-control" placeholder="Your name" required />
-                </div>
-                <div class="mb-3">
-                  <label class="form-label">Email</label>
-                  <input type="email" name="email" class="form-control" placeholder="you@org.org" required />
-                </div>
-                <div class="mb-3">
-                  <label class="form-label">Password</label>
-                  <input type="password" name="password" class="form-control" placeholder="At least 8 characters" minlength="8" required />
-                </div>
-                <div class="mb-3">
-                  <label class="form-label">Confirm Password</label>
-                  <input type="password" name="password_confirm" class="form-control" placeholder="Repeat password" minlength="8" required />
-                </div>
-                <div class="form-check mb-2">
-                  <input class="form-check-input" type="checkbox" value="1" id="agreeTos" name="agree" required>
-                  <label class="form-check-label" for="agreeTos">
-                    I agree to the <a href="#" data-bs-toggle="modal" data-bs-target="#tosModal">Terms</a> and acknowledge the <a href="#" data-bs-toggle="modal" data-bs-target="#privacyModal">Privacy Notice</a>.
-                  </label>
-                </div>
-                <div class="mt-3 d-grid">
-                  <button class="btn btn-success" type="submit"><i class="bi bi-person-plus me-2"></i>Create account</button>
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-        <div class="modal-footer">
-          <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Policy Modals (Privacy, Terms, Disclaimer) -->
-  <div class="modal fade" id="privacyModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
-      <div class="modal-content">
-        <div class="modal-header"><h5 class="modal-title">Privacy Notice</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
-        <div class="modal-body">
-          <p class="small">This platform stores potentially sensitive material. Access is restricted to vetted users. All actions are logged. Do not upload content without lawful basis. Data minimization and redaction are required where appropriate.</p>
-        </div>
-        <div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div>
-      </div>
-    </div>
-  </div>
-  <div class="modal fade" id="tosModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
-      <div class="modal-content">
-        <div class="modal-header"><h5 class="modal-title">Terms of Use</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
-        <div class="modal-body">
-          <p class="small">Users agree to lawful, ethical use. Distribution of unredacted materials is prohibited. Cooperation with legitimate legal requests is supported. Violations may result in suspension and reporting.</p>
-        </div>
-        <div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div>
-      </div>
-    </div>
-  </div>
-  <div class="modal fade" id="disclaimerModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-scrollable">
-      <div class="modal-content">
-        <div class="modal-header"><h5 class="modal-title">Legal Disclaimer</h5><button class="btn-close" data-bs-dismiss="modal"></button></div>
-        <div class="modal-body">
-          <p class="small">Allegations documented here are claims and may be under investigation. Presumption of innocence applies. Content may be shared with appropriate authorities when required.</p>
-        </div>
-        <div class="modal-footer"><button class="btn btn-primary" data-bs-dismiss="modal">Close</button></div>
-      </div>
-    </div>
-  </div>
-
-  <?php $sqlError = $_SESSION['sql_error'] ?? ''; unset($_SESSION['sql_error']); ?>
-
-  <!-- Evidence Viewer / Editor Modal -->
+</file>
+  <!-- Evidence Viewer Modal (shared for all roles) -->
   <div class="modal fade" id="evidenceModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-eye me-2"></i><span id="evModalTitle">Evidence</span></h5>
+          <h5 class="modal-title"><i class="bi bi-eye me-2"></i><span id="evModalTitle">View Evidence</span></h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
-          <div id="evPreview" class="mb-3"></div>
-          <?php if (is_admin()): ?>
-          <hr />
-          <form id="evEditForm" method="post" action="">
+          <div id="evPreview" class="ratio ratio-16x9 border rounded d-flex align-items-center justify-content-center bg-body-tertiary">
+            <div class="text-secondary">Loading preview…</div>
+          </div>
+
+          <!-- Admin-only edit form (shown only when opened via .btn-edit-evidence) -->
+          <form class="mt-3 d-none" id="evEditForm" method="post" action="">
             <input type="hidden" name="action" value="update_evidence">
             <?php csrf_field(); ?>
-            <input type="hidden" name="evidence_id" id="evEditId" value="">
+            <input type="hidden" name="evidence_id" id="evEditEvidenceId" value="">
             <input type="hidden" name="case_id" id="evEditCaseId" value="">
-            <input type="hidden" name="redirect_url" id="evEditRedirect" value="">
-            <div class="row g-2">
-              <div class="col-md-8">
+            <input type="hidden" name="redirect_url" id="evEditRedirectUrl" value="">
+            <div class="row g-2 align-items-end">
+              <div class="col-md-6">
                 <label class="form-label">Title</label>
-                <input type="text" class="form-control" name="title" id="evEditTitle" />
+                <input type="text" class="form-control" name="title" id="evEditTitle" value="">
               </div>
-              <div class="col-md-4">
+              <div class="col-md-3">
                 <label class="form-label">Type</label>
                 <select class="form-select" name="type" id="evEditType">
                   <option value="image">Image</option>
@@ -1736,187 +1478,90 @@ if ($rs && count($rs) > 0):
                   <option value="other">Other</option>
                 </select>
               </div>
+              <div class="col-md-3 text-end">
+                <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save Changes</button>
+              </div>
             </div>
           </form>
-          <?php endif; ?>
         </div>
         <div class="modal-footer">
-          <a id="evOpenNewTab" href="#" target="_blank" class="btn btn-outline-light">Open in new tab</a>
-          <?php if (is_admin()): ?>
-          <button class="btn btn-primary" type="submit" form="evEditForm"><i class="bi bi-save me-1"></i> Save Changes</button>
-          <?php endif; ?>
-          <button class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-        </div>
-      </div>
-    </div>
-  </div>
-  <div class="modal fade" id="sqlErrorModal" tabindex="-1" aria-labelledby="sqlErrorLabel" aria-hidden="true">
-    <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
-      <div class="modal-content">
-        <div class="modal-header bg-danger-subtle">
-          <h5 class="modal-title" id="sqlErrorLabel"><i class="bi bi-bug me-2"></i>Database / SQL Error</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <?php if ($sqlError): ?>
-            <div class="alert alert-danger"><i class="bi bi-exclamation-octagon me-2"></i>An error occurred during authentication, registration, or case creation. Details below:</div>
-            <pre class="small mb-0" style="white-space: pre-wrap; word-wrap: break-word;">
-<?php echo htmlspecialchars($sqlError); ?>
-            </pre>
-          <?php else: ?>
-            <div class="text-secondary small">No SQL error information available.</div>
-          <?php endif; ?>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+          <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
         </div>
       </div>
     </div>
   </div>
 
-  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <!-- Scripts: Bootstrap and modal logic -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
-    // Theme toggle (respects Bootstrap 5.3 data-bs-theme)
-    (function() {
-      const key = 'tp-theme';
-      const stored = localStorage.getItem(key);
-      if (stored) document.documentElement.setAttribute('data-bs-theme', stored);
-      document.getElementById('themeToggle').addEventListener('click', function(){
-        const cur = document.documentElement.getAttribute('data-bs-theme');
-        const next = cur === 'dark' ? 'light' : 'dark';
-        document.documentElement.setAttribute('data-bs-theme', next);
-        localStorage.setItem(key, next);
-      });
-      document.getElementById('year').textContent = new Date().getFullYear();
-    })();
-
-    // Mock: click on placeholder evidence to preview (toast)
-    const toastContainer = document.createElement('div');
-    toastContainer.className = 'toast-container position-fixed bottom-0 end-0 p-3';
-    document.body.appendChild(toastContainer);
-    function makeToast(msg){
-      const el = document.createElement('div');
-      el.className = 'toast align-items-center text-bg-dark border-0';
-      el.role = 'status';
-      el.innerHTML = `<div class="d-flex"><div class="toast-body">${msg}</div><button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button></div>`;
-      toastContainer.appendChild(el);
-      new bootstrap.Toast(el, { delay: 2000 }).show();
-    }
-    $(document).on('click', '.placeholder-tile', function(){ makeToast('Preview would open in a secure viewer.'); });
-
-    // Accessibility helpers (focus outline only on keyboard)
-    function handleFirstTab(e){ if(e.key==='Tab'){ document.body.classList.add('user-is-tabbing'); window.removeEventListener('keydown', handleFirstTab);} }
-    window.addEventListener('keydown', handleFirstTab);
-  </script>
-  <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
-  <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
-  <script src="https://cdn.datatables.net/responsive/2.5.0/js/dataTables.responsive.min.js"></script>
-  <script src="https://cdn.datatables.net/responsive/2.5.0/js/responsive.bootstrap5.min.js"></script>
-  <script>
-    $(function(){
-      const dt = $('#casesTable').DataTable({
-        responsive: true,
-        pageLength: 10,
-        order: [[3, 'desc']],
-        columnDefs: [
-          { targets: [2,4,6], orderable: false }
-        ],
-        language: {
-          search: "Filter:",
-          lengthMenu: "Show _MENU_ cases",
-          info: "_START_-_END_ of _TOTAL_ cases",
-        }
-      });
-    });
-  </script>
-  <script>
     (function(){
-      function buildPreview(src, type, mime){
-        if (!src) return '<div class="text-secondary">No preview available.</div>';
-        type = (type||'').toLowerCase();
-        mime = (mime||'').toLowerCase();
-        if (type === 'image' || mime.startsWith('image/')){
-          return '<img src="'+src+'" alt="" class="img-fluid rounded">';
+      function renderPreview(src, mime, type){
+        const wrap = document.getElementById('evPreview');
+        if(!wrap) return;
+        const safeSrc = src;
+        let html = '';
+        const m = (mime || '').toLowerCase();
+        const t = (type || '').toLowerCase();
+        if(m.startsWith('image/') || t === 'image'){
+          html = '<img src="'+safeSrc+'" alt="evidence" class="w-100 h-100 object-fit-contain">';
+        } else if(m === 'application/pdf' || t === 'pdf'){
+          html = '<iframe src="'+safeSrc+'#toolbar=0" class="w-100 h-100" title="PDF"></iframe>';
+        } else if(m.startsWith('video/') || t === 'video'){
+          html = '<video controls class="w-100 h-100"><source src="'+safeSrc+'" type="'+(m||'video/mp4')+'">Your browser does not support the video tag.</video>';
+        } else if(m.startsWith('audio/') || t === 'audio'){
+          html = '<audio controls class="w-100"><source src="'+safeSrc+'" type="'+(m||'audio/mpeg')+'">Your browser does not support the audio element.</audio>';
+        } else {
+          html = '<iframe src="'+safeSrc+'" class="w-100 h-100" title="Preview"></iframe>';
         }
-        if (type === 'pdf' || mime === 'application/pdf'){
-          return '<div class="ratio ratio-16x9"><iframe src="'+src+'" title="PDF" loading="lazy"></iframe></div>';
-        }
-        if (type === 'video' || mime.startsWith('video/')){
-          return '<video controls class="w-100" preload="metadata"><source src="'+src+'"></video>';
-        }
-        if (type === 'audio' || mime.startsWith('audio/')){
-          return '<audio controls class="w-100"><source src="'+src+'"></audio>';
-        }
-        return '<a href="'+src+'" target="_blank" class="btn btn-outline-light">Open file</a>';
+        wrap.innerHTML = html;
       }
 
-      document.addEventListener('show.bs.modal', function (e) {
-        const trg = e.relatedTarget;
-        if (!trg) return;
-        if (trg.matches('.btn-view-evidence, .btn-edit-evidence')){
-          const id = trg.getAttribute('data-id');
-          const caseId = trg.getAttribute('data-case-id');
-          const src = trg.getAttribute('data-src');
-          const title = trg.getAttribute('data-title') || 'Evidence';
-          const type = trg.getAttribute('data-type') || 'other';
-          const mime = trg.getAttribute('data-mime') || '';
+      function openForView(btn){
+        const title = btn.getAttribute('data-title') || 'View Evidence';
+        const src   = btn.getAttribute('data-src') || '';
+        const mime  = btn.getAttribute('data-mime') || '';
+        const type  = btn.getAttribute('data-type') || '';
+        document.getElementById('evModalTitle').textContent = title;
+        renderPreview(src, mime, type);
+        // ensure edit form hidden for viewers
+        document.getElementById('evEditForm').classList.add('d-none');
+      }
 
-          document.getElementById('evModalTitle').textContent = title;
-          document.getElementById('evPreview').innerHTML = buildPreview(src, type, mime);
-          const openBtn = document.getElementById('evOpenNewTab');
-          if (openBtn) openBtn.href = src;
-          <?php if (is_admin()): ?>
-            document.getElementById('evEditId').value = id || '';
-            document.getElementById('evEditCaseId').value = caseId || '';
-            document.getElementById('evEditRedirect').value = window.location.pathname + window.location.search + '#case-view';
-            document.getElementById('evEditTitle').value = title || '';
-            document.getElementById('evEditType').value = (type || 'other');
-          <?php endif; ?>
+      function openForEdit(btn){
+        const title = btn.getAttribute('data-title') || 'Edit Evidence';
+        const src   = btn.getAttribute('data-src') || '';
+        const mime  = btn.getAttribute('data-mime') || '';
+        const type  = btn.getAttribute('data-type') || '';
+        const evid  = btn.getAttribute('data-id') || '';
+        const caseId= btn.getAttribute('data-case-id') || '';
+        document.getElementById('evModalTitle').textContent = title + ' (Edit)';
+        renderPreview(src, mime, type);
+        // populate admin form
+        const f = document.getElementById('evEditForm');
+        f.classList.remove('d-none');
+        document.getElementById('evEditEvidenceId').value = evid;
+        document.getElementById('evEditCaseId').value = caseId;
+        document.getElementById('evEditTitle').value = btn.getAttribute('data-title') || '';
+        document.getElementById('evEditType').value = (type || 'other');
+        document.getElementById('evEditRedirectUrl').value = window.location.pathname + window.location.search + (window.location.hash || '');
+      }
+
+      document.addEventListener('click', function(e){
+        const t = e.target.closest('.btn-view-evidence');
+        if(t){ openForView(t); }
+        const te = e.target.closest('.btn-edit-evidence');
+        if(te){ openForEdit(te); }
+      }, true);
+
+      // Clear preview when modal hides
+      document.addEventListener('hidden.bs.modal', function(evt){
+        if(evt.target && evt.target.id === 'evidenceModal'){
+          const wrap = document.getElementById('evPreview');
+          if(wrap) wrap.innerHTML = '<div class="text-secondary">Loading preview…</div>';
+          const f = document.getElementById('evEditForm');
+          if(f) f.classList.add('d-none');
         }
       });
-    })();
-  </script>
-  <script>
-    // Switch auth modal to requested tab
-    document.addEventListener('click', function(e){
-      const btn = e.target.closest('[data-auth-tab]');
-      if (!btn) return;
-      const tab = btn.getAttribute('data-auth-tab');
-      setTimeout(()=>{
-        const trigger = document.querySelector(tab === 'register' ? '#register-tab' : '#login-tab');
-        if (trigger) new bootstrap.Tab(trigger).show();
-      }, 150);
-    });
-  </script>
-  <script>
-    // Auto-open auth modal on server-side errors
-    (function(){
-      const openAuth = <?php echo json_encode($openAuth ?? ''); ?>;
-      if (!openAuth) return;
-      const m = new bootstrap.Modal(document.getElementById('authModal'));
-      m.show();
-      const trigger = document.querySelector(openAuth === 'register' ? '#register-tab' : '#login-tab');
-      if (trigger) new bootstrap.Tab(trigger).show();
-    })();
-  </script>
-  <script>
-    // Auto-open Create Case modal if server signaled a form error
-    (function(){
-      const openModal = <?php echo json_encode($openModal ?? ''); ?>;
-      if (openModal !== 'createCase') return;
-      const m = new bootstrap.Modal(document.getElementById('createCaseModal'));
-      m.show();
-    })();
-  </script>
-  <script>
-    // Auto-open SQL error modal if server captured a DB error
-    (function(){
-      const hasSqlError = <?php echo json_encode(isset($sqlError) && $sqlError !== ''); ?>;
-      if (!hasSqlError) return;
-      const m = new bootstrap.Modal(document.getElementById('sqlErrorModal'));
-      m.show();
     })();
   </script>
 </body>
-</html>
