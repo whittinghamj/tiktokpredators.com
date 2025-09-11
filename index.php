@@ -1760,5 +1760,106 @@ if ($rs && count($rs) > 0):
     <?php endif; ?>
   });
   </script>
+
+  <!-- Auth Modal -->
+<div class="modal fade" id="authModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-shield-lock me-2"></i>Account</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <ul class="nav nav-tabs" id="authTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link <?php echo ($openAuth==='login')?'active':''; ?>" data-bs-toggle="tab" data-bs-target="#login-pane" type="button" role="tab">Login</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link <?php echo ($openAuth==='register')?'active':''; ?>" data-bs-toggle="tab" data-bs-target="#register-pane" type="button" role="tab">Register</button>
+          </li>
+        </ul>
+
+        <div class="tab-content pt-3">
+          <!-- Login -->
+          <div class="tab-pane fade <?php echo ($openAuth==='login')?'show active':''; ?>" id="login-pane" role="tabpanel">
+            <form method="post" action="">
+              <input type="hidden" name="action" value="login">
+              <?php csrf_field(); ?>
+              <div class="mb-2">
+                <label class="form-label">Email</label>
+                <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
+              </div>
+              <div class="mb-2">
+                <label class="form-label">Password</label>
+                <input type="password" name="password" class="form-control" minlength="8" required>
+              </div>
+              <div class="d-grid">
+                <button class="btn btn-primary" type="submit"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Register -->
+          <div class="tab-pane fade <?php echo ($openAuth==='register')?'show active':''; ?>" id="register-pane" role="tabpanel">
+            <form method="post" action="">
+              <input type="hidden" name="action" value="register">
+              <?php csrf_field(); ?>
+              <div class="mb-2">
+                <label class="form-label">Email</label>
+                <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
+              </div>
+              <div class="mb-2">
+                <label class="form-label">Display Name</label>
+                <input type="text" name="display_name" class="form-control" placeholder="Your name" required>
+              </div>
+              <div class="mb-2">
+                <label class="form-label">Password</label>
+                <input type="password" name="password" class="form-control" minlength="8" required>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Confirm Password</label>
+                <input type="password" name="password_confirm" class="form-control" minlength="8" required>
+              </div>
+              <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" name="agree" id="agreeTerms" required>
+                <label class="form-check-label small" for="agreeTerms">I agree to the terms and privacy policy.</label>
+              </div>
+              <div class="d-grid">
+                <button class="btn btn-success" type="submit"><i class="bi bi-person-plus me-1"></i> Create Account</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div> <!-- /modal-body -->
+    </div>
+  </div>
+</div>
+
+<!-- Bootstrap JS (needed for modals) -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var authModalEl = document.getElementById('authModal');
+  if (!authModalEl) return;
+
+  // Switch tab based on the button that opened the modal
+  authModalEl.addEventListener('show.bs.modal', function (event) {
+    var trigger = event.relatedTarget;
+    var preferred = trigger && trigger.getAttribute('data-auth-tab') ? trigger.getAttribute('data-auth-tab') : 'login';
+    var selector = '#authModal [data-bs-target="#' + (preferred === 'register' ? 'register-pane' : 'login-pane') + '"]';
+    var btn = document.querySelector(selector);
+    if (btn) { new bootstrap.Tab(btn).show(); }
+  });
+
+  // If server set a preference (e.g. validation error), open the modal & tab
+  var openPref = <?php echo json_encode($openAuth); ?>;
+  if (openPref === 'login' || openPref === 'register') {
+    var modal = new bootstrap.Modal(authModalEl);
+    modal.show();
+    var btn = document.querySelector('#authModal [data-bs-target="#' + (openPref === 'register' ? 'register-pane' : 'login-pane') + '"]');
+    if (btn) { new bootstrap.Tab(btn).show(); }
+  }
+});
+</script>
 </body>
 </html>
