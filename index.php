@@ -1909,53 +1909,6 @@ if ($rs && count($rs) > 0):
         </div>
       </section>
     <?php else: ?>
-      <section class="py-5 border-top" id="users">
-        <div class="container-xl">
-          <div class="row g-4">
-            <div class="col-lg-8">
-              <div class="card glass h-100">
-                <div class="card-body">
-                  <div class="d-flex justify-content-between align-items-center mb-2">
-                    <h2 class="h6 mb-0">User Management</h2>
-                    <button class="btn btn-sm btn-primary"><i class="bi bi-person-plus me-1"></i> Invite</button>
-                  </div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>User</th><th>Role</th><th>Status</th><th class="text-end">Actions</th></tr></thead>
-                      <tbody>
-                        <tr>
-                          <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> Jane Doe</td>
-                          <td><span class="badge rounded-pill badge-role">Analyst</span></td>
-                          <td><span class="badge text-bg-success-subtle border">Active</span></td>
-                          <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
-                        </tr>
-                        <tr>
-                          <td><img src="https://placehold.co/36x36" class="avatar me-2" alt="" /> John Smith</td>
-                          <td><span class="badge rounded-pill text-bg-secondary">Viewer</span></td>
-                          <td><span class="badge text-bg-warning-subtle border">Pending</span></td>
-                          <td class="text-end"><button class="btn btn-outline-light btn-sm"><i class="bi bi-gear"></i></button></td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="col-lg-4">
-              <div class="card glass h-100">
-                <div class="card-body">
-                  <h2 class="h6 mb-2">Roles</h2>
-                  <ul class="small mb-0">
-                    <li><span class="badge rounded-pill text-bg-secondary">Viewer</span> — can view cases and evidence.</li>
-                    <li><span class="badge rounded-pill badge-role">Analyst</span> — (reserved) internal analysis role.</li>
-                    <li><span class="badge rounded-pill text-bg-light text-dark">Admin</span> — full access, can add/edit/delete.</li>
-                  </ul>
-                </div>
-              </div>
-            </div>
-          </div> <!-- /row -->
-        </div>
-      </section>
     <?php endif; ?>
   <?php endif; ?>
 
