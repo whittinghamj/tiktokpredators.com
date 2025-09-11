@@ -528,10 +528,48 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $redir_code = trim($_POST['case_code'] ?? '');
     $title = trim($_POST['title'] ?? '');
     $type = $_POST['type'] ?? 'other';
-    $allowedTypes = ['image','video','audio','pdf','doc','other'];
+    $allowedTypes = ['image','video','audio','pdf','doc','url','other'];
     if (!in_array($type, $allowedTypes, true)) $type = 'other';
 
-    if ($case_id <= 0 || empty($_FILES['evidence_file']['name'])) {
+    // Special handling for URL evidence: no file upload, just a destination URL.
+    if ($type === 'url') {
+        $url = trim($_POST['url_value'] ?? '');
+        if ($case_id <= 0 || $url === '' || !filter_var($url, FILTER_VALIDATE_URL)) {
+            flash('error', 'Please provide a valid URL.');
+            $redirUrl = trim($_POST['redirect_url'] ?? '');
+            if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+            header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+        }
+        $mime = 'text/url';
+        $size = 0;
+        $hash = hash('sha256', $url);
+        try {
+            $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+            $stmt->execute([
+                $case_id,
+                'url',
+                ($title !== '' ? $title : $url),
+                $url,                 // store destination URL in filepath
+                $storagePath,
+                null,
+                $mime,
+                $size,
+                $hash,
+                $hash,
+                $_SESSION['user']['id'] ?? null,
+                $_SESSION['user']['id'] ?? null
+            ]);
+            flash('success', 'URL evidence added.');
+        } catch (Throwable $e) {
+            $_SESSION['sql_error'] = $e->getMessage();
+            flash('error', 'Unable to save URL evidence.');
+        }
+        $redirUrl = trim($_POST['redirect_url'] ?? '');
+        if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+    }
+
+    if ($case_id <= 0 || ($type !== 'url' && empty($_FILES['evidence_file']['name']))) {
         flash('error', 'Please choose a file.');
         $redirUrl = trim($_POST['redirect_url'] ?? '');
         if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
@@ -591,14 +629,26 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
     $case_id = (int)($_POST['case_id'] ?? 0);
     $title = trim($_POST['title'] ?? '');
     $type = $_POST['type'] ?? 'other';
-    $allowedTypes = ['image','video','audio','pdf','doc','other'];
+    $allowedTypes = ['image','video','audio','pdf','doc','url','other'];
     if (!in_array($type, $allowedTypes, true)) $type = 'other';
 
     if ($evidence_id <= 0 || $case_id <= 0) { flash('error', 'Invalid evidence.'); $ru = trim($_POST['redirect_url'] ?? ''); if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
     try {
-        $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ? WHERE id = ? AND case_id = ? LIMIT 1');
-        $u->execute([$title, $type, $evidence_id, $case_id]);
+        if ($type === 'url') {
+            $url = trim($_POST['url_value'] ?? '');
+            if ($url === '' || !filter_var($url, FILTER_VALIDATE_URL)) {
+                flash('error', 'Please provide a valid URL.');
+                $ru = trim($_POST['redirect_url'] ?? '');
+                if ($ru!==''){ header('Location: '.$ru); exit; }
+                header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+            }
+            $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ?, filepath = ?, mime_type = "text/url" WHERE id = ? AND case_id = ? LIMIT 1');
+            $u->execute([$title, $type, $url, $evidence_id, $case_id]);
+        } else {
+            $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ? WHERE id = ? AND case_id = ? LIMIT 1');
+            $u->execute([$title, $type, $evidence_id, $case_id]);
+        }
         flash('success', 'Evidence updated.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
@@ -956,6 +1006,9 @@ if ($rs && count($rs) > 0):
             <li class="nav-item" role="presentation">
               <button class="nav-link" id="ev-note-tab" data-bs-toggle="tab" data-bs-target="#ev-note-pane" type="button" role="tab">Add Note</button>
             </li>
+            <li class="nav-item" role="presentation">
+              <button class="nav-link" id="ev-url-tab" data-bs-toggle="tab" data-bs-target="#ev-url-pane" type="button" role="tab">Add URL</button>
+            </li>
           </ul>
           <div class="tab-content pt-3">
             <div class="tab-pane fade show active" id="ev-upload-pane" role="tabpanel">
@@ -975,6 +1028,7 @@ if ($rs && count($rs) > 0):
                     <select name="type" class="form-select">
                       <option value="image">Image</option>
                       <option value="pdf">PDF</option>
+                      <option value="url">URL (no file)</option>
                     </select>
                   </div>
                   <div class="col-md-4">
@@ -995,12 +1049,33 @@ if ($rs && count($rs) > 0):
                 <textarea name="note_text" class="form-control" rows="4" placeholder="Write a concise internal note..." required></textarea>
               </form>
             </div>
+            <div class="tab-pane fade" id="ev-url-pane" role="tabpanel">
+              <form class="mb-2" method="post" action="" id="evUrlForm">
+                <input type="hidden" name="action" value="upload_evidence">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+                <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                <input type="hidden" name="type" value="url">
+                <div class="row g-2 align-items-end">
+                  <div class="col-md-6">
+                    <label class="form-label">Title</label>
+                    <input type="text" name="title" class="form-control" placeholder="Brief title (optional)">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Destination URL</label>
+                    <input type="url" name="url_value" class="form-control" placeholder="https://example.com/page" required>
+                  </div>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
           <button class="btn btn-primary" type="submit" form="evUploadForm"><i class="bi bi-cloud-arrow-up me-1"></i> Save Upload</button>
           <button class="btn btn-success" type="submit" form="evNoteForm"><i class="bi bi-journal-plus me-1"></i> Save Note</button>
+          <button class="btn btn-info" type="submit" form="evUrlForm"><i class="bi bi-link-45deg me-1"></i> Save URL</button>
         </div>
       </div>
     </div>
@@ -1081,33 +1156,58 @@ if ($rs && count($rs) > 0):
                                     </form>
                                   </div>
                                 <?php endif; ?>
-                              <?php } else { ?>
-                                <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
-                                        data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                        data-id="<?php echo (int)$e['id']; ?>"
-                                        data-case-id="<?php echo (int)$viewCaseId; ?>"
-                                        data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
-                                        data-title="<?php echo htmlspecialchars($e['title']); ?>"
-                                        data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
-                                        data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
-                                  View
-                                </button>
-                                <?php if (is_admin()): ?>
-                                  <div class="btn-group ms-1">
-                                    <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
-                                      Edit
+                              <?php } else {
+                                  $isUrl = (($e['type'] ?? '') === 'url') || (($e['mime_type'] ?? '') === 'text/url');
+                                  if ($isUrl) { ?>
+                                    <a class="btn btn-sm btn-outline-light"
+                                       href="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                       target="_blank" rel="noopener">
+                                      Open
+                                    </a>
+                                    <?php if (is_admin()): ?>
+                                      <div class="btn-group ms-1">
+                                        <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                                data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1" data-url="1">
+                                          Edit
+                                        </button>
+                                        <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                          <input type="hidden" name="action" value="delete_evidence">
+                                          <?php csrf_field(); ?>
+                                          <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                          <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                                          <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                                          <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                        </form>
+                                      </div>
+                                    <?php endif; ?>
+                                  <?php } else { ?>
+                                    <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
+                                            data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                            data-id="<?php echo (int)$e['id']; ?>"
+                                            data-case-id="<?php echo (int)$viewCaseId; ?>"
+                                            data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
+                                            data-title="<?php echo htmlspecialchars($e['title']); ?>"
+                                            data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
+                                            data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
+                                      View
                                     </button>
-                                    <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
-                                      <input type="hidden" name="action" value="delete_evidence">
-                                      <?php csrf_field(); ?>
-                                      <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
-                                      <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
-                                      <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
-                                      <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-                                    </form>
-                                  </div>
-                                <?php endif; ?>
+                                    <?php if (is_admin()): ?>
+                                      <div class="btn-group ms-1">
+                                        <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                                data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                          Edit
+                                        </button>
+                                        <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                          <input type="hidden" name="action" value="delete_evidence">
+                                          <?php csrf_field(); ?>
+                                          <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                          <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                                          <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                                          <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                        </form>
+                                      </div>
+                                    <?php endif; ?>
+                                  <?php } ?>
                               <?php } ?>
                             </td>
                           </tr>
@@ -1330,6 +1430,7 @@ if ($rs && count($rs) > 0):
                     <option value="audio">Audio</option>
                     <option value="pdf">PDF</option>
                     <option value="doc">Document</option>
+                    <option value="url">URL (no file)</option>
                     <option value="other" selected>Other</option>
                   </select>
                 </div>
@@ -1339,6 +1440,24 @@ if ($rs && count($rs) > 0):
                 </div>
               </div>
               <div class="text-end mt-2"><button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button></div>
+            </form>
+            <form class="mb-3" method="post" action="">
+              <input type="hidden" name="action" value="upload_evidence">
+              <?php csrf_field(); ?>
+              <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($adminCaseCode); ?>">
+              <input type="hidden" name="type" value="url">
+              <div class="row g-2 align-items-end">
+                <div class="col-md-4">
+                  <label class="form-label">Title</label>
+                  <input type="text" name="title" class="form-control" placeholder="Optional title">
+                </div>
+                <div class="col-md-8">
+                  <label class="form-label">Destination URL</label>
+                  <input type="url" name="url_value" class="form-control" placeholder="https://example.com/page" required>
+                </div>
+              </div>
+              <div class="text-end mt-2"><button class="btn btn-info btn-sm" type="submit"><i class="bi bi-link-45deg me-1"></i> Add URL</button></div>
             </form>
 
             <div class="table-responsive">
@@ -1373,31 +1492,54 @@ if ($rs && count($rs) > 0):
                               <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
                             </form>
                           </div>
-                        <?php } else { ?>
-                          <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
-                                  data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                  data-id="<?php echo (int)$e['id']; ?>"
-                                  data-case-id="<?php echo (int)$caseId; ?>"
-                                  data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
-                                  data-title="<?php echo htmlspecialchars($e['title']); ?>"
-                                  data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
-                                  data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
-                            View
-                          </button>
-                          <div class="btn-group ms-1">
-                            <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                    data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
-                              Edit
-                            </button>
-                            <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
-                              <input type="hidden" name="action" value="delete_evidence">
-                              <?php csrf_field(); ?>
-                              <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
-                              <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
-                              <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
-                              <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-                            </form>
-                          </div>
+                        <?php } else {
+                            $isUrl = (($e['type'] ?? '') === 'url') || (($e['mime_type'] ?? '') === 'text/url');
+                            if ($isUrl) { ?>
+                              <a class="btn btn-sm btn-outline-light"
+                                 href="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                 target="_blank" rel="noopener">
+                                Open
+                              </a>
+                              <div class="btn-group ms-1">
+                                <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                        data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1" data-url="1">
+                                  Edit
+                                </button>
+                                <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                  <input type="hidden" name="action" value="delete_evidence">
+                                  <?php csrf_field(); ?>
+                                  <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                  <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+                                  <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
+                                  <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                </form>
+                              </div>
+                            <?php } else { ?>
+                              <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
+                                      data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                      data-id="<?php echo (int)$e['id']; ?>"
+                                      data-case-id="<?php echo (int)$caseId; ?>"
+                                      data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
+                                      data-title="<?php echo htmlspecialchars($e['title']); ?>"
+                                      data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
+                                      data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
+                                View
+                              </button>
+                              <div class="btn-group ms-1">
+                                <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                        data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                  Edit
+                                </button>
+                                <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                  <input type="hidden" name="action" value="delete_evidence">
+                                  <?php csrf_field(); ?>
+                                  <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                  <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+                                  <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
+                                  <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                </form>
+                              </div>
+                            <?php } ?>
                         <?php } ?>
                       </td>
                       <td class="small text-secondary"><?php echo htmlspecialchars($e['mime_type']); ?></td>
