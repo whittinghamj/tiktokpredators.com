@@ -739,9 +739,6 @@ if (isset($_GET['logout'])) {
     .timeline .item { position: relative; margin-bottom: 1rem; }
     .timeline .item::before { content: ""; position: absolute; left: -1.1rem; top: .25rem; width: .65rem; height: .65rem; background: var(--tp-primary); border-radius: 50%; box-shadow: 0 0 0 3px rgba(124,77,255,.25); }
     /* Restricted-mode media blurring (non-admins on Restricted cases) */
-    .restricted-blur { filter: blur(14px) saturate(0.6) brightness(0.7); }
-    body[data-restricted="1"] #evPreview img,
-    body[data-restricted="1"] #evPreview video { filter: blur(14px) saturate(0.6) brightness(0.7); }
     footer a { color: inherit }
   </style>
 </head>
@@ -1421,7 +1418,7 @@ if ($rs && count($rs) > 0):
               <?php if ($ev) { $hasImg=false; foreach ($ev as $e) { if ($e['type']==='image') { $hasImg=true; ?>
                 <div class="col-6 col-md-4">
                   <div class="card h-100">
-                    <img src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" class="card-img-top<?php echo (!empty($tp_isRestrictedForNonAdmin) && $tp_isRestrictedForNonAdmin) ? ' restricted-blur' : ''; ?>" alt="">
+                    <img src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" class="card-img-top" alt="">
                     <div class="card-body p-2">
                       <div class="small text-truncate" title="<?php echo htmlspecialchars($e['title']); ?>"><?php echo htmlspecialchars($e['title']); ?></div>
                     </div>
