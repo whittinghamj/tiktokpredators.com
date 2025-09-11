@@ -376,6 +376,70 @@ if (($_POST['action'] ?? '') === 'add_case_note') {
     header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
 }
 
+// Handle add evidence note (admin only)
+if (($_POST['action'] ?? '') === 'add_evidence_note') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized. Admins only.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $note = trim($_POST['note_text'] ?? '');
+    $redir_code = trim($_POST['case_code'] ?? '');
+    $redir_url = trim($_POST['redirect_url'] ?? '');
+
+    if ($case_id <= 0 || $note === '') {
+        flash('error', 'Note text is required.');
+        if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
+        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+    }
+
+    // Prepare safe title (truncate to 255 chars to avoid DB overflow)
+    $title = mb_substr($note, 0, 255, 'UTF-8');
+
+    // Persist full note text to a file (so we don't lose long notes)
+    $notesDir = __DIR__ . '/uploads/notes';
+    if (!is_dir($notesDir)) { @mkdir($notesDir, 0755, true); }
+    $filename = 'note_' . uniqid('', true) . '.txt';
+    $destAbs = $notesDir . '/' . $filename;
+    $destRel = 'uploads/notes/' . $filename;
+    $writeOk = @file_put_contents($destAbs, $note);
+    if ($writeOk === false) {
+        flash('error', 'Unable to store note file.');
+        if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
+        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+    }
+
+    $mime = 'text/plain';
+    $size = filesize($destAbs) ?: strlen($note);
+    $hash = @hash_file('sha256', $destAbs);
+    if (!$hash) { $hash = hash('sha256', $note); }
+
+    try {
+        // Store as an evidence row of type 'other'
+        $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $stmt->execute([
+            $case_id,
+            'other',
+            $title,
+            $destRel,
+            $storagePath,
+            $filename,
+            $mime,
+            $size,
+            $hash,
+            $hash,
+            $_SESSION['user']['id'] ?? null,
+            $_SESSION['user']['id'] ?? null
+        ]);
+        flash('success', 'Evidence note added.');
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to add evidence note.');
+    }
+    if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
+    header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
+
 // Handle evidence upload (admin only)
 if (($_POST['action'] ?? '') === 'upload_evidence') {
     throttle();
@@ -626,8 +690,7 @@ if (isset($_GET['logout'])) {
 <?php endif; ?>
         </ul>
         <div class="d-flex align-items-center gap-2">
-          <!-- Theme toggle + auth state -->
-          <button id="themeToggle" class="btn btn-outline-light btn-sm" title="Toggle theme"><i class="bi bi-moon-stars"></i></button>
+          <!-- Auth state -->
           <?php if (empty($_SESSION['user'])): ?>
             <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i> Register</button>
             <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
@@ -848,7 +911,7 @@ if ($rs && count($rs) > 0):
             </div>
             <div class="tab-pane fade" id="ev-note-pane" role="tabpanel">
               <form class="mb-2" method="post" action="" id="evNoteForm">
-                <input type="hidden" name="action" value="add_case_note">
+                <input type="hidden" name="action" value="add_evidence_note">
                 <?php csrf_field(); ?>
                 <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
                 <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
@@ -911,46 +974,70 @@ if ($rs && count($rs) > 0):
                   </div>
                   <div class="table-responsive">
                     <table class="table table-sm align-middle">
-                      <thead><tr><th>Type</th><th>Title</th><th>File</th><th class="d-none d-md-table-cell">MIME</th><th class="d-none d-md-table-cell">Size</th><th>Added</th></tr></thead>
+                      <thead><tr><th>Type</th><th>Title</th><th>File</th></tr></thead>
                       <tbody>
                         <?php if ($viewEv) { foreach ($viewEv as $e) { ?>
                           <tr>
                             <td><?php echo htmlspecialchars($e['type']); ?></td>
                             <td><?php echo htmlspecialchars($e['title']); ?></td>
                             <td>
-                              <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
-                                      data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                      data-id="<?php echo (int)$e['id']; ?>"
-                                      data-case-id="<?php echo (int)$viewCaseId; ?>"
-                                      data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
-                                      data-title="<?php echo htmlspecialchars($e['title']); ?>"
-                                      data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
-                                      data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
-                                View
-                              </button>
-                              <?php if (is_admin()): ?>
-                                <div class="btn-group ms-1">
-                                  <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                          data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
-                                    Edit
-                                  </button>
-                                  <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
-                                    <input type="hidden" name="action" value="delete_evidence">
-                                    <?php csrf_field(); ?>
-                                    <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
-                                    <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
-                                    <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
-                                    <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-                                  </form>
-                                </div>
-                              <?php endif; ?>
+                              <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain' && strpos($e['filepath'], 'uploads/notes/') === 0)) { ?>
+                                <button type="button" class="btn btn-sm btn-outline-light btn-view-note"
+                                        data-bs-toggle="modal" data-bs-target="#noteModal"
+                                        data-id="<?php echo (int)$e['id']; ?>"
+                                        data-case-id="<?php echo (int)$viewCaseId; ?>"
+                                        data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                        data-title="<?php echo htmlspecialchars($e['title'] ?? 'Note'); ?>">
+                                  View
+                                </button>
+                                <?php if (is_admin()): ?>
+                                  <div class="btn-group ms-1">
+                                    <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                      Edit
+                                    </button>
+                                    <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                      <input type="hidden" name="action" value="delete_evidence">
+                                      <?php csrf_field(); ?>
+                                      <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                      <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                                      <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                                      <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                    </form>
+                                  </div>
+                                <?php endif; ?>
+                              <?php } else { ?>
+                                <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
+                                        data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                        data-id="<?php echo (int)$e['id']; ?>"
+                                        data-case-id="<?php echo (int)$viewCaseId; ?>"
+                                        data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                        data-title="<?php echo htmlspecialchars($e['title']); ?>"
+                                        data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
+                                        data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
+                                  View
+                                </button>
+                                <?php if (is_admin()): ?>
+                                  <div class="btn-group ms-1">
+                                    <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                      Edit
+                                    </button>
+                                    <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                      <input type="hidden" name="action" value="delete_evidence">
+                                      <?php csrf_field(); ?>
+                                      <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                      <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                                      <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                                      <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                    </form>
+                                  </div>
+                                <?php endif; ?>
+                              <?php } ?>
                             </td>
-                            <td class="small text-secondary d-none d-md-table-cell"><?php echo htmlspecialchars($e['mime_type']); ?></td>
-                            <td class="small text-secondary d-none d-md-table-cell"><?php echo number_format((int)$e['size_bytes']); ?> B</td>
-                            <td class="small text-secondary"><?php echo htmlspecialchars($e['created_at']); ?></td>
                           </tr>
                         <?php } } else { ?>
-                          <tr><td colspan="6" class="text-secondary">No evidence available.</td></tr>
+                          <tr><td colspan="3" class="text-secondary">No evidence available.</td></tr>
                         <?php } ?>
                       </tbody>
                     </table>
@@ -1188,30 +1275,55 @@ if ($rs && count($rs) > 0):
                       <td><?php echo htmlspecialchars($e['type']); ?></td>
                       <td><?php echo htmlspecialchars($e['title']); ?></td>
                       <td>
-                        <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
-                                data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                data-id="<?php echo (int)$e['id']; ?>"
-                                data-case-id="<?php echo (int)$caseId; ?>"
-                                data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
-                                data-title="<?php echo htmlspecialchars($e['title']); ?>"
-                                data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
-                                data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
-                          View
-                        </button>
-                        <div class="btn-group ms-1">
-                          <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                  data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
-                            Edit
+                        <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain' && strpos($e['filepath'], 'uploads/notes/') === 0)) { ?>
+                          <button type="button" class="btn btn-sm btn-outline-light btn-view-note"
+                                  data-bs-toggle="modal" data-bs-target="#noteModal"
+                                  data-id="<?php echo (int)$e['id']; ?>"
+                                  data-case-id="<?php echo (int)$caseId; ?>"
+                                  data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                  data-title="<?php echo htmlspecialchars($e['title'] ?? 'Note'); ?>">
+                            View
                           </button>
-                          <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
-                            <input type="hidden" name="action" value="delete_evidence">
-                            <?php csrf_field(); ?>
-                            <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
-                            <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
-                            <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
-                            <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-                          </form>
-                        </div>
+                          <div class="btn-group ms-1">
+                            <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                    data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                              Edit
+                            </button>
+                            <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                              <input type="hidden" name="action" value="delete_evidence">
+                              <?php csrf_field(); ?>
+                              <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                              <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+                              <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
+                              <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                            </form>
+                          </div>
+                        <?php } else { ?>
+                          <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
+                                  data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                  data-id="<?php echo (int)$e['id']; ?>"
+                                  data-case-id="<?php echo (int)$caseId; ?>"
+                                  data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                  data-title="<?php echo htmlspecialchars($e['title']); ?>"
+                                  data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
+                                  data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
+                            View
+                          </button>
+                          <div class="btn-group ms-1">
+                            <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                    data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                              Edit
+                            </button>
+                            <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                              <input type="hidden" name="action" value="delete_evidence">
+                              <?php csrf_field(); ?>
+                              <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                              <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+                              <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
+                              <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                            </form>
+                          </div>
+                        <?php } ?>
                       </td>
                       <td class="small text-secondary"><?php echo htmlspecialchars($e['mime_type']); ?></td>
                       <td class="small text-secondary"><?php echo number_format((int)$e['size_bytes']); ?> B</td>
@@ -1766,5 +1878,51 @@ if ($rs && count($rs) > 0):
     })();
   });
   </script>
+
+  <script>
+document.addEventListener('click', function (ev) {
+  var btn = ev.target.closest('.btn-view-note');
+  if (!btn) return;
+  var src = btn.getAttribute('data-src') || '';
+  var title = btn.getAttribute('data-title') || 'Note';
+  var contentEl = document.getElementById('noteModalContent');
+  var titleEl = document.getElementById('noteModalTitle');
+  var rawEl = document.getElementById('noteModalOpenRaw');
+  if (contentEl) contentEl.textContent = 'Loading…';
+  if (titleEl) titleEl.textContent = title;
+  if (rawEl) rawEl.href = src;
+
+  if (src) {
+    fetch(src, { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.text() : Promise.reject(new Error('Unable to load note')); })
+      .then(function (txt) { if (contentEl) contentEl.textContent = txt; })
+      .catch(function () { if (contentEl) contentEl.textContent = 'Unable to load note.'; });
+  } else {
+    if (contentEl) contentEl.textContent = 'No note source found.';
+  }
+}, false);
+</script>
+
+  <div class="modal fade" id="noteModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-journal-text me-2"></i><span id="noteModalTitle">Note</span></h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <div class="border rounded p-3 bg-body-tertiary" style="max-height:60vh;overflow:auto;">
+          <pre class="mb-0" id="noteModalContent" style="white-space:pre-wrap;word-wrap:break-word;"></pre>
+        </div>
+        <div class="mt-2 small">
+          <a id="noteModalOpenRaw" href="#" target="_blank" rel="noopener">Open raw file</a>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
   </body>
   </html>
