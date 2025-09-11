@@ -353,6 +353,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $hash = hash_file('sha256', $destAbs);
 
     try {
+
         // Use global storage path and set uploaded_by and created_by to current user
         $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
@@ -1518,4 +1519,35 @@ if ($rs && count($rs) > 0):
                 <label class="form-label">TikTok Username</label>
                 <div class="input-group">
                   <span class="input-group-text">@</span>
-      <truncated__content/>
+                  <input type="text" name="tiktok_username" class="form-control" placeholder="username (no @)">
+                </div>
+              </div>
+              <div class="mb-3">
+                <label class="form-label">Initial Summary</label>
+                <textarea name="initial_summary" class="form-control" rows="4" placeholder="Short summary of allegations and current state…" required></textarea>
+              </div>
+              <div class="row g-2">
+                <div class="col-md-6">
+                  <label class="form-label">Sensitivity</label>
+                  <select name="sensitivity" class="form-select" required>
+                    <option value="Standard" selected>Standard</option>
+                    <option value="Restricted">Restricted</option>
+                    <option value="Sealed">Sealed</option>
+                  </select>
+                </div>
+                <div class="col-md-6">
+                  <label class="form-label">Status</label>
+                  <select name="status" class="form-select" required>
+                    <option value="Open" selected>Open</option>
+                    <option value="In Review">In Review</option>
+                    <option value="Verified">Verified</option>
+                    <option value="Closed">Closed</option>
+                  </select>
+                </div>
+              </div>
+            </form>
+          </div>
+          <div class="modal-footer">
+            <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+            <button class="btn btn-primary" type="submit" form="createCaseForm"><i class="bi bi-save2 me-1"></i> Create Case</button>
+          </div>
