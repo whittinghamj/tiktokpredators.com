@@ -1391,35 +1391,39 @@ if ($rs && count($rs) > 0):
                       </button>
                     <?php endif; ?>
                   </div>
-                  <div class="row">
+                  <div class="row g-3 align-items-center">
                     <?php $casePhoto = find_person_photo_url($caseCode); if ($casePhoto !== '') { ?>
-                      <div class="col-md-2 mb-2 d-flex align-items-center">
+                      <div class="col-auto d-flex align-items-center">
                         <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
                       </div>
                     <?php } ?>
-                    <div class="col-md-4 mb-2">
-                      <div class="small text-secondary">Case Name</div>
-                      <div><?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?></div>
-                    </div>
-                    <div class="col-md-4 mb-2">
-                      <div class="small text-secondary">Person Name</div>
-                      <div><?php echo htmlspecialchars($viewCase['person_name'] ?? ''); ?></div>
-                    </div>
-                    <div class="col-md-4 mb-2">
-                      <div class="small text-secondary">TikTok Username</div>
-                      <div><?php echo $viewCase['tiktok_username'] ? '@'.htmlspecialchars($viewCase['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
-                    </div>
-                    <div class="col-md-4 mb-2">
-                      <div class="small text-secondary">Status</div>
-                      <div><span class="badge text-bg-dark border"><?php echo htmlspecialchars($viewCase['status']); ?></span></div>
-                    </div>
-                    <div class="col-md-4 mb-2">
-                      <div class="small text-secondary">Sensitivity</div>
-                      <div><span class="badge text-bg-dark border"><?php echo htmlspecialchars($viewCase['sensitivity']); ?></span></div>
-                    </div>
-                    <div class="col-md-4 mb-2">
-                      <div class="small text-secondary">Opened</div>
-                      <div><?php echo htmlspecialchars($viewCase['opened_at']); ?></div>
+                    <div class="col">
+                      <div class="row g-3 align-items-center">
+                        <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Case Name</div>
+                          <div><?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Person Name</div>
+                          <div><?php echo htmlspecialchars($viewCase['person_name'] ?? ''); ?></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">TikTok Username</div>
+                          <div><?php echo $viewCase['tiktok_username'] ? '@'.htmlspecialchars($viewCase['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Status</div>
+                          <div><span class="badge text-bg-dark border"><?php echo htmlspecialchars($viewCase['status']); ?></span></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Sensitivity</div>
+                          <div><span class="badge text-bg-dark border"><?php echo htmlspecialchars($viewCase['sensitivity']); ?></span></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Opened</div>
+                          <div><?php echo htmlspecialchars($viewCase['opened_at']); ?></div>
+                        </div>
+                      </div>
                     </div>
                   </div>
                   <div class="small text-secondary">Summary</div>
