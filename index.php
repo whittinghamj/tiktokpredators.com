@@ -1435,12 +1435,12 @@ if ($rs && count($rs) > 0):
                   </div>
                   <div class="table-responsive">
                     <table class="table table-sm align-middle">
-                      <thead><tr><th>Type</th><th>Title</th><th>File</th></tr></thead>
+                      <thead><tr><th>Title</th><th>Tyle</th><th>Actions</th></tr></thead>
                       <tbody>
                         <?php if ($viewEv) { foreach ($viewEv as $e) { ?>
                           <tr>
-                            <td><?php echo htmlspecialchars($e['type']); ?></td>
                             <td><?php echo htmlspecialchars($e['title']); ?></td>
+                            <td><?php echo htmlspecialchars($e['type']); ?></td>
                             <td>
                               <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain' && strpos($e['filepath'], 'uploads/notes/') === 0)) { ?>
                                 <button type="button" class="btn btn-sm btn-outline-light btn-view-note"
