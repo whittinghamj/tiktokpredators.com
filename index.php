@@ -1040,10 +1040,9 @@ if (isset($_GET['logout'])) {
               <form class="d-none d-md-flex me-2" method="get" action="" role="search">
                 <input type="hidden" name="view" value="cases">
                 <input type="search" name="q" class="form-control form-control-sm" placeholder="Search names, usernames, summary…" value="<?php echo htmlspecialchars($_GET['q'] ?? ''); ?>" />
+                <button type="submit" class="btn btn-outline-light btn-sm ms-1"><i class="bi bi-search"></i></button>
               </form>
               <div class="btn-group">
-                <button class="btn btn-outline-light btn-sm"><i class="bi bi-sort-alpha-down"></i></button>
-                <button class="btn btn-outline-light btn-sm"><i class="bi bi-funnel"></i></button>
                 <?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'admin'): ?>
                   <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i> Add Case</button>
                 <?php endif; ?>
