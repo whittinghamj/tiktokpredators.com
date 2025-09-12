@@ -1392,9 +1392,18 @@ if ($rs && count($rs) > 0):
                     <?php endif; ?>
                   </div>
                   <div class="row g-3 align-items-center">
-                    <?php $casePhoto = find_person_photo_url($caseCode); if ($casePhoto !== '') { ?>
+                    <?php
+                      $casePhoto = find_person_photo_url($caseCode);
+                      if ($casePhoto !== '') {
+                    ?>
                       <div class="col-auto d-flex align-items-center">
                         <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
+                      </div>
+                    <?php } else { ?>
+                      <div class="col-auto d-flex align-items-center">
+                        <div class="rounded bg-secondary text-white d-flex align-items-center justify-content-center" style="width:96px;height:96px;object-fit:cover;">
+                          <span class="small">No Image</span>
+                        </div>
                       </div>
                     <?php } ?>
                     <div class="col">
