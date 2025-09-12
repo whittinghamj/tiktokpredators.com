@@ -977,6 +977,7 @@ if (isset($_GET['logout'])) {
       <div class="collapse navbar-collapse" id="topNav">
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
+<li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
 <?php endif; ?>
@@ -1108,6 +1109,138 @@ if ($rs && count($rs) > 0):
 <?php endif; ?>
 </div>
 
+        </div>
+      </div>
+    </div>
+  </main>
+  <?php endif; ?>
+
+  <?php if ($view === 'faq'): ?>
+  <main class="py-4" id="faq">
+    <div class="container-xl">
+      <div class="row g-4">
+        <div class="col-12">
+          <div class="card glass">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between mb-2">
+                <h2 class="h4 mb-0">Frequently Asked Questions</h2>
+                <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+              </div>
+              <p class="text-secondary small mb-4">This information is for general guidance about how we present and handle content on this site. It is not legal advice.</p>
+
+              <div class="accordion" id="faqAccordion">
+                <!-- DBS Checks -->
+                <div class="accordion-item">
+                  <h2 class="accordion-header" id="faq-dbs-heading">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq-dbs" aria-expanded="false" aria-controls="faq-dbs">
+                      What are the different types of DBS checks in the UK?
+                    </button>
+                  </h2>
+                  <div id="faq-dbs" class="accordion-collapse collapse" aria-labelledby="faq-dbs-heading" data-bs-parent="#faqAccordion">
+                    <div class="accordion-body">
+                      <p>DBS (Disclosure and Barring Service) checks help organisations make safer recruitment decisions. Common levels include:</p>
+                      <ul>
+                        <li><strong>Basic</strong> — shows unspent convictions.</li>
+                        <li><strong>Standard</strong> — shows spent &amp; unspent convictions, cautions, reprimands and final warnings.</li>
+                        <li><strong>Enhanced</strong> — everything in Standard, plus relevant <em>local police information</em> if held.</li>
+                        <li><strong>Enhanced with Barred Lists</strong> — Enhanced plus a check of the children’s and/or adults’ barred list when the role is eligible.</li>
+                      </ul>
+                      <p class="small text-secondary">Eligibility for Standard/Enhanced levels is defined by role and legal criteria. Individuals can apply for a Basic check; employers/organisations request Standard/Enhanced where permitted.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Sealed Cases -->
+                <div class="accordion-item">
+                  <h2 class="accordion-header" id="faq-sealed-heading">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq-sealed" aria-expanded="false" aria-controls="faq-sealed">
+                      Why might a case be marked as “Sealed”?
+                    </button>
+                  </h2>
+                  <div id="faq-sealed" class="accordion-collapse collapse" aria-labelledby="faq-sealed-heading" data-bs-parent="#faqAccordion">
+                    <div class="accordion-body">
+                      <p>We mark a case as <strong>Sealed</strong> when public access should be restricted. Typical reasons include:</p>
+                      <ul>
+                        <li>Active law‑enforcement investigation or court order limiting publication.</li>
+                        <li>Risk of identifying victims, minors, or vulnerable persons.</li>
+                        <li>Sensitive personal data (e.g., medical/educational records) that cannot be lawfully shared.</li>
+                        <li>Takedown requests that meet our safety, privacy, or defamation policies.</li>
+                      </ul>
+                      <p class="small text-secondary">When sealed, we may hide or remove public content and limit visibility to authorised administrators.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Evidence Policy -->
+                <div class="accordion-item">
+                  <h2 class="accordion-header" id="faq-evidence-heading">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq-evidence" aria-expanded="false" aria-controls="faq-evidence">
+                      What types of evidence can be displayed, and what must be redacted?
+                    </button>
+                  </h2>
+                  <div id="faq-evidence" class="accordion-collapse collapse" aria-labelledby="faq-evidence-heading" data-bs-parent="#faqAccordion">
+                    <div class="accordion-body">
+                      <p>We aim to share information responsibly. As a rule:</p>
+                      <ul>
+                        <li><strong>Allowed (subject to review):</strong> screenshots, images, PDFs, and links that document publicly visible behaviour relevant to a case.</li>
+                        <li><strong>Must be redacted:</strong> addresses, phone numbers, emails, account IDs, IPs, exact locations, dates of birth, bank/payment details, or any data that can identify minors or private individuals who are not public figures.</li>
+                        <li><strong>Not permitted:</strong> doxxing materials, stolen/hacked data, intimate images, malware, instructions for wrongdoing, or content under a valid takedown/court order.</li>
+                      </ul>
+                      <p>Where a case’s <em>Sensitivity</em> is set to <strong>Restricted</strong>, public viewers see server‑side blurred media, and some evidence may be withheld entirely.</p>
+                      <p class="small text-secondary">We review reports and may remove or further redact materials to protect safety and comply with the law.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Redaction & Blurring -->
+                <div class="accordion-item">
+                  <h2 class="accordion-header" id="faq-redaction-heading">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq-redaction" aria-expanded="false" aria-controls="faq-redaction">
+                      How do you handle redaction and image/video blurring?
+                    </button>
+                  </h2>
+                  <div id="faq-redaction" class="accordion-collapse collapse" aria-labelledby="faq-redaction-heading" data-bs-parent="#faqAccordion">
+                    <div class="accordion-body">
+                      <p>We combine <em>server‑side</em> blurring for restricted cases with manual redactions where necessary to remove sensitive details from images, documents, and logs. Public viewers cannot bypass server‑side protections to access unredacted files.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Reporting and Takedowns -->
+                <div class="accordion-item">
+                  <h2 class="accordion-header" id="faq-report-heading">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq-report" aria-expanded="false" aria-controls="faq-report">
+                      How can someone request a correction, removal, or takedown?
+                    </button>
+                  </h2>
+                  <div id="faq-report" class="accordion-collapse collapse" aria-labelledby="faq-report-heading" data-bs-parent="#faqAccordion">
+                    <div class="accordion-body">
+                      <p>Please contact us via the site’s contact options with the case code, URLs, and a brief explanation. We will review within a reasonable timeframe and may request verification.</p>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- Use of External Links -->
+                <div class="accordion-item">
+                  <h2 class="accordion-header" id="faq-links-heading">
+                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq-links" aria-expanded="false" aria-controls="faq-links">
+                      Do you host external links and social profiles?
+                    </button>
+                  </h2>
+                  <div id="faq-links" class="accordion-collapse collapse" aria-labelledby="faq-links-heading" data-bs-parent="#faqAccordion">
+                    <div class="accordion-body">
+                      <p>We may include URLs as evidence to provide context. External sites can change without notice and are outside our control. We may replace links with screenshots where appropriate.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="alert alert-secondary mt-4 mb-0 small">
+                <i class="bi bi-shield-lock me-2"></i>
+                <strong>Reminder:</strong> Content presented here is for transparency and safety. We balance public interest with privacy and legal responsibilities.
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
