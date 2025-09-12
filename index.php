@@ -404,8 +404,8 @@ if (($_POST['action'] ?? '') === 'create_case') {
             }
         }
         flash('success', 'Case created successfully. ID: ' . htmlspecialchars($case_code));
-        // jump to full admin case view
-        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?admin_case=' . urlencode($case_code) . '#admin-case');
+        // jump to full case view
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?view=case&code=' . urlencode($case_code) . '#case-view');
         exit;
     } catch (Throwable $e) {
         $_SESSION['open_modal'] = 'createCase';
@@ -499,7 +499,7 @@ if (($_POST['action'] ?? '') === 'add_case_note') {
         flash('error', 'Note text is required.');
         $redirUrl = trim($_POST['redirect_url'] ?? '');
         if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
-        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
 
     try {
@@ -512,7 +512,7 @@ if (($_POST['action'] ?? '') === 'add_case_note') {
     }
     $redirUrl = trim($_POST['redirect_url'] ?? '');
     if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
-    header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+    header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
 }
 
 // Handle add evidence note (admin only)
@@ -529,7 +529,7 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
     if ($case_id <= 0 || $note === '') {
         flash('error', 'Note text is required.');
         if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
-        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
 
     // Prepare safe title (truncate to 255 chars to avoid DB overflow)
@@ -545,7 +545,7 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
     if ($writeOk === false) {
         flash('error', 'Unable to store note file.');
         if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
-        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
 
     $mime = 'text/plain';
@@ -576,7 +576,7 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
         flash('error', 'Unable to add evidence note.');
     }
     if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
-    header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
 }
 
 // Handle evidence upload (admin only)
@@ -599,7 +599,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
             flash('error', 'Please provide a valid URL.');
             $redirUrl = trim($_POST['redirect_url'] ?? '');
             if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
-            header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+            header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
         }
         $mime = 'text/url';
         $size = 0;
@@ -663,26 +663,26 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         }
         $redirUrl = trim($_POST['redirect_url'] ?? '');
         if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
-        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
 
     if ($case_id <= 0 || ($type !== 'url' && empty($_FILES['evidence_file']['name']))) {
         flash('error', 'Please choose a file.');
         $redirUrl = trim($_POST['redirect_url'] ?? '');
         if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
-        header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
 
     $uploadDir = __DIR__ . '/uploads';
     if (!is_dir($uploadDir)) { @mkdir($uploadDir, 0755, true); }
 
     $f = $_FILES['evidence_file'];
-    if ($f['error'] !== UPLOAD_ERR_OK) { flash('error', 'Upload failed with code: '. (int)$f['error']); $redirUrl = trim($_POST['redirect_url'] ?? ''); if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; } header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit; }
+    if ($f['error'] !== UPLOAD_ERR_OK) { flash('error', 'Upload failed with code: '. (int)$f['error']); $redirUrl = trim($_POST['redirect_url'] ?? ''); if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; } header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit; }
 
     $safeName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', basename($f['name']));
     $destRel = 'uploads/' . uniqid('ev_', true) . '_' . $safeName;
     $destAbs = __DIR__ . '/' . $destRel;
-    if (!move_uploaded_file($f['tmp_name'], $destAbs)) { flash('error', 'Unable to save uploaded file.'); $redirUrl = trim($_POST['redirect_url'] ?? ''); if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; } header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit; }
+    if (!move_uploaded_file($f['tmp_name'], $destAbs)) { flash('error', 'Unable to save uploaded file.'); $redirUrl = trim($_POST['redirect_url'] ?? ''); if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; } header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit; }
 
     $mime = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
     $size = filesize($destAbs) ?: 0;
@@ -713,7 +713,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     }
     $redirUrl = trim($_POST['redirect_url'] ?? '');
     if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
-    header('Location: ?admin_case=' . urlencode($redir_code) . '#admin-case'); exit;
+    header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
 }
 
 // Handle update evidence (admin only)
