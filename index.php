@@ -1391,12 +1391,12 @@ if ($rs && count($rs) > 0):
                       </button>
                     <?php endif; ?>
                   </div>
-                  <?php $casePhoto = find_person_photo_url($caseCode); if ($casePhoto !== '') { ?>
-                    <div class="mb-3">
-                      <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
-                    </div>
-                  <?php } ?>
                   <div class="row">
+                    <?php $casePhoto = find_person_photo_url($caseCode); if ($casePhoto !== '') { ?>
+                      <div class="col-md-2 mb-2 d-flex align-items-center">
+                        <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
+                      </div>
+                    <?php } ?>
                     <div class="col-md-4 mb-2">
                       <div class="small text-secondary">Case Name</div>
                       <div><?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?></div>
