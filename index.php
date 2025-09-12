@@ -1068,6 +1068,10 @@ if ($rs && count($rs) > 0):
     <div class="card h-100">
       <?php if (!empty($photoUrl)) { ?>
         <img src="<?php echo htmlspecialchars($photoUrl); ?>" class="card-img-top" alt="" style="aspect-ratio:16/9; object-fit:cover;">
+      <?php } else { ?>
+        <div class="placeholder-tile card-img-top">
+          <div class="text">No Image</div>
+        </div>
       <?php } ?>
       <div class="card-body">
         <div class="d-flex justify-content-between align-items-start">
