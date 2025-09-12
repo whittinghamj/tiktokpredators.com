@@ -2557,5 +2557,101 @@ document.addEventListener('click', function (ev) {
     </div>
   </div>
 </div>
+
+<!-- Global Footer -->
+<footer class="border-top glass mt-5 py-3">
+  <div class="container-xl d-flex flex-column flex-md-row justify-content-between align-items-center gap-2">
+    <div class="small text-secondary">
+      &copy; <?php echo date('Y'); ?> TikTokPredators. All rights reserved.
+    </div>
+    <div class="d-flex gap-3 small">
+      <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#privacyModal">Privacy</a>
+      <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#termsModal">Terms</a>
+    </div>
+  </div>
+</footer>
+
+<!-- Privacy Policy Modal -->
+<div class="modal fade" id="privacyModal" tabindex="-1" aria-hidden="true" aria-labelledby="privacyLabel">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="privacyLabel"><i class="bi bi-shield-lock me-2"></i>Privacy Policy</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-secondary mb-3">
+          This Privacy Policy explains how we collect, use, and protect information on this site. It is provided for transparency and does not constitute legal advice.
+        </p>
+        <h6>What we collect</h6>
+        <ul>
+          <li><strong>Account data:</strong> email, display name, role, and activity necessary to operate your account.</li>
+          <li><strong>Case data:</strong> content you submit or upload (evidence, notes, metadata) for case management.</li>
+          <li><strong>Technical data:</strong> server logs, IP addresses, and basic device information for security and abuse prevention.</li>
+        </ul>
+        <h6>How we use data</h6>
+        <ul>
+          <li>To provide and secure the platform, including audit and abuse prevention.</li>
+          <li>To review and moderate case materials for compliance with our policies and applicable law.</li>
+          <li>To respond to reports, takedown requests, or legal obligations.</li>
+        </ul>
+        <h6>Retention</h6>
+        <p>We retain data as long as necessary for the purposes above or as required by law. We may anonymise or aggregate data for analytics and safety research.</p>
+        <h6>Third parties</h6>
+        <p>We may use hosting, storage, and analytics providers. We do not sell your personal information. Content subject to a lawful request may be shared with competent authorities.</p>
+        <h6>Your choices</h6>
+        <ul>
+          <li>Request access, correction, or deletion of your account data where applicable.</li>
+          <li>Request removal or further redaction of case materials that include your personal data (include case code/URLs).</li>
+        </ul>
+        <h6>Contact</h6>
+        <p>For privacy inquiries, contact the site operators via the contact options listed on the homepage. Include your email and sufficient details for us to identify relevant records.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Terms of Use Modal -->
+<div class="modal fade" id="termsModal" tabindex="-1" aria-hidden="true" aria-labelledby="termsLabel">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="termsLabel"><i class="bi bi-file-earmark-text me-2"></i>Terms of Use</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-secondary mb-3">By using this site you agree to these Terms.</p>
+        <h6>Use of the Site</h6>
+        <ul>
+          <li>You must comply with all applicable laws and these Terms.</li>
+          <li>Do not upload unlawful content, including doxxing materials, intimate images, malware, or anything that infringes rights.</li>
+          <li>We may remove content, restrict access, or suspend accounts at our discretion to protect safety and comply with law.</li>
+        </ul>
+        <h6>Content and Evidence</h6>
+        <ul>
+          <li>Submitting content grants us a non-exclusive licence to host, process, display, and moderate that content for case management and public interest reporting.</li>
+          <li>We may redact or blur sensitive information and may decline to publish certain materials.</li>
+        </ul>
+        <h6>Disclaimers</h6>
+        <ul>
+          <li>The site is provided on an “as-is” basis without warranties of any kind.</li>
+          <li>We do not guarantee continuous availability or accuracy of third-party links.</li>
+        </ul>
+        <h6>Liability</h6>
+        <p>To the maximum extent permitted by law, we are not liable for indirect or consequential losses. Nothing excludes liability that cannot be excluded by law.</p>
+        <h6>Changes</h6>
+        <p>We may update these Terms and the Privacy Policy. Continued use after changes means you accept the updated terms.</p>
+        <h6>Contact</h6>
+        <p>Questions about these Terms? Contact us via the options on the homepage.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
   </body>
   </html>
