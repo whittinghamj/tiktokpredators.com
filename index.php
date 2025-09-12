@@ -1453,18 +1453,17 @@ if ($rs && count($rs) > 0):
                                 </button>
                                 <?php if (is_admin()): ?>
                                   <div class="btn-group ms-1">
-                                    <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
-                                      Edit
-                                    </button>
-                                    <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
-                                      <input type="hidden" name="action" value="delete_evidence">
-                                      <?php csrf_field(); ?>
-                                      <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
-                                      <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
-                                      <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
-                                      <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-                                    </form>
+                                    <span class="input-group">
+                                      <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal" data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">Edit</button>
+                                      <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                        <input type="hidden" name="action" value="delete_evidence">
+                                        <?php csrf_field(); ?>
+                                        <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                        <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                                        <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                      </form>
+                                    </span>
                                   </div>
                                 <?php endif; ?>
                               <?php } else {
