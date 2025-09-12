@@ -1405,9 +1405,11 @@ if ($rs && count($rs) > 0):
                       <div class="small text-secondary">Person Name</div>
                       <div><?php echo htmlspecialchars($viewCase['person_name'] ?? ''); ?></div>
                     </div>
-                    <div class="col-md-4 mb-2">
-                      <div class="small text-secondary">TikTok Username</div>
-                      <div><?php echo $viewCase['tiktok_username'] ? '@'.htmlspecialchars($viewCase['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
+                    <div class="col-md-4 mb-2 d-flex align-items-center">
+                      <div class="small text-secondary me-2">TikTok Username:</div>
+                      <div class="text-white">
+                        <?php echo $viewCase['tiktok_username'] ? '@'.htmlspecialchars($viewCase['tiktok_username']) : '<span class="text-secondary">—</span>'; ?>
+                      </div>
                     </div>
                     <div class="col-md-4 mb-2">
                       <div class="small text-secondary">Status</div>
