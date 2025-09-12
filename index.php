@@ -1773,7 +1773,7 @@ if ($rs && count($rs) > 0):
 
             <div class="table-responsive">
               <table class="table table-sm align-middle">
-                <thead><tr><th>Type</th><th>Title</th><th>File</th><th>MIME</th><th>Size</th><th>Added</th></tr></thead>
+                <thead><tr><th>Type</th><th>Title</th><th>Actions</th><th>MIME</th><th>Size</th><th>Added</th></tr></thead>
                 <tbody>
                   <?php if ($ev) { foreach ($ev as $e) { ?>
                     <tr>
