@@ -1036,30 +1036,63 @@ if (isset($_GET['logout'])) {
         <div class="col-12 case-grid">
           <div class="d-flex align-items-center justify-content-between mb-2">
             <h2 class="h4 mb-0">Recent Cases</h2>
-            <div class="btn-group">
-              <button class="btn btn-outline-light btn-sm"><i class="bi bi-sort-alpha-down"></i></button>
-              <button class="btn btn-outline-light btn-sm"><i class="bi bi-funnel"></i></button>
-              <?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'admin'): ?>
-                <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i> Add Case</button>
-              <?php endif; ?>
+            <div class="d-flex align-items-center">
+              <form class="d-none d-md-flex me-2" method="get" action="" role="search">
+                <input type="hidden" name="view" value="cases">
+                <input type="search" name="q" class="form-control form-control-sm" placeholder="Search names, usernames, summary…" value="<?php echo htmlspecialchars($_GET['q'] ?? ''); ?>" />
+              </form>
+              <div class="btn-group">
+                <button class="btn btn-outline-light btn-sm"><i class="bi bi-sort-alpha-down"></i></button>
+                <button class="btn btn-outline-light btn-sm"><i class="bi bi-funnel"></i></button>
+                <?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'admin'): ?>
+                  <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i> Add Case</button>
+                <?php endif; ?>
+              </div>
             </div>
           </div>
+          <?php
+          // --- SEARCH variable for search bar and results hint
+          $search = trim($_GET['q'] ?? '');
+          ?>
+          <?php if (!empty($search)): ?>
+            <div class="text-secondary small mb-2">Showing results for “<?php echo htmlspecialchars($search); ?>”.</div>
+          <?php endif; ?>
           <div class="row g-3 row-cols-1 row-cols-md-2">
 <?php
 try {
-  // Pull recent cases by latest activity (evidence added) or opened date
-  $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
-                 COALESCE(ev.cnt, 0) AS evidence_count,
-                 COALESCE(ev.last_added, c.opened_at) AS last_activity
-          FROM cases c
-          LEFT JOIN (
-            SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
-            FROM evidence
-            GROUP BY case_id
-          ) ev ON ev.case_id = c.id
-          ORDER BY last_activity DESC
-          LIMIT 20";
-  $rs = $pdo->query($sql)->fetchAll();
+  $search = trim($_GET['q'] ?? '');
+  if ($search !== '') {
+    $like = '%' . $search . '%';
+    $stmt = $pdo->prepare("
+      SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+             COALESCE(ev.cnt, 0) AS evidence_count,
+             COALESCE(ev.last_added, c.opened_at) AS last_activity
+      FROM cases c
+      LEFT JOIN (
+        SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
+        FROM evidence
+        GROUP BY case_id
+      ) ev ON ev.case_id = c.id
+      WHERE (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ?)
+      ORDER BY last_activity DESC
+      LIMIT 100
+    ");
+    $stmt->execute([$like, $like, $like, $like]);
+    $rs = $stmt->fetchAll();
+  } else {
+    $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+                   COALESCE(ev.cnt, 0) AS evidence_count,
+                   COALESCE(ev.last_added, c.opened_at) AS last_activity
+            FROM cases c
+            LEFT JOIN (
+              SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
+              FROM evidence
+              GROUP BY case_id
+            ) ev ON ev.case_id = c.id
+            ORDER BY last_activity DESC
+            LIMIT 20";
+    $rs = $pdo->query($sql)->fetchAll();
+  }
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $e->getMessage();
   $rs = [];
