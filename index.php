@@ -1322,6 +1322,9 @@ document.addEventListener('DOMContentLoaded', function(){
 <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
 <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
+<?php if (is_logged_in()): ?>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='pending')?'active':''; ?>" href="?view=pending#pending">Pending Cases</a></li>
+<?php endif; ?>
 <?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'viewer'): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='submit_case')?'active':''; ?>" href="?view=submit_case#submit-case">Submit Case</a></li>
 <?php endif; ?>
@@ -1551,6 +1554,105 @@ if ($rs && count($rs) > 0):
                   </div>
                 </form>
               <?php endif; ?>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <?php endif; ?>
+
+  <?php if ($view === 'pending'): ?>
+  <main class="py-4" id="pending">
+    <div class="container-xl">
+      <div class="row g-4">
+        <div class="col-12">
+          <div class="card glass">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between mb-3">
+                <h2 class="h5 mb-0"><i class="bi bi-hourglass-split me-2"></i>Pending Cases</h2>
+                <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+              </div>
+  <?php
+    // Build dataset based on role
+    $rows = [];
+    try {
+        $baseSql = "
+          SELECT c.id, c.case_code, c.case_name, c.person_name, c.status, c.created_by,
+                 COALESCE(ev.cnt, 0) AS evidence_count,
+                 COALESCE(ev.last_added, c.opened_at) AS last_activity
+          FROM cases c
+          LEFT JOIN (
+            SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
+            FROM evidence
+            GROUP BY case_id
+          ) ev ON ev.case_id = c.id
+          WHERE c.status = 'Pending'
+        ";
+        if (is_admin()) {
+            $sql = $baseSql . " ORDER BY last_activity DESC";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute();
+        } else {
+            // Viewer: only own pending cases
+            $sql = $baseSql . " AND c.created_by = ? ORDER BY last_activity DESC";
+            $stmt = $pdo->prepare($sql);
+            $stmt->execute([ $_SESSION['user']['id'] ?? 0 ]);
+        }
+        $rows = $stmt->fetchAll();
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        $rows = [];
+    }
+  ?>
+  <?php if ($rows && count($rows) > 0): ?>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                  <thead>
+                    <tr>
+                      <th style="width: 12rem;">Case Code</th>
+                      <th>Case Name</th>
+                      <th style="width: 16rem;">Subject</th>
+                      <th style="width: 10rem;">Evidence</th>
+                      <th style="width: 14rem;">Last Activity</th>
+                      <th style="width: 18rem;" class="text-end">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                  <?php foreach ($rows as $r):
+                      $code = $r['case_code'];
+                      $name = $r['case_name'] ?: $code;
+                      $person = $r['person_name'] ?: '';
+                      $evc = (int)($r['evidence_count'] ?? 0);
+                      $last = $r['last_activity'] ?? '';
+                  ?>
+                    <tr>
+                      <td><span class="badge text-bg-dark border"><?php echo htmlspecialchars($code); ?></span></td>
+                      <td class="fw-semibold"><?php echo htmlspecialchars($name); ?></td>
+                      <td><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></td>
+                      <td><?php echo $evc; ?></td>
+                      <td><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
+                      <td class="text-end">
+                        <a class="btn btn-outline-light btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-eye me-1"></i>View</a>
+                        <?php if (is_admin()): ?>
+                          <a class="btn btn-primary btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-pencil-square me-1"></i>Edit</a>
+                          <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this case and all evidence? This cannot be undone.');">
+                            <input type="hidden" name="action" value="delete_case">
+                            <?php csrf_field(); ?>
+                            <input type="hidden" name="case_id" value="<?php echo (int)$r['id']; ?>">
+                            <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($code); ?>">
+                            <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-trash me-1"></i>Delete</button>
+                          </form>
+                        <?php endif; ?>
+                      </td>
+                    </tr>
+                  <?php endforeach; ?>
+                  </tbody>
+                </table>
+              </div>
+  <?php else: ?>
+              <div class="alert alert-secondary mb-0">No pending cases to show.</div>
+  <?php endif; ?>
             </div>
           </div>
         </div>
