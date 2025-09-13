@@ -2271,7 +2271,7 @@ try {
             ) ev ON ev.case_id = c.id
             WHERE c.status <> 'Pending'
             ORDER BY last_activity DESC
-            LIMIT 20";
+            LIMIT 1000";
     $rs = $pdo->query($sql)->fetchAll();
   }
 } catch (Throwable $e) {
