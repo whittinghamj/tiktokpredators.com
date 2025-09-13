@@ -1509,6 +1509,9 @@ document.addEventListener('DOMContentLoaded', function(){
 <?php endif; ?>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
+  <li class="nav-item">
+    <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#devModal">Dev</a>
+  </li>
 <?php endif; ?>
         </ul>
         <div class="d-flex align-items-center gap-2">
