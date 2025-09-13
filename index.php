@@ -1612,6 +1612,10 @@ document.addEventListener('DOMContentLoaded', function(){
     <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#devModal">Dev</a>
   </li>
 <?php endif; ?>
+      </ul>
+      </div>
+    </div>
+  </nav>
 <?php if ($view === 'removal'): ?>
   <main class="py-4" id="removal">
     <div class="container-xl">
