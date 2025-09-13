@@ -1852,7 +1852,7 @@ if ($rs && count($rs) > 0):
       $viewCase = null; $viewCaseId = 0; $viewEv = [];
       if ($caseCode !== '') {
         try {
-          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
+          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
           $viewCaseId = (int)($viewCase['id'] ?? 0);
@@ -1874,22 +1874,34 @@ if ($rs && count($rs) > 0):
       if ($tp_isRestrictedForNonAdmin) {
         echo '<script>document.addEventListener("DOMContentLoaded",function(){document.body.dataset.restricted="1";});</script>';
       }
+      // Capability: can this user add evidence?
+      $tp_canAddEvidence = false;
+      if (!empty($_SESSION['user'])) {
+          if (($_SESSION['user']['role'] ?? '') === 'admin') {
+              $tp_canAddEvidence = true;
+          } elseif (!empty($viewCase) && (($viewCase['status'] ?? '') === 'Pending')) {
+              $ownerId = (int)($viewCase['created_by'] ?? 0);
+              $tp_canAddEvidence = ($ownerId > 0) && ($ownerId === (int)($_SESSION['user']['id'] ?? 0));
+          }
+      }
     ?>
     <section class="py-5 border-top" id="case-view">
       <div class="container-xl">
         <div class="d-flex align-items-center justify-content-between mb-3">
           <h2 class="h4 mb-0">Case <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
           <div class="d-flex gap-2">
-            <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
-              <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence / Note</button>
-              <form method="post" action="" class="d-inline" onsubmit="return confirm('This will permanently delete the entire case and all evidence/notes. This cannot be undone. Continue?');">
-                <input type="hidden" name="action" value="delete_case">
-                <?php csrf_field(); ?>
-                <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
-                <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
-                <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-trash me-1"></i> Delete Case</button>
-              </form>
-            <?php endif; ?>
+<?php if ($tp_canAddEvidence): ?>
+            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence / Note</button>
+<?php endif; ?>
+<?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
+            <form method="post" action="" class="d-inline" onsubmit="return confirm('This will permanently delete the entire case and all evidence/notes. This cannot be undone. Continue?');">
+              <input type="hidden" name="action" value="delete_case">
+              <?php csrf_field(); ?>
+              <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+              <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-trash me-1"></i> Delete Case</button>
+            </form>
+<?php endif; ?>
             <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
           </div>
         </div>
@@ -2023,7 +2035,7 @@ if ($rs && count($rs) > 0):
           </div>
           <!-- Evidence Pane (open wrapper; existing evidence markup continues) -->
           <div class="tab-pane fade show active" id="case-evidence-panel" role="tabpanel" aria-labelledby="tab-evidence">
-        <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
+        <?php if ($tp_canAddEvidence): ?>
   <div class="modal fade" id="addEvidenceModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
       <div class="modal-content">
@@ -2036,11 +2048,13 @@ if ($rs && count($rs) > 0):
             <li class="nav-item" role="presentation">
               <button class="nav-link active" id="ev-upload-tab" data-bs-toggle="tab" data-bs-target="#ev-upload-pane" type="button" role="tab">Upload Evidence</button>
             </li>
+            <?php if (is_admin()): ?>
             <li class="nav-item" role="presentation">
               <button class="nav-link" id="ev-note-tab" data-bs-toggle="tab" data-bs-target="#ev-note-pane" type="button" role="tab">Add Note</button>
             </li>
+            <?php endif; ?>
             <li class="nav-item" role="presentation">
-              <button class="nav-link" id="ev-url-tab" data-bs-toggle="tab" data-bs-target="#ev-url-pane" type="button" role="tab">Add URL</button>
+              <button class="nav-link <?php echo is_admin() ? '' : 'ms-1'; ?>" id="ev-url-tab" data-bs-toggle="tab" data-bs-target="#ev-url-pane" type="button" role="tab">Add URL</button>
             </li>
           </ul>
           <div class="tab-content pt-3">
@@ -2071,6 +2085,7 @@ if ($rs && count($rs) > 0):
                 </div>
               </form>
             </div>
+            <?php if (is_admin()): ?>
             <div class="tab-pane fade" id="ev-note-pane" role="tabpanel">
               <form class="mb-2" method="post" action="" id="evNoteForm">
                 <input type="hidden" name="action" value="add_evidence_note">
@@ -2082,6 +2097,7 @@ if ($rs && count($rs) > 0):
                 <textarea name="note_text" class="form-control" rows="4" placeholder="Write a concise internal note..." required></textarea>
               </form>
             </div>
+            <?php endif; ?>
             <div class="tab-pane fade" id="ev-url-pane" role="tabpanel">
               <form class="mb-2" method="post" action="" id="evUrlForm">
                 <input type="hidden" name="action" value="upload_evidence">
@@ -2107,7 +2123,9 @@ if ($rs && count($rs) > 0):
         <div class="modal-footer">
           <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
           <button class="btn btn-primary" type="submit" form="evUploadForm"><i class="bi bi-cloud-arrow-up me-1"></i> Save Upload</button>
+          <?php if (is_admin()): ?>
           <button class="btn btn-success" type="submit" form="evNoteForm"><i class="bi bi-journal-plus me-1"></i> Save Note</button>
+          <?php endif; ?>
           <button class="btn btn-info" type="submit" form="evUrlForm"><i class="bi bi-link-45deg me-1"></i> Save URL</button>
         </div>
       </div>
