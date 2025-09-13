@@ -26,3 +26,4 @@ cd "$WEBROOT" || { echo "Failed to cd into $WEBROOT"; exit 1; }
 git pull
 
 echo "Update complete."
+
