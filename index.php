@@ -1892,9 +1892,7 @@ if ($rs && count($rs) > 0):
                       <td class="text-nowrap"><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></td>
                       <td class="text-nowrap"><?php echo $evc; ?></td>
                       <td class="text-nowrap"><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
-                      <td class="text-end text-nowrap">
-                        <a class="btn btn-outline-light btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-eye me-1"></i>View</a>
-                        
+                      <td class="text-end text-nowrap">                        
                           <a class="btn btn-primary btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-pencil-square me-1"></i>Edit</a>
                           <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this case and all evidence? This cannot be undone.');">
                             <input type="hidden" name="action" value="delete_case">
