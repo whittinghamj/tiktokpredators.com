@@ -785,6 +785,20 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         }
         // Ensure it is a safe filename
         $origName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', $origName);
+        // Deduplicate by URL hash before insert
+        try {
+            $dupChk = $pdo->prepare('SELECT id, case_id, title FROM evidence WHERE (hash_sha256 = ? OR sha256_hex = ?) LIMIT 1');
+            $dupChk->execute([$hash, $hash]);
+            $dup = $dupChk->fetch();
+            if ($dup) {
+                flash('error', 'An identical URL evidence already exists (Evidence #'.(int)$dup['id'].').');
+                $redirUrl = trim($_POST['redirect_url'] ?? '');
+                if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+                header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+            }
+        } catch (Throwable $e) {
+            // no-op on dedupe check failure; continue to attempt insert
+        }
         try {
             $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
             $stmt->execute([
@@ -863,6 +877,22 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $mime = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
     $size = filesize($destAbs) ?: 0;
     $hash = hash_file('sha256', $destAbs);
+    // Deduplicate by file content hash before insert
+    try {
+        $dupChk = $pdo->prepare('SELECT id, case_id, title FROM evidence WHERE (hash_sha256 = ? OR sha256_hex = ?) LIMIT 1');
+        $dupChk->execute([$hash, $hash]);
+        $dup = $dupChk->fetch();
+        if ($dup) {
+            // remove the file we just stored to keep FS clean
+            if (is_file($destAbs)) { @unlink($destAbs); }
+            flash('error', 'An identical file already exists (Evidence #'.(int)$dup['id'].'). Upload skipped.');
+            $redirUrl = trim($_POST['redirect_url'] ?? '');
+            if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+            header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+        }
+    } catch (Throwable $e) {
+        // If dedupe check fails, proceed to insert; DB unique index will still protect us
+    }
 
     try {
 
