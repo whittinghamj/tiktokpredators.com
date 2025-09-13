@@ -1700,13 +1700,6 @@ if ($rs && count($rs) > 0):
                           <?php if ($meta): ?><span class="badge text-bg-dark border ms-1"><?php echo $meta; ?></span><?php endif; ?>
                         </div>
                         <?php if ($detail): ?><div class="text-secondary small"><?php echo $detail; ?></div><?php endif; ?>
-                        <?php if ($eid > 0): ?>
-                          <div class="mt-1">
-                            <a class="btn btn-outline-light btn-sm" href="?view=case&amp;code=<?php echo urlencode($viewCase['case_code'] ?? ''); ?>#evidence-<?php echo $eid; ?>">
-                              <i class="bi bi-box-arrow-up-right me-1"></i> Jump to evidence
-                            </a>
-                          </div>
-                        <?php endif; ?>
                       </div>
                       <div class="text-secondary small"><?php echo $when; ?></div>
                     </div>
