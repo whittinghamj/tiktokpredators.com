@@ -3124,7 +3124,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     <h3 class="h6 mb-0">Case Details</h3>
                     <?php if (is_admin()): ?>
                       <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal">
-                        <i class="bi bi-pencil me-1"></i> Edit 1
+                        <i class="bi bi-pencil me-1"></i> Edit
                       </button>
                     <?php endif; ?>
                   </div>
@@ -3159,7 +3159,33 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Status</div>
-                          <div><span class="badge text-bg-dark border"><?php echo htmlspecialchars($viewCase['status']); ?></span></div>
+                          <div>
+                            <?php
+                              $status = $viewCase['status'];
+                              $badgeClass = 'dark'; // default
+
+                              switch ($status) {
+                                  case 'Pending':
+                                      $badgeClass = 'warning'; // yellow
+                                      break;
+                                  case 'Open':
+                                      $badgeClass = 'primary'; // blue
+                                      break;
+                                  case 'In Review':
+                                      $badgeClass = 'info'; // light blue
+                                      break;
+                                  case 'Verified':
+                                      $badgeClass = 'success'; // green
+                                      break;
+                                  case 'Closed':
+                                      $badgeClass = 'danger'; // red
+                                      break;
+                              }
+                            ?>
+                            <span class="badge text-bg-<?php echo $badgeClass; ?> border">
+                                <?php echo htmlspecialchars($status); ?>
+                            </span>
+                        </div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Sensitivity</div>
