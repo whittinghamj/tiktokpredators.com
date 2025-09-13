@@ -1402,7 +1402,8 @@ try {
         FROM evidence
         GROUP BY case_id
       ) ev ON ev.case_id = c.id
-      WHERE (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ?)
+      WHERE c.status <> 'Pending'
+        AND (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ?)
       ORDER BY last_activity DESC
       LIMIT 100
     ");
@@ -1418,6 +1419,7 @@ try {
               FROM evidence
               GROUP BY case_id
             ) ev ON ev.case_id = c.id
+            WHERE c.status <> 'Pending'
             ORDER BY last_activity DESC
             LIMIT 20";
     $rs = $pdo->query($sql)->fetchAll();
