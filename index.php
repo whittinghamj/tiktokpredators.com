@@ -187,7 +187,7 @@ try {
             organization VARCHAR(255) NULL,
             target_url TEXT NOT NULL,
             justification TEXT NOT NULL,
-            status ENUM('Pending','Declined','In-Review','Approved / Closed') NOT NULL DEFAULT 'Pending',
+            status ENUM('Pending','Declined','In Review','Approved / Closed') NOT NULL DEFAULT 'Pending',
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX idx_status_created (status, created_at)
@@ -1299,7 +1299,7 @@ if (($_POST['action'] ?? '') === 'update_removal_status') {
 
     $rid = (int)($_POST['removal_id'] ?? 0);
     $status = trim($_POST['status'] ?? 'Pending');
-    $allowed = ['Pending','Declined','In-Review','Approved / Closed'];
+    $allowed = ['Pending','Declined','In Review','Approved / Closed'];
     if (!in_array($status, $allowed, true)) { $status = 'Pending'; }
 
     if ($rid <= 0) { flash('error', 'Invalid request.'); header('Location: ?view=removal#removal'); exit; }
@@ -1745,7 +1745,7 @@ document.addEventListener('DOMContentLoaded', function(){
                 <label for="rr_status" class="form-label">Status</label>
                 <select id="rr_status" class="form-select" name="status">
                   <?php
-                    $opts = ['Pending','In-Review','Declined','Approved / Closed'];
+                    $opts = ['Pending','In Review','Declined','Approved / Closed'];
                     foreach ($opts as $opt) {
                       $sel = ($opt === ($req['status'] ?? 'Pending')) ? ' selected' : '';
                       echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt).'</option>';
@@ -1873,7 +1873,7 @@ document.addEventListener('DOMContentLoaded', function(){
                                 case 'Pending':
                                     $badgeClass = 'warning'; // yellow
                                     break;
-                                case 'In-Review':
+                                case 'In Review':
                                     $badgeClass = 'info'; // blue
                                     break;
                                 case 'Declined':
@@ -1948,7 +1948,7 @@ document.addEventListener('DOMContentLoaded', function(){
                           <div class="input-group">
                             <label class="input-group-text" for="removalStatus<?php echo (int)$r['id']; ?>">Set status</label>
                             <select id="removalStatus<?php echo (int)$r['id']; ?>" name="status" class="form-select">
-                              <?php foreach (['Pending','Declined','In-Review','Approved / Closed'] as $opt): ?>
+                              <?php foreach (['Pending','Declined','In Review','Approved / Closed'] as $opt): ?>
                                 <option value="<?php echo $opt; ?>" <?php echo ($r['status'] === $opt ? 'selected' : ''); ?>><?php echo $opt; ?></option>
                               <?php endforeach; ?>
                             </select>
