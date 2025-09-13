@@ -2332,7 +2332,7 @@ if ($rs && count($rs) > 0):
                 $badgeClass = 'success'; // green
                 break;
             case 'Closed':
-                $badgeClass = 'secondary'; // gray
+                $badgeClass = 'danger'; // red
                 break;
         }
         ?>
