@@ -357,6 +357,76 @@ if (($_POST['action'] ?? '') === 'admin_add_user') {
     header('Location: '. $redir); exit;
 }
 
+// Handle viewer submit case (viewer only)
+if (($_POST['action'] ?? '') === 'viewer_submit_case') {
+    throttle();
+    if (!check_csrf()) {
+        flash('error', 'Security check failed. Please refresh and try again.');
+        $_SESSION['auth_tab'] = 'login';
+        header('Location: ' . strtok($_SERVER['REQUEST_URI'], '?') . '?view=submit_case#submit-case'); exit;
+    }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'viewer')) {
+        flash('error', 'You must be logged in as a viewer to submit a case.');
+        header('Location: ?view=submit_case#submit-case'); exit;
+    }
+
+    // Collect & validate basic inputs
+    $case_name = trim($_POST['case_name'] ?? '');
+    $person_name = trim($_POST['person_name'] ?? '');
+    $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
+    $initial_summary = trim($_POST['initial_summary'] ?? '');
+
+    if ($case_name === '' || $initial_summary === '') {
+        flash('error', 'Case name and summary are required.');
+        $_SESSION['open_modal'] = '';
+        $_SESSION['form_error'] = 'Case name and summary are required.';
+        header('Location: ?view=submit_case#submit-case'); exit;
+    }
+
+    try {
+        $case_code = generate_case_code($pdo);
+        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+        $stmt->execute([
+            $case_code,
+            $case_name,
+            ($person_name !== '' ? $person_name : null),
+            ($tiktok_username !== '' ? $tiktok_username : null),
+            $initial_summary,
+            'Standard',
+            'Pending',
+            $_SESSION['user']['id'] ?? null
+        ]);
+        $case_id = (int)$pdo->lastInsertId();
+        log_case_event($pdo, $case_id, 'case_created', $case_name, 'Viewer submitted case. Status set to Pending');
+
+        // Optional person photo
+        if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
+            $pf = $_FILES['person_photo'];
+            $pmime = $pf['type'] ?? '';
+            $allowedImg = ['image/jpeg'=>'jpg','image/png'=>'png','image/webp'=>'webp'];
+            $ext = $allowedImg[$pmime] ?? null;
+            if (!$ext) { $det = @mime_content_type($pf['tmp_name']) ?: ''; $ext = $allowedImg[$det] ?? null; }
+            if ($ext) {
+                $peopleDir = __DIR__ . '/uploads/people';
+                if (!is_dir($peopleDir)) { @mkdir($peopleDir, 0755, true); }
+                $destAbs = $peopleDir . '/' . $case_code . '.' . $ext;
+                foreach (['jpg','jpeg','png','webp'] as $rmext) {
+                    $cand = $peopleDir . '/' . $case_code . '.' . $rmext;
+                    if (is_file($cand)) { @unlink($cand); }
+                }
+                @move_uploaded_file($pf['tmp_name'], $destAbs);
+            }
+        }
+
+        flash('success', 'Case submitted for review. You can now add evidence to your case while it is Pending.');
+        header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to submit case.');
+        header('Location: ?view=submit_case#submit-case'); exit;
+    }
+}
+
 // Handle create case POST (admin only)
 if (($_POST['action'] ?? '') === 'create_case') {
     throttle();
@@ -374,7 +444,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
     $status = $_POST['status'] ?? '';
 
     $allowed_sensitivity = ['Standard','Restricted','Sealed'];
-    $allowed_status = ['Open','In Review','Verified','Closed'];
+    $allowed_status = ['Pending','Open','In Review','Verified','Closed'];
 
     if ($case_name === '' || $initial_summary === '') {
         flash('error', 'Case name and initial summary are required.');
@@ -461,7 +531,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $status = $_POST['status'] ?? '';
 
     $allowed_sensitivity = ['Standard','Restricted','Sealed'];
-    $allowed_status = ['Open','In Review','Verified','Closed'];
+    $allowed_status = ['Pending','Open','In Review','Verified','Closed'];
 
     if ($case_id <= 0 || $case_code === '') {
         flash('error', 'Invalid case reference.');
@@ -644,7 +714,24 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
 if (($_POST['action'] ?? '') === 'upload_evidence') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user'])) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    $isAdminUser = (($_SESSION['user']['role'] ?? '') === 'admin');
+    $isOwnerViewer = false;
+    // Determine if viewer owns this case
+    $case_id_check = (int)($_POST['case_id'] ?? 0);
+    if (!$isAdminUser && $case_id_check > 0) {
+        try {
+            $cs = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
+            $cs->execute([$case_id_check]);
+            $crow = $cs->fetch();
+            if ($crow && (int)($crow['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && ($crow['status'] ?? '') === 'Pending') {
+                $isOwnerViewer = true;
+            }
+        } catch (Throwable $e) {}
+    }
+    if (!$isAdminUser && !$isOwnerViewer) {
+        flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
 
     $case_id = (int)($_POST['case_id'] ?? 0);
     $redir_code = trim($_POST['case_code'] ?? '');
@@ -1232,9 +1319,12 @@ document.addEventListener('DOMContentLoaded', function(){
       <a class="navbar-brand fw-bold" href="#"><i class="bi bi-shield-lock me-2 text-primary"></i> TikTok<span>Predators</span></a>
       <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topNav"><span class="navbar-toggler-icon"></span></button>
       <div class="collapse navbar-collapse" id="topNav">
-        <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+<ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
 <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
+<?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'viewer'): ?>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='submit_case')?'active':''; ?>" href="?view=submit_case#submit-case">Submit Case</a></li>
+<?php endif; ?>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
 <?php endif; ?>
@@ -1398,6 +1488,69 @@ if ($rs && count($rs) > 0):
 <?php endif; ?>
 </div>
 
+        </div>
+      </div>
+    </div>
+  </main>
+  <?php endif; ?>
+
+ 
+
+  <?php if ($view === 'submit_case'): ?>
+  <main class="py-4" id="submit-case">
+    <div class="container-xl">
+      <div class="row g-4">
+        <div class="col-12 col-lg-10 col-xl-8 mx-auto">
+          <div class="card glass">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between mb-2">
+                <h2 class="h5 mb-0"><i class="bi bi-folder-plus me-2"></i>Submit a Case for Review</h2>
+                <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+              </div>
+              <?php if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'viewer')): ?>
+                <div class="alert alert-secondary mb-0">You must be logged in as a <strong>viewer</strong> to submit a case.</div>
+              <?php else: ?>
+                <?php if (!empty($formError)) : ?>
+                  <div class="alert alert-danger"><?php echo htmlspecialchars($formError); ?></div>
+                <?php endif; ?>
+                <form method="post" action="" enctype="multipart/form-data" class="mt-3">
+                  <input type="hidden" name="action" value="viewer_submit_case">
+                  <?php csrf_field(); ?>
+                  <div class="mb-3">
+                    <label class="form-label">Case Name <span class="text-danger">*</span></label>
+                    <input type="text" name="case_name" class="form-control" required>
+                  </div>
+                  <div class="row">
+                    <div class="col-md-6 mb-3">
+                      <label class="form-label">Person Name</label>
+                      <input type="text" name="person_name" class="form-control">
+                    </div>
+                    <div class="col-md-6 mb-3">
+                      <label class="form-label">TikTok Username</label>
+                      <div class="input-group">
+                        <span class="input-group-text">@</span>
+                        <input type="text" name="tiktok_username" class="form-control" placeholder="username (optional)">
+                      </div>
+                    </div>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label">Summary <span class="text-danger">*</span></label>
+                    <textarea name="initial_summary" class="form-control" rows="4" placeholder="Describe the concern and context." required></textarea>
+                  </div>
+                  <div class="mb-3">
+                    <label class="form-label">Person Photo (optional)</label>
+                    <input type="file" name="person_photo" class="form-control" accept="image/*">
+                  </div>
+                  <div class="alert alert-secondary small">
+                    Submitting creates a <strong>Pending</strong> case visible only to admins. While your case is Pending, <em>you</em> can upload additional evidence. Admins will review and may change status.
+                  </div>
+                  <div class="d-grid">
+                    <button class="btn btn-primary" type="submit"><i class="bi bi-cloud-upload me-1"></i> Submit Case</button>
+                  </div>
+                </form>
+              <?php endif; ?>
+            </div>
+          </div>
         </div>
       </div>
     </div>
