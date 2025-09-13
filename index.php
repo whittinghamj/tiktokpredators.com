@@ -1471,16 +1471,7 @@ document.addEventListener('DOMContentLoaded', function(){
                                 </select>
                               </div>
                               <div class="col-md-6 mb-3">
-                                <label class="form-label">Status</label>
-                                <select name="status" class="form-select">
-                                  <?php
-                                  $statusOpts = ['Pending','Open','In Review','Verified','Closed'];
-                                  foreach ($statusOpts as $opt) {
-                                      $sel = ($caseRow['status'] ?? 'Pending') === $opt ? ' selected' : '';
-                                      echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt).'</option>';
-                                  }
-                                  ?>
-                                </select>
+                                <input type="hidden" name="status" value="Pending">
                               </div>
                             </div>
                             <div class="d-flex gap-2">
