@@ -2255,7 +2255,7 @@ try {
       WHERE c.status <> 'Pending'
         AND (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ?)
       ORDER BY last_activity DESC
-      LIMIT 100
+      LIMIT 1000
     ");
     $stmt->execute([$like, $like, $like, $like]);
     $rs = $stmt->fetchAll();
