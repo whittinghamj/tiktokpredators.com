@@ -176,6 +176,26 @@ try {
 } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
+// --- Removal requests table setup ---
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS removal_requests (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            full_name VARCHAR(255) NOT NULL,
+            email VARCHAR(255) NOT NULL,
+            phone VARCHAR(64) NULL,
+            organization VARCHAR(255) NULL,
+            target_url TEXT NOT NULL,
+            justification TEXT NOT NULL,
+            status ENUM('Pending','Declined','In-Review','Approved / Closed') NOT NULL DEFAULT 'Pending',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_status_created (status, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+} catch (Throwable $e) {
+    $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
 function log_case_event(PDO $pdo, int $caseId, string $type, string $subject = null, string $detail = null, ?int $refEvidenceId = null, ?int $refNoteId = null): void {
     try {
         $stmt = $pdo->prepare("INSERT INTO case_events (case_id, event_type, subject, detail, ref_evidence_id, ref_note_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)");
@@ -1241,6 +1261,82 @@ if (($_POST['action'] ?? '') === 'save_redaction_mask') {
 }
 }
 
+// Handle removal request submission (public)
+if (($_POST['action'] ?? '') === 'submit_removal') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ?view=removal#removal'); exit; }
+
+    $full_name = trim($_POST['full_name'] ?? '');
+    $email = trim($_POST['email'] ?? '');
+    $phone = trim($_POST['phone'] ?? '');
+    $org = trim($_POST['organization'] ?? '');
+    $target_url = trim($_POST['target_url'] ?? '');
+    $justification = trim($_POST['justification'] ?? '');
+
+    if ($full_name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || $target_url === '' || $justification === '') {
+        flash('error', 'Please complete all required fields (Full name, valid Email, URL, and Justification).');
+        header('Location: ?view=removal#removal'); exit;
+    }
+
+    try {
+        $ins = $pdo->prepare('INSERT INTO removal_requests (full_name, email, phone, organization, target_url, justification, status) VALUES (?,?,?,?,?,?,"Pending")');
+        $ins->execute([$full_name, $email, $phone !== '' ? $phone : null, $org !== '' ? $org : null, $target_url, $justification]);
+        flash('success', 'Your request was submitted. Our admins will review it.');
+        log_console('INFO', 'Removal request submitted for URL: ' . $target_url);
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to submit removal request.');
+    }
+    header('Location: ?view=removal#removal'); exit;
+}
+
+// Handle update removal request status (admin only)
+if (($_POST['action'] ?? '') === 'update_removal_status') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ?view=removal#removal'); exit; }
+    if (!is_admin()) { flash('error', 'Unauthorized.'); header('Location: ?view=removal#removal'); exit; }
+
+    $rid = (int)($_POST['removal_id'] ?? 0);
+    $status = trim($_POST['status'] ?? 'Pending');
+    $allowed = ['Pending','Declined','In-Review','Approved / Closed'];
+    if (!in_array($status, $allowed, true)) { $status = 'Pending'; }
+
+    if ($rid <= 0) { flash('error', 'Invalid request.'); header('Location: ?view=removal#removal'); exit; }
+    try {
+        $u = $pdo->prepare('UPDATE removal_requests SET status = ? WHERE id = ? LIMIT 1');
+        $u->execute([$status, $rid]);
+        flash('success', 'Removal request status updated to ' . htmlspecialchars($status));
+        log_console('SUCCESS', 'Removal request #' . $rid . ' status set to ' . $status);
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to update status.');
+    }
+    header('Location: ?view=removal#removal'); exit;
+}
+
+// Handle delete removal request (admin only)
+if (($_POST['action'] ?? '') === 'delete_removal') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ?view=removal#removal'); exit; }
+    if (!is_admin()) { flash('error', 'Unauthorized.'); header('Location: ?view=removal#removal'); exit; }
+
+    $rid = (int)($_POST['removal_id'] ?? 0);
+    if ($rid <= 0) { flash('error', 'Invalid request.'); header('Location: ?view=removal#removal'); exit; }
+    try {
+        $d = $pdo->prepare('DELETE FROM removal_requests WHERE id = ? LIMIT 1');
+        $d->execute([$rid]);
+        flash('success', 'Removal request deleted.');
+        log_console('SUCCESS', 'Removal request #' . $rid . ' deleted');
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to delete removal request.');
+    }
+    header('Location: ?view=removal#removal'); exit;
+}
+
 // Handle delete user (admin only)
 if (($_POST['action'] ?? '') === 'delete_user') {
     throttle();
@@ -1503,6 +1599,7 @@ document.addEventListener('DOMContentLoaded', function(){
 <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
 <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
+<li class="nav-item"><a class="nav-link <?php echo ($view==='removal')?'active':''; ?>" href="?view=removal#removal">Removal</a></li>
 <?php if (is_logged_in()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='pending')?'active':''; ?>" href="?view=pending#pending">Pending Cases</a></li>
 <?php endif; ?>
@@ -1514,6 +1611,154 @@ document.addEventListener('DOMContentLoaded', function(){
   <li class="nav-item">
     <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#devModal">Dev</a>
   </li>
+<?php endif; ?>
+<?php if ($view === 'removal'): ?>
+  <main class="py-4" id="removal">
+    <div class="container-xl">
+      <div class="row">
+        <div class="col-lg-7 mx-auto">
+          <div class="card glass mb-4">
+            <div class="card-header d-flex align-items-center justify-content-between">
+              <h5 class="mb-0"><i class="bi bi-shield-x me-2"></i>Takedown / Removal Request</h5>
+            </div>
+            <div class="card-body">
+              <form method="post" action="">
+                <input type="hidden" name="action" value="submit_removal">
+                <?php csrf_field(); ?>
+                <div class="row g-3">
+                  <div class="col-md-6">
+                    <label class="form-label">Full name*</label>
+                    <input type="text" name="full_name" class="form-control" required>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Email*</label>
+                    <input type="email" name="email" class="form-control" required>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Phone</label>
+                    <input type="text" name="phone" class="form-control" placeholder="Optional">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Organization</label>
+                    <input type="text" name="organization" class="form-control" placeholder="Optional">
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label">URL to the evidence or case*</label>
+                    <input type="url" name="target_url" class="form-control" placeholder="https://tiktokpredators.com/?view=case&code=..." required>
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label">Justification*</label>
+                    <textarea name="justification" rows="6" class="form-control" placeholder="Explain why this item should be reviewed or removed." required></textarea>
+                  </div>
+                </div>
+                <div class="d-grid mt-3">
+                  <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i> Submit request</button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <?php if (is_admin()): ?>
+        <?php
+          try {
+              $reqs = $pdo->query("SELECT id, full_name, email, phone, organization, target_url, justification, status, created_at FROM removal_requests ORDER BY created_at DESC LIMIT 200")->fetchAll();
+          } catch (Throwable $e) { $reqs = []; }
+        ?>
+        <div class="card glass">
+          <div class="card-header d-flex align-items-center justify-content-between">
+            <h5 class="mb-0"><i class="bi bi-inbox me-2"></i>Removal Requests (Admin)</h5>
+          </div>
+          <div class="card-body">
+            <?php if (!$reqs): ?>
+              <div class="text-secondary">No removal requests yet.</div>
+            <?php else: ?>
+              <div class="table-responsive">
+                <table class="table align-middle table-hover">
+                  <thead>
+                    <tr>
+                      <th scope="col">#</th>
+                      <th scope="col">Submitted</th>
+                      <th scope="col">Name</th>
+                      <th scope="col">Email</th>
+                      <th scope="col">URL</th>
+                      <th scope="col">Status</th>
+                      <th scope="col" class="text-end">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <?php foreach ($reqs as $r): ?>
+                      <tr>
+                        <td><?php echo (int)$r['id']; ?></td>
+                        <td class="small text-secondary"><?php echo htmlspecialchars($r['created_at']); ?></td>
+                        <td><?php echo htmlspecialchars($r['full_name']); ?></td>
+                        <td><a href="mailto:<?php echo htmlspecialchars($r['email']); ?>"><?php echo htmlspecialchars($r['email']); ?></a></td>
+                        <td class="text-truncate" style="max-width:280px;"><a href="<?php echo htmlspecialchars($r['target_url']); ?>" target="_blank" rel="noopener"><?php echo htmlspecialchars($r['target_url']); ?></a></td>
+                        <td><span class="badge text-bg-secondary"><?php echo htmlspecialchars($r['status']); ?></span></td>
+                        <td class="text-end">
+                          <div class="btn-group">
+                            <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#modalRemoval<?php echo (int)$r['id']; ?>"><i class="bi bi-eye"></i> View</button>
+                            <form method="post" action="" onsubmit="return confirm('Delete this removal request?');">
+                              <?php csrf_field(); ?>
+                              <input type="hidden" name="action" value="delete_removal">
+                              <input type="hidden" name="removal_id" value="<?php echo (int)$r['id']; ?>">
+                              <button type="submit" class="btn btn-danger btn-sm"><i class="bi bi-trash"></i> Delete</button>
+                            </form>
+                          </div>
+                        </td>
+                      </tr>
+                    <?php endforeach; ?>
+                  </tbody>
+                </table>
+              </div>
+
+              <?php foreach ($reqs as $r): ?>
+                <div class="modal fade" id="modalRemoval<?php echo (int)$r['id']; ?>" tabindex="-1" aria-hidden="true">
+                  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+                    <div class="modal-content glass">
+                      <div class="modal-header">
+                        <h5 class="modal-title"><i class="bi bi-file-earmark-text me-2"></i>Removal Request #<?php echo (int)$r['id']; ?></h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                      </div>
+                      <div class="modal-body">
+                        <dl class="row mb-0">
+                          <dt class="col-sm-3">Submitted</dt><dd class="col-sm-9"><?php echo htmlspecialchars($r['created_at']); ?></dd>
+                          <dt class="col-sm-3">Full name</dt><dd class="col-sm-9"><?php echo htmlspecialchars($r['full_name']); ?></dd>
+                          <dt class="col-sm-3">Email</dt><dd class="col-sm-9"><a href="mailto:<?php echo htmlspecialchars($r['email']); ?>"><?php echo htmlspecialchars($r['email']); ?></a></dd>
+                          <dt class="col-sm-3">Phone</dt><dd class="col-sm-9"><?php echo htmlspecialchars($r['phone'] ?? ''); ?></dd>
+                          <dt class="col-sm-3">Organization</dt><dd class="col-sm-9"><?php echo htmlspecialchars($r['organization'] ?? ''); ?></dd>
+                          <dt class="col-sm-3">URL</dt><dd class="col-sm-9"><a href="<?php echo htmlspecialchars($r['target_url']); ?>" target="_blank" rel="noopener"><?php echo htmlspecialchars($r['target_url']); ?></a></dd>
+                          <dt class="col-sm-3">Justification</dt><dd class="col-sm-9"><pre class="mb-0" style="white-space: pre-wrap;"><?php echo htmlspecialchars($r['justification']); ?></pre></dd>
+                        </dl>
+                      </div>
+                      <div class="modal-footer d-flex align-items-center justify-content-between">
+                        <div>Current status: <span class="badge text-bg-secondary"><?php echo htmlspecialchars($r['status']); ?></span></div>
+                        <form method="post" action="">
+                          <?php csrf_field(); ?>
+                          <input type="hidden" name="action" value="update_removal_status">
+                          <input type="hidden" name="removal_id" value="<?php echo (int)$r['id']; ?>">
+                          <div class="input-group">
+                            <label class="input-group-text" for="removalStatus<?php echo (int)$r['id']; ?>">Set status</label>
+                            <select id="removalStatus<?php echo (int)$r['id']; ?>" name="status" class="form-select">
+                              <?php foreach (['Pending','Declined','In-Review','Approved / Closed'] as $opt): ?>
+                                <option value="<?php echo $opt; ?>" <?php echo ($r['status'] === $opt ? 'selected' : ''); ?>><?php echo $opt; ?></option>
+                              <?php endforeach; ?>
+                            </select>
+                            <button class="btn btn-primary" type="submit"><i class="bi bi-check2-circle me-1"></i>Update</button>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              <?php endforeach; ?>
+            <?php endif; ?>
+          </div>
+        </div>
+      <?php endif; ?>
+    </div>
+  </main>
 <?php endif; ?>
         </ul>
         <div class="d-flex align-items-center gap-2">
