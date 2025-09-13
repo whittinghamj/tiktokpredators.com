@@ -3019,7 +3019,8 @@ if ($rs && count($rs) > 0):
               <div class="col-md-3">
                 <label class="form-label">Status</label>
                 <select name="status" class="form-select" required>
-                  <option value="Open" selected>Open</option>
+                  <option value="Pending" selected>Pending</option>  
+                  <option value="Open">Open</option>
                   <option value="In Review">In Review</option>
                   <option value="Verified">Verified</option>
                   <option value="Closed">Closed</option>
