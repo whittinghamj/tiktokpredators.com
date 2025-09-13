@@ -1519,10 +1519,10 @@ document.addEventListener('DOMContentLoaded', function(){
           <?php else: ?>
             <div class="dropdown">
               <?php $dn = $_SESSION['user']['display_name'] ?? ''; $label = $dn !== '' ? $dn : ($_SESSION['user']['email'] ?? 'Account'); ?>
-              <button class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false">
+              <button id="userMenuBtn" type="button" class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" aria-haspopup="true">
                 <i class="bi bi-person-check me-1"></i> <?php echo htmlspecialchars($label); ?>
               </button>
-              <ul class="dropdown-menu dropdown-menu-end">
+              <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userMenuBtn">
                 <li class="dropdown-item-text">
                   <div class="fw-semibold"><?php echo htmlspecialchars($label); ?></div>
                   <div class="small text-secondary"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></div>
@@ -1537,6 +1537,18 @@ document.addEventListener('DOMContentLoaded', function(){
       </div>
     </div>
   </nav>
+
+  <script>
+  // Ensure Bootstrap dropdowns initialize even if data-api is disrupted
+  document.addEventListener('DOMContentLoaded', function(){
+    try {
+      var triggers = document.querySelectorAll('[data-bs-toggle="dropdown"]');
+      for (var i = 0; i < triggers.length; i++) {
+        new bootstrap.Dropdown(triggers[i]);
+      }
+    } catch (e) { /* no-op */ }
+  });
+  </script>
 
   <?php
   // --- Owner Pending Case Edit Controls (viewer can edit like admin while Pending)
