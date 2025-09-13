@@ -1459,16 +1459,7 @@ document.addEventListener('DOMContentLoaded', function(){
                             </div>
                             <div class="row">
                               <div class="col-md-6 mb-3">
-                                <label class="form-label">Sensitivity</label>
-                                <select name="sensitivity" class="form-select">
-                                  <?php
-                                  $sensOpts = ['Standard','Restricted','Sealed'];
-                                  foreach ($sensOpts as $opt) {
-                                      $sel = ($caseRow['sensitivity'] ?? 'Standard') === $opt ? ' selected' : '';
-                                      echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt).'</option>';
-                                  }
-                                  ?>
-                                </select>
+                                <input type="hidden" name="sensitivity" value="Standard">
                               </div>
                               <div class="col-md-6 mb-3">
                                 <input type="hidden" name="status" value="Pending">
