@@ -1315,6 +1315,9 @@ if (isset($_GET['logout'])) {
   <meta name="description" content="Secure, auditable case & evidence management platform for vetted users." />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
+
+  <!-- Bootstrap JS (required for modal/tabs) -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <style>
     :root {
       --tp-primary: #7c4dff; /* violet */
@@ -1353,8 +1356,7 @@ if (isset($_GET['logout'])) {
   <?php if ($msg = flash('success')): ?>
     <div class="alert alert-success border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
   <?php endif; ?>
-<!-- Bootstrap JS (required for modal/tabs) -->
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
 
 <!-- Auth Modal -->
 <div class="modal fade" id="authModal" tabindex="-1" aria-hidden="true">
@@ -3576,8 +3578,6 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 </div>
 <?php endif; ?>
 
-  <!-- Bootstrap JS Bundle -->
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
   document.addEventListener('DOMContentLoaded', function () {
     // Evidence modal dynamic preview + admin edit wiring
