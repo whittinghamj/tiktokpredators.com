@@ -1793,6 +1793,8 @@ document.addEventListener('DOMContentLoaded', function(){
               <div class="btn-group">
                 <?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'admin'): ?>
                   <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i> Add Case</button>
+                <?php elseif (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'viewer'): ?>
+                  <a class="btn btn-primary btn-sm" href="?view=submit_case#submit-case"><i class="bi bi-folder-plus me-1"></i> Submit Case</a>
                 <?php endif; ?>
               </div>
             </div>
