@@ -1613,6 +1613,35 @@ document.addEventListener('DOMContentLoaded', function(){
   </li>
 <?php endif; ?>
       </ul>
+      <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-center">
+        <?php if (is_logged_in()): ?>
+          <li class="nav-item dropdown">
+            <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+              <i class="bi bi-person-circle me-2"></i>
+              <span class="d-none d-md-inline"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></span>
+            </a>
+            <ul class="dropdown-menu dropdown-menu-end">
+              <li class="dropdown-header">
+                <div class="fw-semibold"><?php echo htmlspecialchars($_SESSION['user']['display_name'] ?? ($_SESSION['user']['email'] ?? 'User')); ?></div>
+                <div class="small text-secondary">Role: <?php echo htmlspecialchars($_SESSION['user']['role'] ?? 'viewer'); ?></div>
+              </li>
+              <?php if (is_admin()): ?>
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#devModal"><i class="bi bi-tools me-2"></i>Dev</a></li>
+              <?php endif; ?>
+              <li><hr class="dropdown-divider"></li>
+              <li><a class="dropdown-item" href="?logout=1"><i class="bi bi-box-arrow-right me-2"></i>Logout</a></li>
+            </ul>
+          </li>
+        <?php else: ?>
+          <li class="nav-item me-2">
+            <a class="btn btn-outline-light btn-sm" href="#" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</a>
+          </li>
+          <li class="nav-item">
+            <a class="btn btn-primary btn-sm" href="#" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i> Register</a>
+          </li>
+        <?php endif; ?>
+      </ul>
       </div>
     </div>
   </nav>
