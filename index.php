@@ -1598,7 +1598,6 @@ document.addEventListener('DOMContentLoaded', function(){
       <div class="collapse navbar-collapse" id="topNav">
 <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
-<li class="nav-item"><a class="nav-link <?php echo ($view==='removal')?'active':''; ?>" href="?view=removal#removal">Removal Requests</a></li>
 <?php if (is_logged_in()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='pending')?'active':''; ?>" href="?view=pending#pending">Pending Cases</a></li>
 <?php endif; ?>
