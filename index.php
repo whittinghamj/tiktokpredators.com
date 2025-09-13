@@ -38,12 +38,12 @@ function flash(string $key, ?string $val = null){
     $_SESSION['flash'][$key] = $val;
     // Log when setting a flash message
     if ($key === 'success') {
-        log_console('SUCCESS', $val);
+        // log_console('SUCCESS', $val);
     } elseif ($key === 'error') {
-        log_console('ERROR', $val);
+        // log_console('ERROR', $val);
     } else {
         // Optional: treat other flash keys as INFO
-        log_console('INFO', $key . ': ' . $val);
+        // log_console('INFO', $key . ': ' . $val);
     }
 }
 
