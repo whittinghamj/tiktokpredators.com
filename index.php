@@ -81,6 +81,35 @@ catch (Throwable $e) {
     flash('error', 'Database connection failed. Please check configuration.');
     $_SESSION['auth_tab'] = 'register';
 }
+// --- Case events logging setup ---
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS case_events (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            case_id BIGINT UNSIGNED NOT NULL,
+            event_type VARCHAR(64) NOT NULL,
+            subject VARCHAR(255) NULL,
+            detail TEXT NULL,
+            ref_evidence_id BIGINT UNSIGNED NULL,
+            ref_note_id BIGINT UNSIGNED NULL,
+            created_by BIGINT UNSIGNED NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_case_id_created (case_id, created_at),
+            INDEX idx_event_type (event_type),
+            INDEX idx_ref_evidence (ref_evidence_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+} catch (Throwable $e) {
+    $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+function log_case_event(PDO $pdo, int $caseId, string $type, string $subject = null, string $detail = null, ?int $refEvidenceId = null, ?int $refNoteId = null): void {
+    try {
+        $stmt = $pdo->prepare("INSERT INTO case_events (case_id, event_type, subject, detail, ref_evidence_id, ref_note_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)");
+        $stmt->execute([$caseId, $type, $subject, $detail, $refEvidenceId, $refNoteId, $_SESSION['user']['id'] ?? null]);
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+    }
+}
 
 // Secure evidence streaming endpoint
 if (($_GET['action'] ?? '') === 'serve_evidence') {
@@ -380,6 +409,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
             $_SESSION['user']['id'] ?? null
         ]);
         $case_id = (int)$pdo->lastInsertId();
+        log_case_event($pdo, $case_id, 'case_created', $case_name, 'Case created with status '.$status.' and sensitivity '.$sensitivity);
         // Optional: handle person photo upload
         if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
             $pf = $_FILES['person_photo'];
@@ -444,6 +474,10 @@ if (($_POST['action'] ?? '') === 'update_case') {
     if (!in_array($sensitivity, $allowed_sensitivity, true)) { $sensitivity = 'Standard'; }
     if (!in_array($status, $allowed_status, true)) { $status = 'Open'; }
 
+    // Fetch current values to compute diffs
+    $prev = [];
+    try { $ps = $pdo->prepare('SELECT case_name, person_name, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; } catch (Throwable $e) {}
+
     // Optional: update person photo
     if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
         $pf = $_FILES['person_photo'];
@@ -477,6 +511,28 @@ if (($_POST['action'] ?? '') === 'update_case') {
             $status,
             $case_id
         ]);
+        // Build diff summary
+        $changes = [];
+        $fields = ['case_name','person_name','tiktok_username','initial_summary','sensitivity','status'];
+        $newVals = [
+            'case_name' => $case_name,
+            'person_name' => ($person_name !== '' ? $person_name : null),
+            'tiktok_username' => ($tiktok_username !== '' ? $tiktok_username : null),
+            'initial_summary' => $initial_summary,
+            'sensitivity' => $sensitivity,
+            'status' => $status
+        ];
+        foreach ($fields as $f) {
+            $old = $prev[$f] ?? null; $new = $newVals[$f] ?? null;
+            if ($old !== $new) {
+                $shortOld = is_string($old) ? mb_strimwidth($old,0,60,'…','UTF-8') : (is_null($old)?'null':(string)$old);
+                $shortNew = is_string($new) ? mb_strimwidth($new,0,60,'…','UTF-8') : (is_null($new)?'null':(string)$new);
+                $changes[] = "$f: {$shortOld} → {$shortNew}";
+            }
+        }
+        if ($changes) {
+            log_case_event($pdo, $case_id, 'case_updated', $case_name !== '' ? $case_name : $case_code, 'Updated fields: '.implode('; ', $changes));
+        }
         flash('success', 'Case updated.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
@@ -505,6 +561,8 @@ if (($_POST['action'] ?? '') === 'add_case_note') {
     try {
         $stmt = $pdo->prepare('INSERT INTO case_notes (case_id, note_text, created_by) VALUES (?, ?, ?)');
         $stmt->execute([$case_id, $note, $_SESSION['user']['id'] ?? null]);
+        $notePreview = mb_strimwidth($note, 0, 160, '…','UTF-8');
+        log_case_event($pdo, $case_id, 'note_added', 'Case note', $notePreview, null, null);
         flash('success', 'Note added.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
@@ -570,6 +628,9 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
             $_SESSION['user']['id'] ?? null,
             $_SESSION['user']['id'] ?? null
         ]);
+        $newEvidenceId = (int)$pdo->lastInsertId();
+        $notePreview = mb_strimwidth($note, 0, 160, '…','UTF-8');
+        log_case_event($pdo, $case_id, 'evidence_added', $title, 'Type: other (note). '.$notePreview, $newEvidenceId, null);
         flash('success', 'Evidence note added.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
@@ -629,6 +690,8 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
                 $_SESSION['user']['id'] ?? null,
                 $_SESSION['user']['id'] ?? null
             ]);
+            $newEvidenceId = (int)$pdo->lastInsertId();
+            log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $url), 'Type: url', $newEvidenceId, null);
             flash('success', 'URL evidence added.');
         } catch (Throwable $e) {
             $_SESSION['sql_error'] = $e->getMessage();
@@ -652,6 +715,8 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
                         $_SESSION['user']['id'] ?? null,
                         $_SESSION['user']['id'] ?? null
                     ]);
+                    $newEvidenceId = (int)$pdo->lastInsertId();
+                    log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $url), 'Type: url', $newEvidenceId, null);
                     flash('success', 'URL evidence added (stored as type "other" due to DB enum).');
                 } catch (Throwable $e2) {
                     $_SESSION['sql_error'] = $e2->getMessage();
@@ -706,6 +771,8 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
             $_SESSION['user']['id'] ?? null,
             $_SESSION['user']['id'] ?? null
         ]);
+        $newEvidenceId = (int)$pdo->lastInsertId();
+        log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $safeName), 'Type: '.$type, $newEvidenceId, null);
         flash('success', 'Evidence uploaded.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
@@ -731,6 +798,8 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
 
     if ($evidence_id <= 0 || $case_id <= 0) { flash('error', 'Invalid evidence.'); $ru = trim($_POST['redirect_url'] ?? ''); if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
+    $prevEv = [];
+    try { $ps = $pdo->prepare('SELECT title, type, filepath FROM evidence WHERE id = ? AND case_id = ? LIMIT 1'); $ps->execute([$evidence_id, $case_id]); $prevEv = $ps->fetch() ?: []; } catch (Throwable $e) {}
     try {
         if ($type === 'url') {
             $url = trim($_POST['url_value'] ?? '');
@@ -767,6 +836,13 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
             $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ? WHERE id = ? AND case_id = ? LIMIT 1');
             $u->execute([$title, $type, $evidence_id, $case_id]);
         }
+        $changes = [];
+        if (($prevEv['title'] ?? '') !== $title) { $changes[] = 'title: '.mb_strimwidth($prevEv['title'] ?? '',0,60,'…','UTF-8').' → '.mb_strimwidth($title,0,60,'…','UTF-8'); }
+        if (($prevEv['type'] ?? '') !== $type) { $changes[] = 'type: '.($prevEv['type'] ?? '').' → '.$type; }
+        if ($type === 'url' && ($prevEv['filepath'] ?? '') !== ($url ?? '')) { $changes[] = 'url updated'; }
+        if ($changes) {
+            log_case_event($pdo, $case_id, 'evidence_updated', $title !== '' ? $title : ($prevEv['title'] ?? ''), implode('; ', $changes), $evidence_id, null);
+        }
         if ($type !== 'url') {
             flash('success', 'Evidence updated.');
         }
@@ -789,6 +865,8 @@ if (($_POST['action'] ?? '') === 'delete_evidence') {
 
     if ($evidence_id <= 0 || $case_id <= 0) { flash('error', 'Invalid evidence.'); if($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
+    $evForLog = [];
+    try { $sf = $pdo->prepare('SELECT title, type FROM evidence WHERE id = ? AND case_id = ? LIMIT 1'); $sf->execute([$evidence_id, $case_id]); $evForLog = $sf->fetch() ?: []; } catch (Throwable $e) {}
     try {
         // fetch row for path
         $s = $pdo->prepare('SELECT filepath FROM evidence WHERE id = ? AND case_id = ? LIMIT 1');
@@ -801,6 +879,7 @@ if (($_POST['action'] ?? '') === 'delete_evidence') {
         // delete row first
         $d = $pdo->prepare('DELETE FROM evidence WHERE id = ? AND case_id = ? LIMIT 1');
         $d->execute([$evidence_id, $case_id]);
+        log_case_event($pdo, $case_id, 'evidence_deleted', $evForLog['title'] ?? ('Evidence #'.$evidence_id), 'Type: '.($evForLog['type'] ?? ''), $evidence_id, null);
         // best-effort remove file
         if (!empty($abs) && is_file($abs) && strpos(realpath($abs), realpath(__DIR__ . '/uploads')) === 0) { @unlink($abs); }
         flash('success', 'Evidence deleted.');
@@ -821,6 +900,10 @@ if (($_POST['action'] ?? '') === 'delete_case') {
     $case_code = trim($_POST['case_code'] ?? '');
 
     if ($case_id <= 0) { flash('error', 'Invalid case.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $case_name_for_log = '';
+    try { $s0 = $pdo->prepare('SELECT case_name FROM cases WHERE id = ? LIMIT 1'); $s0->execute([$case_id]); $r0 = $s0->fetch(); $case_name_for_log = $r0['case_name'] ?? ''; } catch (Throwable $e) {}
+    log_case_event($pdo, $case_id, 'case_deleted', $case_name_for_log !== '' ? $case_name_for_log : $case_code, 'Case deleted');
 
     // Collect file paths for later removal
     $files = [];
@@ -864,6 +947,36 @@ if (($_POST['action'] ?? '') === 'delete_case') {
 
     flash('success', 'Case and all associated evidence/notes deleted.');
     header('Location: ?view=cases#cases'); exit;
+// Handle save redaction mask (redaction mask handler)
+if (($_POST['action'] ?? '') === 'save_redaction_mask') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    $evidence_id = (int)($_POST['evidence_id'] ?? 0);
+    $mask_json = $_POST['mask_json'] ?? '';
+    if ($evidence_id <= 0) { flash('error', 'Invalid evidence.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+    $decoded = json_decode($mask_json, true);
+    $maskDir = __DIR__ . '/uploads/redactions';
+    if (!is_dir($maskDir)) { @mkdir($maskDir, 0755, true); }
+    $maskFile = $maskDir . '/mask_' . $evidence_id . '.json';
+    $ok = @file_put_contents($maskFile, $mask_json);
+    if ($ok === false) {
+        flash('error', 'Unable to save redaction mask.');
+    } else {
+        $regions = is_array($decoded) ? count($decoded) : 0;
+        // Determine case_id from evidence
+        try {
+            $q = $pdo->prepare('SELECT case_id, title FROM evidence WHERE id = ? LIMIT 1');
+            $q->execute([$evidence_id]);
+            $er = $q->fetch();
+            if ($er) {
+                log_case_event($pdo, (int)$er['case_id'], 'redactions_saved', $er['title'] ?? ('Evidence #'.$evidence_id), 'Regions: '.$regions, $evidence_id, null);
+            }
+        } catch (Throwable $e) {}
+        flash('success', 'Redaction mask saved.');
+    }
+    $ru = trim($_POST['redirect_url'] ?? ''); if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
 }
 
 // Handle delete user (admin only)
@@ -1491,9 +1604,88 @@ if ($rs && count($rs) > 0):
         <div class="tab-content pt-3" id="caseViewTabContent">
           <!-- Timeline Pane -->
           <div class="tab-pane fade" id="case-timeline-panel" role="tabpanel" aria-labelledby="tab-timeline">
+            <?php
+            // Timeline builder: $timelineEvents
+            $timelineEvents = [];
+            // Add case opened event
+            if (!empty($viewCase)) {
+                $timelineEvents[] = [
+                    'ts' => $viewCase['opened_at'] ?? '',
+                    'type' => 'case_opened',
+                    'label' => 'Case opened',
+                    'detail' => mb_strimwidth(trim($viewCase['case_name'] ?? ''), 0, 180, '…', 'UTF-8'),
+                    'meta' => '',
+                    'evidence_id' => 0
+                ];
+            }
+            // Add evidence events
+            if ($viewEv && is_array($viewEv)) {
+                foreach ($viewEv as $ev) {
+                    $timelineEvents[] = [
+                        'ts' => $ev['created_at'],
+                        'type' => 'evidence',
+                        'label' => 'Evidence',
+                        'detail' => mb_strimwidth(trim($ev['title'] ?? ''), 0, 180, '…', 'UTF-8'),
+                        'meta' => $ev['type'] ?? '',
+                        'evidence_id' => (int)$ev['id']
+                    ];
+                }
+            }
+            // Add notes events
+            try {
+                if ($viewCaseId > 0) {
+                    $nq = $pdo->prepare('SELECT id, note_text, created_at FROM case_notes WHERE case_id = ? ORDER BY created_at ASC');
+                    $nq->execute([$viewCaseId]);
+                    $rowsN = $nq->fetchAll();
+                    foreach ($rowsN as $nrow) {
+                        $timelineEvents[] = [
+                            'ts' => $nrow['created_at'],
+                            'type' => 'note',
+                            'label' => 'Case note',
+                            'detail' => mb_strimwidth(trim($nrow['note_text'] ?? ''), 0, 180, '…', 'UTF-8'),
+                            'meta' => '',
+                            'evidence_id' => 0
+                        ];
+                    }
+                }
+            } catch (Throwable $e) {}
+            // Pull explicit case_events log
+            try {
+                if ($viewCaseId > 0) {
+                    $ce = $pdo->prepare('SELECT event_type, subject, detail, ref_evidence_id, ref_note_id, created_at FROM case_events WHERE case_id = ? ORDER BY created_at ASC');
+                    $ce->execute([$viewCaseId]);
+                    $rowsCE = $ce->fetchAll();
+                    foreach ($rowsCE as $ceRow) {
+                        $labelMap = [
+                            'case_created' => 'Case created',
+                            'case_updated' => 'Case updated',
+                            'case_deleted' => 'Case deleted',
+                            'evidence_added' => 'Evidence added',
+                            'evidence_updated' => 'Evidence updated',
+                            'evidence_deleted' => 'Evidence deleted',
+                            'note_added' => 'Case note added',
+                            'redactions_saved' => 'Redactions saved'
+                        ];
+                        $lbl = $labelMap[$ceRow['event_type']] ?? ucfirst(str_replace('_',' ', $ceRow['event_type']));
+                        $timelineEvents[] = [
+                            'ts' => $ceRow['created_at'],
+                            'type' => $ceRow['event_type'],
+                            'label' => $lbl,
+                            'detail' => mb_strimwidth(trim(($ceRow['subject'] ? $ceRow['subject'].': ' : '').($ceRow['detail'] ?? '')), 0, 180, '…', 'UTF-8'),
+                            'meta' => '',
+                            'evidence_id' => (int)($ceRow['ref_evidence_id'] ?? 0)
+                        ];
+                    }
+                }
+            } catch (Throwable $e) { $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage(); }
+            // Sort by timestamp ascending
+            usort($timelineEvents, function($a, $b) {
+                return strtotime($a['ts']) <=> strtotime($b['ts']);
+            });
+            ?>
             <?php if (!empty($timelineEvents)): ?>
               <div class="timeline">
-                <?php foreach ($timelineEvents as $ev): 
+                <?php foreach ($timelineEvents as $ev):
                   $when   = htmlspecialchars(date('d M Y H:i', strtotime($ev['ts'] ?? '')));
                   $label  = htmlspecialchars($ev['label'] ?? 'Event');
                   $detail = htmlspecialchars($ev['detail'] ?? '');
