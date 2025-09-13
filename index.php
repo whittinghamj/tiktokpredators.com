@@ -34,6 +34,25 @@ $_SESSION['auth_last'] = $_SESSION['auth_last'] ?? 0;
 function current_user_role(){ return $_SESSION['user']['role'] ?? 'guest'; }
 function is_admin(){ return (current_user_role()==='admin'); }
 function is_logged_in(){ return !empty($_SESSION['user']); }
+
+/**
+ * Allow the viewer who opened a case to manage it while status = Pending.
+ * Returns true only if the current logged-in user created the case AND the case is still Pending.
+ */
+function can_manage_pending_case(PDO $pdo, int $caseId): bool {
+    if ($caseId <= 0 || empty($_SESSION['user'])) { return false; }
+    try {
+        $s = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
+        $s->execute([$caseId]);
+        $r = $s->fetch();
+        if ($r && (int)($r['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && ($r['status'] ?? '') === 'Pending') {
+            return true;
+        }
+    } catch (Throwable $e) {
+        // noop
+    }
+    return false;
+}
 $view = $_GET['view'] ?? 'cases';
 function throttle(){
     $now = time();
@@ -519,9 +538,14 @@ if (($_POST['action'] ?? '') === 'create_case') {
 if (($_POST['action'] ?? '') === 'update_case') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
+    // Allow admins OR the viewer who opened the case while it's Pending
     $case_id = (int)($_POST['case_id'] ?? 0);
+    $ownerCan = can_manage_pending_case($pdo, $case_id);
+    if (empty($_SESSION['user']) || (!is_admin() && !$ownerCan)) {
+        flash('error', 'Unauthorized.');
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
     $case_code = trim($_POST['case_code'] ?? '');
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
@@ -874,10 +898,14 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
 if (($_POST['action'] ?? '') === 'update_evidence') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
     $evidence_id = (int)($_POST['evidence_id'] ?? 0);
     $case_id = (int)($_POST['case_id'] ?? 0);
+    $ownerCan = can_manage_pending_case($pdo, $case_id);
+    if (empty($_SESSION['user']) || (!is_admin() && !$ownerCan)) {
+        flash('error', 'Unauthorized.');
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
     $title = trim($_POST['title'] ?? '');
     $type = $_POST['type'] ?? 'other';
     $allowedTypes = ['image','video','audio','pdf','doc','url','other'];
@@ -944,10 +972,14 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
 if (($_POST['action'] ?? '') === 'delete_evidence') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
     $evidence_id = (int)($_POST['evidence_id'] ?? 0);
     $case_id = (int)($_POST['case_id'] ?? 0);
+    $ownerCan = can_manage_pending_case($pdo, $case_id);
+    if (empty($_SESSION['user']) || (!is_admin() && !$ownerCan)) {
+        flash('error', 'Unauthorized.');
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
     $ru = trim($_POST['redirect_url'] ?? '');
 
     if ($evidence_id <= 0 || $case_id <= 0) { flash('error', 'Invalid evidence.'); if($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
@@ -981,10 +1013,14 @@ if (($_POST['action'] ?? '') === 'delete_evidence') {
 if (($_POST['action'] ?? '') === 'delete_case') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
     $case_id = (int)($_POST['case_id'] ?? 0);
     $case_code = trim($_POST['case_code'] ?? '');
+    $ownerCan = can_manage_pending_case($pdo, $case_id);
+    if (empty($_SESSION['user']) || (!is_admin() && !$ownerCan)) {
+        flash('error', 'Unauthorized.');
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
 
     if ($case_id <= 0) { flash('error', 'Invalid case.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
