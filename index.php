@@ -1322,7 +1322,6 @@ if (isset($_GET['logout'])) {
   <?php if ($msg = flash('success')): ?>
     <div class="alert alert-success border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
   <?php endif; ?>
-</body>
 <!-- Bootstrap JS (required for modal/tabs) -->
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 
