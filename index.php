@@ -1457,7 +1457,7 @@ if (isset($_GET['logout'])) {
 <!-- Auth Modal -->
 <div class="modal fade" id="authModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
-    <div class="modal-content glass">
+    <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title"><i class="bi bi-person-lock me-2"></i>Account</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
@@ -1923,7 +1923,7 @@ document.addEventListener('DOMContentLoaded', function(){
               <?php foreach ($reqs as $r): ?>
                 <div class="modal fade" id="modalRemoval<?php echo (int)$r['id']; ?>" tabindex="-1" aria-hidden="true">
                   <div class="modal-dialog modal-lg modal-dialog-scrollable">
-                    <div class="modal-content glass">
+                    <div class="modal-content">
                       <div class="modal-header">
                         <h5 class="modal-title"><i class="bi bi-file-earmark-text me-2"></i>Removal Request #<?php echo (int)$r['id']; ?></h5>
                         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
@@ -2124,7 +2124,7 @@ document.addEventListener('DOMContentLoaded', function(){
                                   <!-- Minimal inline Edit modal reusing update_evidence -->
                                   <div class="modal fade" id="editEvidenceModal<?php echo (int)$ev['id']; ?>" tabindex="-1" aria-hidden="true">
                                     <div class="modal-dialog modal-dialog-centered">
-                                      <div class="modal-content glass">
+                                      <div class="modal-content">
                                         <div class="modal-header">
                                           <h5 class="modal-title"><i class="bi bi-pencil me-2"></i>Edit Evidence</h5>
                                           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
@@ -3983,7 +3983,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 <?php if (is_admin()): ?>
 <div class="modal fade" id="devModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered modal-lg">
-    <div class="modal-content glass">
+    <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title"><i class="bi bi-terminal me-2"></i>Developer Console</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
