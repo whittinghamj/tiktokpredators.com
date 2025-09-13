@@ -1598,7 +1598,6 @@ document.addEventListener('DOMContentLoaded', function(){
       <div class="collapse navbar-collapse" id="topNav">
 <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
-<li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
 <li class="nav-item"><a class="nav-link <?php echo ($view==='removal')?'active':''; ?>" href="?view=removal#removal">Removal Requests</a></li>
 <?php if (is_logged_in()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='pending')?'active':''; ?>" href="?view=pending#pending">Pending Cases</a></li>
@@ -1608,6 +1607,7 @@ document.addEventListener('DOMContentLoaded', function(){
 <?php endif; ?>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
   <li class="nav-item">
     <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#devModal">Dev</a>
   </li>
