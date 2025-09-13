@@ -1794,29 +1794,7 @@ document.addEventListener('DOMContentLoaded', function(){
   </main>
 <?php endif; ?>
         </ul>
-        <div class="d-flex align-items-center gap-2">
-          <!-- Auth state -->
-          <?php if (empty($_SESSION['user'])): ?>
-            <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i> Register</button>
-            <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</button>
-          <?php else: ?>
-            <div class="dropdown">
-              <?php $dn = $_SESSION['user']['display_name'] ?? ''; $label = $dn !== '' ? $dn : ($_SESSION['user']['email'] ?? 'Account'); ?>
-              <button id="userMenuBtn" type="button" class="btn btn-outline-light btn-sm dropdown-toggle" data-bs-toggle="dropdown" aria-expanded="false" aria-haspopup="true">
-                <i class="bi bi-person-check me-1"></i> <?php echo htmlspecialchars($label); ?>
-              </button>
-              <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="userMenuBtn">
-                <li class="dropdown-item-text">
-                  <div class="fw-semibold"><?php echo htmlspecialchars($label); ?></div>
-                  <div class="small text-secondary"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></div>
-                </li>
-                <li><span class="dropdown-item-text small text-secondary">Role: <?php echo htmlspecialchars($_SESSION['user']['role'] ?? 'viewer'); ?></span></li>
-                <li><hr class="dropdown-divider"></li>
-                <li><a class="dropdown-item" href="?logout=1"><i class="bi bi-box-arrow-right me-2"></i>Logout</a></li>
-              </ul>
-            </div>
-          <?php endif; ?>
-        </div>
+        
       </div>
     </div>
   </nav>
