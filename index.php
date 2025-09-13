@@ -1864,7 +1864,32 @@ document.addEventListener('DOMContentLoaded', function(){
                         <td><?php echo htmlspecialchars($r['full_name']); ?></td>
                         <td><a href="mailto:<?php echo htmlspecialchars($r['email']); ?>"><?php echo htmlspecialchars($r['email']); ?></a></td>
                         <td class="text-truncate" style="max-width:280px;"><a href="<?php echo htmlspecialchars($r['target_url']); ?>" target="_blank" rel="noopener"><?php echo htmlspecialchars($r['target_url']); ?></a></td>
-                        <td><span class="badge text-bg-secondary"><?php echo htmlspecialchars($r['status']); ?></span></td>
+                        <td>
+                            <?php
+                            $status = $r['status'];
+                            $badgeClass = 'secondary'; // default
+
+                            switch ($status) {
+                                case 'Pending':
+                                    $badgeClass = 'warning'; // yellow
+                                    break;
+                                case 'In-Review':
+                                    $badgeClass = 'info'; // blue
+                                    break;
+                                case 'Declined':
+                                    $badgeClass = 'danger'; // red
+                                    break;
+                                case 'Approved':
+                                case 'Closed':
+                                case 'Approved / Closed':
+                                    $badgeClass = 'success'; // green
+                                    break;
+                            }
+                            ?>
+                            <span class="badge text-bg-<?php echo $badgeClass; ?>">
+                                <?php echo htmlspecialchars($status); ?>
+                            </span>
+                        </td>
                         <td class="text-end">
                           <div class="btn-group">
                             <a class="btn btn-sm btn-outline-primary" href="?view=removal_request&amp;id=<?php echo (int)$r['id']; ?>#removal-request">
