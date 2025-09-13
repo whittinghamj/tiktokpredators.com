@@ -4000,6 +4000,7 @@ document.addEventListener('click', function (ev) {
       &copy; <?php echo date('Y'); ?> TikTokPredators. All rights reserved.
     </div>
     <div class="d-flex gap-3 small">
+      <a href="?view=removal#removal" class="link-light text-decoration-none">Removal Requests</a>
       <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#privacyModal">Privacy</a>
       <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#termsModal">Terms</a>
     </div>
