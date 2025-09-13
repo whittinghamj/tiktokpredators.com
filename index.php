@@ -3124,7 +3124,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     <h3 class="h6 mb-0">Case Details</h3>
                     <?php if (is_admin()): ?>
                       <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal">
-                        <i class="bi bi-pencil me-1"></i> Edit
+                        <i class="bi bi-pencil me-1"></i> Edit 1
                       </button>
                     <?php endif; ?>
                   </div>
@@ -3412,7 +3412,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         <div class="card glass h-100">
                 <div class="card-body">
                   <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h3 class="h6 mb-0">Case Details 1</h3>
+                    <h3 class="h6 mb-0">Case Details</h3>
                     <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal"><i class="bi bi-pencil me-1"></i> Edit</button>
                   </div>
                   <?php $adminCasePhoto = find_person_photo_url($caseRow['case_code'] ?? ''); if ($adminCasePhoto !== '') { ?>
