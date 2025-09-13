@@ -3545,6 +3545,37 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
     </div>
   </div>
   
+  <!-- Dev Modal (admin only) -->
+<?php if (is_admin()): ?>
+<div class="modal fade" id="devModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg">
+    <div class="modal-content glass">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-terminal me-2"></i>Developer Console</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <?php
+          ob_start(); print_r($_COOKIE);  $cookieDump  = ob_get_clean();
+          ob_start(); print_r($_SESSION); $sessionDump = ob_get_clean();
+        ?>
+        <div class="mb-3">
+          <h6 class="mb-2">$_COOKIE</h6>
+          <pre class="small m-0"><?php echo htmlspecialchars($cookieDump); ?></pre>
+        </div>
+        <div class="mb-0">
+          <h6 class="mb-2">$_SESSION</h6>
+          <pre class="small m-0"><?php echo htmlspecialchars($sessionDump); ?></pre>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+<?php endif; ?>
+
   <!-- Bootstrap JS Bundle -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
   <script>
