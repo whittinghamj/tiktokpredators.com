@@ -1611,6 +1611,7 @@ document.addEventListener('DOMContentLoaded', function(){
   </li>
 <?php endif; ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
+    
       </ul>
       <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-center">
         <?php if (is_logged_in()): ?>
@@ -1644,6 +1645,129 @@ document.addEventListener('DOMContentLoaded', function(){
       </div>
     </div>
   </nav>
+
+  <?php if (($view ?? '') === 'removal_request'): ?>
+  <?php
+    if (!is_admin()) { header('Location: ?view=removal#removal'); exit; }
+    $rid = (int)($_GET['id'] ?? 0);
+    $req = null;
+    if ($rid > 0) {
+      try {
+        $s = $pdo->prepare("SELECT id, full_name, email, phone, organization, target_url, justification, status, created_at, updated_at FROM removal_requests WHERE id = ? LIMIT 1");
+        $s->execute([$rid]);
+        $req = $s->fetch();
+      } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+      }
+    }
+    if (!$req) {
+      flash('error', 'Removal request not found.');
+      header('Location: ?view=removal#removal'); exit;
+    }
+  ?>
+  <main class="container-xl my-4" id="removal-request">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <h1 class="h4 mb-0"><i class="bi bi-eye me-2"></i>Removal Request #<?php echo (int)$req['id']; ?></h1>
+      <div class="d-flex gap-2">
+        <a href="?view=removal#removal" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back to Requests</a>
+        <form method="post" action="" onsubmit="return confirm('Delete this removal request?');">
+          <input type="hidden" name="action" value="delete_removal">
+          <?php csrf_field(); ?>
+          <input type="hidden" name="removal_id" value="<?php echo (int)$req['id']; ?>">
+          <button type="submit" class="btn btn-outline-danger"><i class="bi bi-trash me-1"></i>Delete</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="row g-4">
+      <div class="col-lg-7">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="h6 mb-0">Submitted Details</h2>
+          </div>
+          <div class="card-body">
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">Full name</label>
+                <input type="text" class="form-control" value="<?php echo htmlspecialchars($req['full_name']); ?>" readonly>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Organization</label>
+                <input type="text" class="form-control" value="<?php echo htmlspecialchars($req['organization'] ?? ''); ?>" readonly>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Email</label>
+                <div><a href="mailto:<?php echo htmlspecialchars($req['email']); ?>"><?php echo htmlspecialchars($req['email']); ?></a></div>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Phone</label>
+                <div><a href="<?php echo $req['phone'] ? 'tel:'.htmlspecialchars($req['phone']) : '#'; ?>"><?php echo htmlspecialchars($req['phone'] ?? ''); ?></a></div>
+              </div>
+              <div class="col-12">
+                <label class="form-label">Target URL</label>
+                <div><a href="<?php echo htmlspecialchars($req['target_url']); ?>" target="_blank" rel="noopener"><?php echo htmlspecialchars($req['target_url']); ?></a></div>
+              </div>
+              <div class="col-12">
+                <label class="form-label">Justification</label>
+                <textarea class="form-control" rows="8" readonly><?php echo htmlspecialchars($req['justification']); ?></textarea>
+              </div>
+            </div>
+          </div>
+          <div class="card-footer d-flex align-items-center justify-content-between">
+            <small class="text-body-secondary">Created: <?php echo htmlspecialchars($req['created_at']); ?></small>
+            <small class="text-body-secondary">Updated: <?php echo htmlspecialchars($req['updated_at']); ?></small>
+          </div>
+        </div>
+      </div>
+
+      <div class="col-lg-5">
+        <div class="card">
+          <div class="card-header">
+            <h2 class="h6 mb-0">Admin Actions</h2>
+          </div>
+          <div class="card-body">
+            <form method="post" action="" class="row g-3">
+              <input type="hidden" name="action" value="update_removal_status">
+              <?php csrf_field(); ?>
+              <input type="hidden" name="removal_id" value="<?php echo (int)$req['id']; ?>">
+              <div class="col-12">
+                <label for="rr_status" class="form-label">Status</label>
+                <select id="rr_status" class="form-select" name="status">
+                  <?php
+                    $opts = ['Pending','In-Review','Declined','Approved / Closed'];
+                    foreach ($opts as $opt) {
+                      $sel = ($opt === ($req['status'] ?? 'Pending')) ? ' selected' : '';
+                      echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt).'</option>';
+                    }
+                  ?>
+                </select>
+              </div>
+              <div class="col-12 d-flex gap-2">
+                <button type="submit" class="btn btn-primary"><i class="bi bi-check2-circle me-1"></i>Update Status</button>
+                <a href="?view=removal#removal" class="btn btn-outline-secondary">Cancel</a>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <div class="card mt-3">
+          <div class="card-header">
+            <h2 class="h6 mb-0">Quick Links</h2>
+          </div>
+          <div class="card-body">
+            <a href="<?php echo htmlspecialchars($req['target_url']); ?>" class="btn btn-outline-light w-100 mb-2" target="_blank" rel="noopener">
+              <i class="bi bi-box-arrow-up-right me-1"></i> Open Target URL
+            </a>
+            <a href="mailto:<?php echo htmlspecialchars($req['email']); ?>" class="btn btn-outline-light w-100">
+              <i class="bi bi-envelope me-1"></i> Email Submitter
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+<?php endif; ?>
+
 <?php if ($view === 'removal'): ?>
   <main class="py-4" id="removal">
     <div class="container-xl">
@@ -1732,7 +1856,9 @@ document.addEventListener('DOMContentLoaded', function(){
                         <td><span class="badge text-bg-secondary"><?php echo htmlspecialchars($r['status']); ?></span></td>
                         <td class="text-end">
                           <div class="btn-group">
-                            <button class="btn btn-outline-light btn-sm" data-bs-toggle="modal" data-bs-target="#modalRemoval<?php echo (int)$r['id']; ?>"><i class="bi bi-eye"></i> View</button>
+                            <a class="btn btn-sm btn-outline-primary" href="?view=removal_request&amp;id=<?php echo (int)$r['id']; ?>#removal-request">
+                              <i class="bi bi-eye me-1"></i>View
+                            </a>
                             <form method="post" action="" onsubmit="return confirm('Delete this removal request?');">
                               <?php csrf_field(); ?>
                               <input type="hidden" name="action" value="delete_removal">
