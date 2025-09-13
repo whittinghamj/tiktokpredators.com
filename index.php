@@ -1423,6 +1423,7 @@ document.addEventListener('DOMContentLoaded', function(){
                         <div class="card-body">
                           <div class="d-flex align-items-center justify-content-between mb-2">
                             <h2 class="h6 mb-0"><i class="bi bi-sliders me-2"></i>Edit Case Details</h2>
+                            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence</button>
                             <a class="btn btn-outline-light btn-sm" href="?view=case&amp;code=<?php echo urlencode($caseRow['case_code']); ?>#case-view"><i class="bi bi-arrow-repeat me-1"></i>Refresh</a>
                           </div>
                           <form method="post" action="" enctype="multipart/form-data" class="mt-2">
@@ -2245,7 +2246,7 @@ if ($rs && count($rs) > 0):
           <h2 class="h4 mb-0">Case <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
           <div class="d-flex gap-2">
 <?php if ($tp_canAddEvidence): ?>
-            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence / Note</button>
+            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence</button>
 <?php endif; ?>
 <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
             <form method="post" action="" class="d-inline" onsubmit="return confirm('This will permanently delete the entire case and all evidence/notes. This cannot be undone. Continue?');">
