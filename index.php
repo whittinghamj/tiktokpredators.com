@@ -2236,7 +2236,7 @@ if ($rs && count($rs) > 0):
               $tp_canAddEvidence = true;
           } elseif (!empty($viewCase) && (($viewCase['status'] ?? '') === 'Pending')) {
               $ownerId = (int)($viewCase['created_by'] ?? 0);
-              $tp_canAddEvidence = ($ownerId > 0) && ($ownerId === (int)($_SESSION['user']['id'] ?? 0));
+              // $tp_canAddEvidence = ($ownerId > 0) && ($ownerId === (int)($_SESSION['user']['id'] ?? 0));
           }
       }
     ?>
