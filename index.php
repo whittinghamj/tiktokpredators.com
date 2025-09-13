@@ -1647,50 +1647,52 @@ document.addEventListener('DOMContentLoaded', function(){
 <?php if ($view === 'removal'): ?>
   <main class="py-4" id="removal">
     <div class="container-xl">
-      <div class="row">
-        <div class="col-lg-7 mx-auto">
-          <div class="card glass mb-4">
-            <div class="card-header d-flex align-items-center justify-content-between">
-              <h5 class="mb-0"><i class="bi bi-shield-x me-2"></i>Takedown / Removal Request</h5>
-            </div>
-            <div class="card-body">
-              <form method="post" action="">
-                <input type="hidden" name="action" value="submit_removal">
-                <?php csrf_field(); ?>
-                <div class="row g-3">
-                  <div class="col-md-6">
-                    <label class="form-label">Full name*</label>
-                    <input type="text" name="full_name" class="form-control" required>
+      <?php if (!is_admin()): ?>
+        <div class="row">
+          <div class="col-lg-7 mx-auto">
+            <div class="card glass mb-4">
+              <div class="card-header d-flex align-items-center justify-content-between">
+                <h5 class="mb-0"><i class="bi bi-shield-x me-2"></i>Takedown / Removal Request</h5>
+              </div>
+              <div class="card-body">
+                <form method="post" action="">
+                  <input type="hidden" name="action" value="submit_removal">
+                  <?php csrf_field(); ?>
+                  <div class="row g-3">
+                    <div class="col-md-6">
+                      <label class="form-label">Full name*</label>
+                      <input type="text" name="full_name" class="form-control" required>
+                    </div>
+                    <div class="col-md-6">
+                      <label class="form-label">Email*</label>
+                      <input type="email" name="email" class="form-control" required>
+                    </div>
+                    <div class="col-md-6">
+                      <label class="form-label">Phone</label>
+                      <input type="text" name="phone" class="form-control" placeholder="Optional">
+                    </div>
+                    <div class="col-md-6">
+                      <label class="form-label">Organization</label>
+                      <input type="text" name="organization" class="form-control" placeholder="Optional">
+                    </div>
+                    <div class="col-12">
+                      <label class="form-label">URL to the evidence or case*</label>
+                      <input type="url" name="target_url" class="form-control" placeholder="https://tiktokpredators.com/?view=case&code=..." required>
+                    </div>
+                    <div class="col-12">
+                      <label class="form-label">Justification*</label>
+                      <textarea name="justification" rows="6" class="form-control" placeholder="Explain why this item should be reviewed or removed." required></textarea>
+                    </div>
                   </div>
-                  <div class="col-md-6">
-                    <label class="form-label">Email*</label>
-                    <input type="email" name="email" class="form-control" required>
+                  <div class="d-grid mt-3">
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i> Submit request</button>
                   </div>
-                  <div class="col-md-6">
-                    <label class="form-label">Phone</label>
-                    <input type="text" name="phone" class="form-control" placeholder="Optional">
-                  </div>
-                  <div class="col-md-6">
-                    <label class="form-label">Organization</label>
-                    <input type="text" name="organization" class="form-control" placeholder="Optional">
-                  </div>
-                  <div class="col-12">
-                    <label class="form-label">URL to the evidence or case*</label>
-                    <input type="url" name="target_url" class="form-control" placeholder="https://tiktokpredators.com/?view=case&code=..." required>
-                  </div>
-                  <div class="col-12">
-                    <label class="form-label">Justification*</label>
-                    <textarea name="justification" rows="6" class="form-control" placeholder="Explain why this item should be reviewed or removed." required></textarea>
-                  </div>
-                </div>
-                <div class="d-grid mt-3">
-                  <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i> Submit request</button>
-                </div>
-              </form>
+                </form>
+              </div>
             </div>
           </div>
         </div>
-      </div>
+      <?php endif; ?>
 
       <?php if (is_admin()): ?>
         <?php
