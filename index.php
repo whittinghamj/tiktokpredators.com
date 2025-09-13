@@ -31,9 +31,11 @@ function check_csrf(){ return isset($_POST['csrf_token']) && hash_equals($_SESSI
 // VERY simple throttle (per-session)
 $_SESSION['auth_attempts'] = $_SESSION['auth_attempts'] ?? 0;
 $_SESSION['auth_last'] = $_SESSION['auth_last'] ?? 0;
+$view = $_GET['view'] ?? 'cases';
 function current_user_role(){ return $_SESSION['user']['role'] ?? 'guest'; }
 function is_admin(){ return (current_user_role()==='admin'); }
 function is_logged_in(){ return !empty($_SESSION['user']); }
+function is_viewer(){ return (current_user_role()==='viewer'); }
 $view = $_GET['view'] ?? 'cases';
 function throttle(){
     $now = time();
@@ -374,7 +376,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
     $status = $_POST['status'] ?? '';
 
     $allowed_sensitivity = ['Standard','Restricted','Sealed'];
-    $allowed_status = ['Open','In Review','Verified','Closed'];
+    $allowed_status = ['Pending','Open','In Review','Verified','Closed'];
 
     if ($case_name === '' || $initial_summary === '') {
         flash('error', 'Case name and initial summary are required.');
@@ -445,6 +447,108 @@ if (($_POST['action'] ?? '') === 'create_case') {
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
 
+// Handle viewer create case (viewer only, auto-Pending)
+if (($_POST['action'] ?? '') === 'viewer_create_case') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?view=submit#submit'); exit; }
+    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'viewer')) {
+        flash('error', 'Unauthorized. Viewers only.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?view=submit#submit'); exit;
+    }
+
+    $case_name = trim($_POST['case_name'] ?? '');
+    $person_name = trim($_POST['person_name'] ?? '');
+    $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
+    $initial_summary = trim($_POST['initial_summary'] ?? '');
+    $sensitivity = $_POST['sensitivity'] ?? 'Standard';
+
+    $allowed_sensitivity = ['Standard','Restricted','Sealed'];
+    if ($case_name === '' || $initial_summary === '') {
+        flash('error', 'Case name and initial summary are required.');
+        $_SESSION['open_modal'] = '';
+        $_SESSION['form_error'] = 'Case name and initial summary are required.';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?view=submit#submit'); exit;
+    }
+    if (!in_array($sensitivity, $allowed_sensitivity, true)) { $sensitivity = 'Standard'; }
+
+    try {
+        $case_code = generate_case_code($pdo);
+        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+        $stmt->execute([
+            $case_code,
+            $case_name,
+            ($person_name !== '' ? $person_name : null),
+            ($tiktok_username !== '' ? $tiktok_username : null),
+            $initial_summary,
+            $sensitivity,
+            'Pending',
+            $_SESSION['user']['id'] ?? null
+        ]);
+        $case_id = (int)$pdo->lastInsertId();
+        log_case_event($pdo, $case_id, 'case_created', $case_name, 'Viewer submitted case. Status set to Pending; sensitivity '.$sensitivity);
+
+        // Optional: handle person photo upload (same as admin)
+        if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
+            $pf = $_FILES['person_photo'];
+            $pmime = $pf['type'] ?? '';
+            $allowedImg = ['image/jpeg'=>'jpg','image/png'=>'png','image/webp'=>'webp'];
+            $ext = $allowedImg[$pmime] ?? null;
+            if (!$ext) { $det = @mime_content_type($pf['tmp_name']) ?: ''; $ext = $allowedImg[$det] ?? null; }
+            if ($ext) {
+                $peopleDir = __DIR__ . '/uploads/people'; if (!is_dir($peopleDir)) { @mkdir($peopleDir, 0755, true); }
+                $destAbs = $peopleDir . '/' . $case_code . '.' . $ext;
+                foreach (['jpg','jpeg','png','webp'] as $rmext) { $cand = $peopleDir . '/' . $case_code . '.' . $rmext; if (is_file($cand)) { @unlink($cand); } }
+                @move_uploaded_file($pf['tmp_name'], $destAbs);
+            }
+        }
+
+        // Optional: allow a single evidence item at submission time
+        $evType = $_POST['ev_type'] ?? '';
+        $evTitle = trim($_POST['ev_title'] ?? '');
+        if ($evType === 'url') {
+            $url = trim($_POST['ev_url_value'] ?? '');
+            if ($url !== '' && filter_var($url, FILTER_VALIDATE_URL)) {
+                $mime = 'text/url'; $size = 0; $hash = hash('sha256', $url);
+                $urlPath = (string)parse_url($url, PHP_URL_PATH); $origName = basename($urlPath);
+                if ($origName === '' || $origName === '/' || $origName === '.') { $host = (string)parse_url($url, PHP_URL_HOST); $origName = ($host !== '' ? $host : 'url') . '.link'; }
+                $origName = preg_replace('/[^A-Za-z0-9_.\-]/', '_', $origName);
+                try {
+                    $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+                    $stmt->execute([$case_id, 'url', ($evTitle !== '' ? $evTitle : $url), $url, $storagePath, $origName, $mime, $size, $hash, $hash, $_SESSION['user']['id'] ?? null, $_SESSION['user']['id'] ?? null]);
+                    $newEvidenceId = (int)$pdo->lastInsertId();
+                    log_case_event($pdo, $case_id, 'evidence_added', ($evTitle !== '' ? $evTitle : $url), 'Type: url', $newEvidenceId, null);
+                } catch (Throwable $e) {
+                    $_SESSION['sql_error'] = $e->getMessage();
+                }
+            }
+        } elseif (!empty($_FILES['ev_file']['name']) && $_FILES['ev_file']['error'] === UPLOAD_ERR_OK) {
+            $uploadDir = __DIR__ . '/uploads'; if (!is_dir($uploadDir)) { @mkdir($uploadDir, 0755, true); }
+            $f = $_FILES['ev_file'];
+            $safeName = preg_replace('/[^A-Za-z0-9_.\-]/', '_', basename($f['name']));
+            $destRel = 'uploads/' . uniqid('ev_', true) . '_' . $safeName; $destAbs = __DIR__ . '/' . $destRel;
+            if (move_uploaded_file($f['tmp_name'], $destAbs)) {
+                $mime = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
+                $size = filesize($destAbs) ?: 0; $hash = hash_file('sha256', $destAbs);
+                $evTypeNorm = in_array($evType, ['image','video','audio','pdf','doc','other'], true) ? $evType : 'other';
+                try {
+                    $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+                    $stmt->execute([$case_id, $evTypeNorm, ($evTitle !== '' ? $evTitle : $safeName), $destRel, $storagePath, $safeName, $mime, $size, $hash, $hash, $_SESSION['user']['id'] ?? null, $_SESSION['user']['id'] ?? null]);
+                    $newEvidenceId = (int)$pdo->lastInsertId();
+                    log_case_event($pdo, $case_id, 'evidence_added', ($evTitle !== '' ? $evTitle : $safeName), 'Type: '.$evTypeNorm, $newEvidenceId, null);
+                } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+            }
+        }
+
+        flash('success', 'Case submitted for review. An admin will review Pending cases.');
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?view=cases#cases');
+        exit;
+    } catch (Throwable $e) {
+        $_SESSION['open_modal'] = '';
+        $_SESSION['sql_error'] = $e->getMessage();
+        flash('error', 'Unable to submit case.');
+    }
+    header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?view=submit#submit'); exit;
+}
+
 // Handle update case (admin only)
 if (($_POST['action'] ?? '') === 'update_case') {
     throttle();
@@ -461,7 +565,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $status = $_POST['status'] ?? '';
 
     $allowed_sensitivity = ['Standard','Restricted','Sealed'];
-    $allowed_status = ['Open','In Review','Verified','Closed'];
+    $allowed_status = ['Pending','Open','In Review','Verified','Closed'];
 
     if ($case_id <= 0 || $case_code === '') {
         flash('error', 'Invalid case reference.');
@@ -1101,6 +1205,21 @@ if (isset($_GET['logout'])) {
   <?php endif; ?>
   <?php $openAuth = $_SESSION['auth_tab'] ?? ''; unset($_SESSION['auth_tab']); ?>
   <?php $openModal = $_SESSION['open_modal'] ?? ''; unset($_SESSION['open_modal']); $formError = $_SESSION['form_error'] ?? ''; unset($_SESSION['form_error']); ?>
+  <?php
+    $pendingCount = 0;
+    if (is_admin()) {
+      try {
+        $pcq = $pdo->query("SELECT COUNT(*) AS c FROM cases WHERE status = 'Pending'");
+        $pendingCount = (int)($pcq->fetch()['c'] ?? 0);
+      } catch (Throwable $e) { /* ignore */ }
+    }
+  ?>
+  <?php if (is_admin() && $pendingCount > 0): ?>
+    <div class="alert alert-warning border-0 rounded-0 mb-0 text-center">
+      <strong><i class="bi bi-exclamation-triangle me-2"></i><?php echo $pendingCount; ?> Pending case<?php echo ($pendingCount===1?'':'s'); ?> need review.</strong>
+      <span class="ms-2 small">Go to <a class="alert-link" href="?view=cases#cases">Cases</a> to review and update status.</span>
+    </div>
+  <?php endif; ?>
   <!-- Top Navbar -->
   <nav class="navbar navbar-expand-lg border-bottom sticky-top bg-body glass">
     <div class="container-xl">
@@ -1109,6 +1228,9 @@ if (isset($_GET['logout'])) {
       <div class="collapse navbar-collapse" id="topNav">
         <ul class="navbar-nav me-auto mb-2 mb-lg-0">
 <li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
+<?php if (is_logged_in() && current_user_role()==='viewer'): ?>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='submit')?'active':''; ?>" href="?view=submit#submit">Submit Case</a></li>
+<?php endif; ?>
 <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
@@ -1140,6 +1262,99 @@ if (isset($_GET['logout'])) {
       </div>
     </div>
   </nav>
+
+  <?php if ($view === 'submit'): ?>
+  <main class="py-4" id="submit">
+    <div class="container-xl">
+      <div class="row g-4">
+        <div class="col-12 col-lg-10 col-xl-8 mx-auto">
+          <div class="card glass">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between mb-2">
+                <h2 class="h4 mb-0">Submit a Case for Review</h2>
+                <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+              </div>
+              <?php if (!is_logged_in() || current_user_role()!=='viewer'): ?>
+                <div class="alert alert-secondary">You must be logged in as a <strong>viewer</strong> to submit a case. Please register or log in.</div>
+              <?php else: ?>
+              <p class="text-secondary small">Fill in the details below. Your case will be created with status <strong>Pending</strong> and will only be visible to admins until reviewed.</p>
+              <form method="post" action="" enctype="multipart/form-data" class="mt-3">
+                <input type="hidden" name="action" value="viewer_create_case">
+                <?php csrf_field(); ?>
+                <div class="row g-3">
+                  <div class="col-12">
+                    <label class="form-label">Case Name *</label>
+                    <input type="text" name="case_name" class="form-control" required>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Person Name</label>
+                    <input type="text" name="person_name" class="form-control">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">TikTok Username</label>
+                    <div class="input-group"><span class="input-group-text">@</span><input type="text" name="tiktok_username" class="form-control" placeholder="username (optional)"></div>
+                  </div>
+                  <div class="col-12">
+                    <label class="form-label">Initial Summary *</label>
+                    <textarea name="initial_summary" class="form-control" rows="4" required></textarea>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Sensitivity</label>
+                    <select name="sensitivity" class="form-select">
+                      <option value="Standard">Standard</option>
+                      <option value="Restricted">Restricted</option>
+                      <option value="Sealed">Sealed</option>
+                    </select>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Person Photo (optional)</label>
+                    <input type="file" name="person_photo" accept="image/*" class="form-control">
+                  </div>
+                </div>
+
+                <hr class="my-4" />
+                <h6 class="mb-2">Optional: Add one evidence item now</h6>
+                <div class="row g-3">
+                  <div class="col-md-6">
+                    <label class="form-label">Evidence Title</label>
+                    <input type="text" name="ev_title" class="form-control">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Evidence Type</label>
+                    <select name="ev_type" class="form-select">
+                      <option value="">-- Select --</option>
+                      <option value="image">Image</option>
+                      <option value="video">Video</option>
+                      <option value="audio">Audio</option>
+                      <option value="pdf">PDF</option>
+                      <option value="doc">Document</option>
+                      <option value="url">URL</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Upload File</label>
+                    <input type="file" name="ev_file" class="form-control">
+                    <div class="form-text">Use this for image/video/audio/PDF/doc/other.</div>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Or paste a URL</label>
+                    <input type="url" name="ev_url_value" class="form-control" placeholder="https://example.com/...">
+                  </div>
+                </div>
+
+                <div class="mt-4 d-flex justify-content-end gap-2">
+                  <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i> Submit for Review</button>
+                </div>
+              </form>
+              <?php endif; ?>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+  <?php endif; ?>
 
 
 
@@ -1174,39 +1389,44 @@ if (isset($_GET['logout'])) {
           <div class="row g-3 row-cols-1 row-cols-md-2">
 <?php
 try {
-  $search = trim($_GET['q'] ?? '');
-  if ($search !== '') {
-    $like = '%' . $search . '%';
-    $stmt = $pdo->prepare("
-      SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
-             COALESCE(ev.cnt, 0) AS evidence_count,
-             COALESCE(ev.last_added, c.opened_at) AS last_activity
-      FROM cases c
-      LEFT JOIN (
-        SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
-        FROM evidence
-        GROUP BY case_id
-      ) ev ON ev.case_id = c.id
-      WHERE (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ?)
-      ORDER BY last_activity DESC
-      LIMIT 100
-    ");
-    $stmt->execute([$like, $like, $like, $like]);
-    $rs = $stmt->fetchAll();
-  } else {
-    $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
-                   COALESCE(ev.cnt, 0) AS evidence_count,
-                   COALESCE(ev.last_added, c.opened_at) AS last_activity
-            FROM cases c
-            LEFT JOIN (
-              SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
-              FROM evidence
-              GROUP BY case_id
-            ) ev ON ev.case_id = c.id
-            ORDER BY last_activity DESC
-            LIMIT 20";
-    $rs = $pdo->query($sql)->fetchAll();
-  }
+          $search = trim($_GET['q'] ?? '');
+          if ($search !== '') {
+            $like = '%' . $search . '%';
+            $stmt = $pdo->prepare("
+                SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+                       COALESCE(ev.cnt, 0) AS evidence_count,
+                       COALESCE(ev.last_added, c.opened_at) AS last_activity
+                FROM cases c
+                LEFT JOIN (
+                  SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
+                  FROM evidence
+                  GROUP BY case_id
+                ) ev ON ev.case_id = c.id
+                WHERE (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ?)
+                  AND (c.status <> 'Pending' OR ?) 
+                ORDER BY last_activity DESC
+                LIMIT 100
+              ");
+            $stmt->execute([$like, $like, $like, $like, is_admin() ? 1 : 0]);
+            $rs = $stmt->fetchAll();
+          } else {
+            $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+                           COALESCE(ev.cnt, 0) AS evidence_count,
+                           COALESCE(ev.last_added, c.opened_at) AS last_activity
+                    FROM cases c
+                    LEFT JOIN (
+                      SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
+                      FROM evidence
+                      GROUP BY case_id
+                    ) ev ON ev.case_id = c.id
+                    WHERE (c.status <> 'Pending' OR :is_admin = 1)
+                    ORDER BY last_activity DESC
+                    LIMIT 20";
+            $sth = $pdo->prepare($sql);
+            $sth->execute([':is_admin' => (is_admin() ? 1 : 0)]);
+            $rs = $sth->fetchAll();
+          }
+  
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $e->getMessage();
   $rs = [];
