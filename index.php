@@ -1656,6 +1656,7 @@ document.addEventListener('DOMContentLoaded', function(){
         $s = $pdo->prepare("SELECT id, full_name, email, phone, organization, target_url, justification, status, created_at, updated_at FROM removal_requests WHERE id = ? LIMIT 1");
         $s->execute([$rid]);
         $req = $s->fetch();
+        $isLocked = ($req && $req['status'] === 'Approved / Closed');
       } catch (Throwable $e) {
         $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
       }
@@ -1674,7 +1675,7 @@ document.addEventListener('DOMContentLoaded', function(){
           <input type="hidden" name="action" value="delete_removal">
           <?php csrf_field(); ?>
           <input type="hidden" name="removal_id" value="<?php echo (int)$req['id']; ?>">
-          <button type="submit" class="btn btn-outline-danger"><i class="bi bi-trash me-1"></i>Delete</button>
+          <button type="submit" class="btn btn-outline-danger"><i class="bi bi-trash me-1"></i>Delete 1</button>
         </form>
       </div>
     </div>
