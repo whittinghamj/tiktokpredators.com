@@ -1512,7 +1512,6 @@ document.addEventListener('DOMContentLoaded', function(){
                                       $viewHref = $isUrl ? ($ev['filepath'] ?? '#') : ('?action=serve_evidence&amp;id='.(int)$ev['id']);
                                       $viewAttrs = $isUrl ? ' target="_blank" rel="noopener"' : ' target="_blank"';
                                       ?>
-                                      <!--
                                       <a href="<?php echo $viewHref; ?>"<?php echo $viewAttrs; ?> class="btn btn-outline-light btn-sm"><i class="bi bi-eye me-1"></i>View</a>
                                       <a href="#"
                                          class="btn btn-outline-light btn-sm"
@@ -1520,7 +1519,6 @@ document.addEventListener('DOMContentLoaded', function(){
                                          data-bs-target="#editEvidenceModal<?php echo (int)$ev['id']; ?>">
                                          <i class="bi bi-pencil me-1"></i>Edit
                                       </a>
-                                      -->
                                       <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence? This cannot be undone.');">
                                         <input type="hidden" name="action" value="delete_evidence">
                                         <?php csrf_field(); ?>
