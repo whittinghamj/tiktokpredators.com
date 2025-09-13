@@ -12,13 +12,39 @@ if (session_status() === PHP_SESSION_NONE) {
 // Evidence storage path (absolute directory where files are stored, outside web root if possible)
 $storagePath = '/var/www/html/tiktokpredators.com/uploads/';
 
+// Console log path
+$CONSOLE_LOG_PATH = '/var/www/html/tiktokpredators.com/logs/console.log';
+
+/**
+ * Append a line to the console log using error_log() type 3 (append).
+ * Format: [DD/MM/YYYY HH:MM] [ LEVEL ] - message
+ */
+function log_console(string $level, string $message) {
+    $dest = $GLOBALS['CONSOLE_LOG_PATH'] ?? '/var/www/html/tiktokpredators.com/logs/console.log';
+    $dir = dirname($dest);
+    if (!is_dir($dir)) { @mkdir($dir, 0755, true); }
+    $ts = date('d/m/Y H:i');
+    $line = sprintf("[%s] [ %s ] - %s\n", $ts, strtoupper($level), $message);
+    @error_log($line, 3, $dest);
+}
+
 // Flash helper
+// Flash helper (also logs to console.log)
 function flash(string $key, ?string $val = null){
     if ($val === null) {
         if (!empty($_SESSION['flash'][$key])) { $msg = $_SESSION['flash'][$key]; unset($_SESSION['flash'][$key]); return $msg; }
         return '';
     }
     $_SESSION['flash'][$key] = $val;
+    // Log when setting a flash message
+    if ($key === 'success') {
+        log_console('SUCCESS', $val);
+    } elseif ($key === 'error') {
+        log_console('ERROR', $val);
+    } else {
+        // Optional: treat other flash keys as INFO
+        log_console('INFO', $key . ': ' . $val);
+    }
 }
 
 // CSRF token helper
@@ -96,7 +122,9 @@ try { $pdo = new PDO($dsn, $dbu, $dbp, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTIO
 catch (Throwable $e) {
     // Record DB error for debugging and show a safe message
     $_SESSION['last_db_error'] = $e->getMessage();
+log_console('ERROR', 'DB: ' . $e->getMessage());
     $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
     flash('error', 'Database connection failed. Please check configuration.');
     $_SESSION['auth_tab'] = 'register';
 }
@@ -233,13 +261,16 @@ if (($_POST['action'] ?? '') === 'login') {
             ];
             $_SESSION['auth_attempts'] = 0; $_SESSION['auth_last'] = time();
             flash('success', 'Welcome back, '. htmlspecialchars($user['email']));
+            log_console('INFO', 'Login success for ' . ($user['email'] ?? 'unknown'));
         } else {
             $_SESSION['auth_attempts'] = (int)$_SESSION['auth_attempts'] + 1; $_SESSION['auth_last'] = time();
             flash('error', 'Incorrect email or password.');
+            log_console('ERROR', 'Login failed for ' . $email);
             $_SESSION['auth_tab'] = 'login';
         }
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         $_SESSION['auth_tab'] = 'login';
         flash('error', 'Unable to process login at this time.');
     }
@@ -308,7 +339,9 @@ if (($_POST['action'] ?? '') === 'register') {
         }
         // Store raw message for debugging (not shown unless debug enabled)
         $_SESSION['last_register_error'] = $e->getMessage();
+log_console('ERROR', 'REGISTER: ' . $e->getMessage());
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', $public.' [ERR#'.$code.']');
         $_SESSION['auth_tab'] = 'register';
     }
@@ -366,6 +399,7 @@ if (($_POST['action'] ?? '') === 'admin_add_user') {
         flash('success', 'User added successfully.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         $code = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
         if ($code === 1062) {
             flash('error', 'That email is already registered.');
@@ -438,9 +472,11 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
         }
 
         flash('success', 'Case submitted for review. You can now add evidence to your case while it is Pending.');
+        log_console('SUCCESS', 'Viewer submitted case ' . $case_code . ' by user_id ' . (int)($_SESSION['user']['id'] ?? 0));
         header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to submit case.');
         header('Location: ?view=submit_case#submit-case'); exit;
     }
@@ -523,12 +559,14 @@ if (($_POST['action'] ?? '') === 'create_case') {
             }
         }
         flash('success', 'Case created successfully. ID: ' . htmlspecialchars($case_code));
+        log_console('SUCCESS', 'Case created ' . $case_code . ' by user_id ' . (int)($_SESSION['user']['id'] ?? 0));
         // jump to full case view
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?') . '?view=case&code=' . urlencode($case_code) . '#case-view');
         exit;
     } catch (Throwable $e) {
         $_SESSION['open_modal'] = 'createCase';
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to create case.');
     }
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
@@ -630,6 +668,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
         flash('success', 'Case updated.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to update case.');
     }
     header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
@@ -660,6 +699,7 @@ if (($_POST['action'] ?? '') === 'add_case_note') {
         flash('success', 'Note added.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to add note.');
     }
     $redirUrl = trim($_POST['redirect_url'] ?? '');
@@ -728,6 +768,7 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
         flash('success', 'Evidence note added.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to add evidence note.');
     }
     if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
@@ -818,8 +859,10 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
             $newEvidenceId = (int)$pdo->lastInsertId();
             log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $url), 'Type: url', $newEvidenceId, null);
             flash('success', 'URL evidence added.');
+            log_console('SUCCESS', 'URL evidence added for case_id ' . $case_id . ' (' . ($title !== '' ? $title : $url) . ')');
         } catch (Throwable $e) {
             $_SESSION['sql_error'] = $e->getMessage();
+            log_console('ERROR', 'SQL: ' . $e->getMessage());
             // Fallback: some schemas have evidence.type as ENUM without 'url'
             $msg = strtolower($e->getMessage());
             $enumIssue = (strpos($msg, 'incorrect enum value') !== false) || (strpos($msg, 'data truncated for column') !== false);
@@ -947,8 +990,10 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         $newEvidenceId = (int)$pdo->lastInsertId();
         log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $finalName), 'Type: '.$type, $newEvidenceId, null);
         flash('success', 'Evidence uploaded.');
+        log_console('SUCCESS', 'Evidence uploaded for case_id ' . $case_id . ' (' . ($title !== '' ? $title : $finalName) . ')');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to save evidence.');
     }
     $redirUrl = trim($_POST['redirect_url'] ?? '');
@@ -999,6 +1044,7 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
                 $u->execute([$title, $type, $url, $origName, $evidence_id, $case_id]);
             } catch (Throwable $e) {
                 $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
                 $msg = strtolower($e->getMessage());
                 $enumIssue = (strpos($msg, 'incorrect enum value') !== false) || (strpos($msg, 'data truncated for column') !== false);
                 if ($enumIssue) {
@@ -1025,6 +1071,7 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
         }
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to update evidence.');
     }
     $ru = trim($_POST['redirect_url'] ?? ''); if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
@@ -1066,6 +1113,7 @@ if (($_POST['action'] ?? '') === 'delete_evidence') {
         flash('success', 'Evidence deleted.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to delete evidence.');
     }
     if($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
@@ -1096,7 +1144,8 @@ if (($_POST['action'] ?? '') === 'delete_case') {
         $s = $pdo->prepare('SELECT filepath FROM evidence WHERE case_id = ?');
         $s->execute([$case_id]);
         $files = $s->fetchAll();
-    } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+    } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
     try {
         $pdo->beginTransaction();
@@ -1111,6 +1160,7 @@ if (($_POST['action'] ?? '') === 'delete_case') {
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) { $pdo->rollBack(); }
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to delete case.');
         header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
     }
@@ -1191,6 +1241,7 @@ if (($_POST['action'] ?? '') === 'delete_user') {
         }
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to delete user.');
     }
     header('Location: '. $ru); exit;
@@ -1746,6 +1797,7 @@ try {
   }
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
   $rs = [];
 }
 
@@ -1921,6 +1973,7 @@ if ($rs && count($rs) > 0):
         $rows = $stmt->fetchAll();
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
         $rows = [];
     }
   ?>
@@ -2163,6 +2216,7 @@ if ($rs && count($rs) > 0):
               $users = $q->fetchAll();
             } catch (Throwable $e) {
               $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
               $users = [];
             }
             ?>
@@ -2280,13 +2334,15 @@ if ($rs && count($rs) > 0):
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
           $viewCaseId = (int)($viewCase['id'] ?? 0);
-        } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+        } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         if ($viewCaseId > 0) {
           try {
             $st2 = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC');
             $st2->execute([$viewCaseId]);
             $viewEv = $st2->fetchAll();
-          } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+          } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         }
       }
     ?>
@@ -2817,6 +2873,7 @@ if ($rs && count($rs) > 0):
           $caseId = (int)($caseRow['id'] ?? 0);
       } catch (Throwable $e) {
           $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
       }
       // Fetch notes
       $notes = [];
@@ -2825,7 +2882,8 @@ if ($rs && count($rs) > 0):
               $n = $pdo->prepare('SELECT cn.id, cn.note_text, cn.created_at, u.display_name FROM case_notes cn LEFT JOIN users u ON u.id = cn.created_by WHERE cn.case_id = ? ORDER BY cn.created_at DESC LIMIT 50');
               $n->execute([$caseId]);
               $notes = $n->fetchAll();
-          } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+          } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       }
       // Fetch evidence
       $ev = [];
@@ -2834,7 +2892,8 @@ if ($rs && count($rs) > 0):
               $evi = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC LIMIT 100');
               $evi->execute([$caseId]);
               $ev = $evi->fetchAll();
-          } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage(); }
+          } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       }
   ?>
 <section class="py-5 border-top" id="admin-case">
