@@ -1894,7 +1894,7 @@ if ($rs && count($rs) > 0):
                       <td class="text-nowrap"><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
                       <td class="text-end text-nowrap">
                         <a class="btn btn-outline-light btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-eye me-1"></i>View</a>
-                        <?php if (is_admin()): ?>
+                        
                           <a class="btn btn-primary btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-pencil-square me-1"></i>Edit</a>
                           <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this case and all evidence? This cannot be undone.');">
                             <input type="hidden" name="action" value="delete_case">
@@ -1903,7 +1903,7 @@ if ($rs && count($rs) > 0):
                             <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($code); ?>">
                             <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-trash me-1"></i>Delete</button>
                           </form>
-                        <?php endif; ?>
+                        
                       </td>
                     </tr>
                   <?php endforeach; ?>
