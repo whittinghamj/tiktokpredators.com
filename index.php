@@ -1607,11 +1607,11 @@ document.addEventListener('DOMContentLoaded', function(){
 <?php endif; ?>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
   <li class="nav-item">
     <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#devModal">Dev</a>
   </li>
 <?php endif; ?>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
       </ul>
       <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-center">
         <?php if (is_logged_in()): ?>
