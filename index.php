@@ -1834,6 +1834,7 @@ if ($rs && count($rs) > 0):
     try {
         $baseSql = "
           SELECT c.id, c.case_code, c.case_name, c.person_name, c.status, c.created_by,
+                 u.display_name AS creator_name,
                  COALESCE(ev.cnt, 0) AS evidence_count,
                  COALESCE(ev.last_added, c.opened_at) AS last_activity
           FROM cases c
@@ -1842,6 +1843,7 @@ if ($rs && count($rs) > 0):
             FROM evidence
             GROUP BY case_id
           ) ev ON ev.case_id = c.id
+          LEFT JOIN users u ON u.id = c.created_by
           WHERE c.status = 'Pending'
         ";
         if (is_admin()) {
@@ -1867,6 +1869,7 @@ if ($rs && count($rs) > 0):
                     <tr>
                       <th style="width: 12rem;">Case Code</th>
                       <th>Case Name</th>
+                      <th>Submitted By</th>
                       <th style="width: 16rem;">Subject</th>
                       <th style="width: 10rem;">Evidence</th>
                       <th style="width: 14rem;">Last Activity</th>
@@ -1880,10 +1883,12 @@ if ($rs && count($rs) > 0):
                       $person = $r['person_name'] ?: '';
                       $evc = (int)($r['evidence_count'] ?? 0);
                       $last = $r['last_activity'] ?? '';
+                      $creatorName = trim($r['creator_name'] ?? '');
                   ?>
                     <tr>
                       <td><span class="badge text-bg-dark border"><?php echo htmlspecialchars($code); ?></span></td>
                       <td class="fw-semibold"><?php echo htmlspecialchars($name); ?></td>
+                      <td><?php echo $creatorName !== '' ? htmlspecialchars($creatorName) : '—'; ?></td>
                       <td><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></td>
                       <td><?php echo $evc; ?></td>
                       <td><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
