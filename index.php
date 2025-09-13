@@ -1472,6 +1472,134 @@ document.addEventListener('DOMContentLoaded', function(){
                           </form>
                         </div>
                       </div>
+                      <?php
+                      // --- Owner's own evidence list for this Pending case
+                      try {
+                          $myUid = (int)($_SESSION['user']['id'] ?? 0);
+                          $evStmt = $pdo->prepare('SELECT id, title, type, filepath, created_at FROM evidence WHERE case_id = ? AND uploaded_by = ? ORDER BY created_at DESC');
+                          $evStmt->execute([(int)$caseRow['id'], $myUid]);
+                          $myEvidence = $evStmt->fetchAll() ?: [];
+                      } catch (Throwable $e) { $myEvidence = []; }
+                      if ($myEvidence):
+                      ?>
+                      <div class="card glass mb-4">
+                        <div class="card-body">
+                          <div class="d-flex align-items-center justify-content-between mb-2">
+                            <h2 class="h6 mb-0"><i class="bi bi-collection me-2"></i>Your Evidence</h2>
+                          </div>
+                          <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                              <thead>
+                                <tr>
+                                  <th style="width:40%">Title</th>
+                                  <th>Type</th>
+                                  <th>Added</th>
+                                  <th class="text-end" style="width:220px">Actions</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                <?php foreach ($myEvidence as $ev): ?>
+                                  <tr>
+                                    <td><?php echo htmlspecialchars($ev['title'] ?? ('Evidence #'.$ev['id'])); ?></td>
+                                    <td class="text-secondary"><?php echo htmlspecialchars($ev['type'] ?? 'other'); ?></td>
+                                    <td class="text-secondary small"><?php echo htmlspecialchars($ev['created_at'] ?? ''); ?></td>
+                                    <td class="text-end">
+                                      <?php
+                                      $isUrl = ($ev['type'] ?? '') === 'url';
+                                      $viewHref = $isUrl ? ($ev['filepath'] ?? '#') : ('?action=serve_evidence&amp;id='.(int)$ev['id']);
+                                      $viewAttrs = $isUrl ? ' target="_blank" rel="noopener"' : ' target="_blank"';
+                                      ?>
+                                      <a href="<?php echo $viewHref; ?>"<?php echo $viewAttrs; ?> class="btn btn-outline-light btn-sm"><i class="bi bi-eye me-1"></i>View</a>
+                                      <a href="#"
+                                         class="btn btn-outline-light btn-sm"
+                                         data-bs-toggle="modal"
+                                         data-bs-target="#editEvidenceModal<?php echo (int)$ev['id']; ?>">
+                                         <i class="bi bi-pencil me-1"></i>Edit
+                                      </a>
+                                      <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence? This cannot be undone.');">
+                                        <input type="hidden" name="action" value="delete_evidence">
+                                        <?php csrf_field(); ?>
+                                        <input type="hidden" name="evidence_id" value="<?php echo (int)$ev['id']; ?>">
+                                        <input type="hidden" name="case_id" value="<?php echo (int)$caseRow['id']; ?>">
+                                        <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseRow['case_code']); ?>#case-view">
+                                        <button type="submit" class="btn btn-danger btn-sm"><i class="bi bi-trash me-1"></i>Delete</button>
+                                      </form>
+                                    </td>
+                                  </tr>
+                                  <!-- Minimal inline Edit modal reusing update_evidence -->
+                                  <div class="modal fade" id="editEvidenceModal<?php echo (int)$ev['id']; ?>" tabindex="-1" aria-hidden="true">
+                                    <div class="modal-dialog modal-dialog-centered">
+                                      <div class="modal-content glass">
+                                        <div class="modal-header">
+                                          <h5 class="modal-title"><i class="bi bi-pencil me-2"></i>Edit Evidence</h5>
+                                          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                        </div>
+                                        <form method="post" action="">
+                                          <div class="modal-body">
+                                            <input type="hidden" name="action" value="update_evidence">
+                                            <?php csrf_field(); ?>
+                                            <input type="hidden" name="evidence_id" value="<?php echo (int)$ev['id']; ?>">
+                                            <input type="hidden" name="case_id" value="<?php echo (int)$caseRow['id']; ?>">
+                                            <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseRow['case_code']); ?>#case-view">
+                                            <div class="mb-3">
+                                              <label class="form-label">Title</label>
+                                              <input type="text" name="title" class="form-control" value="<?php echo htmlspecialchars($ev['title'] ?? ''); ?>" required>
+                                            </div>
+                                            <div class="mb-3">
+                                              <label class="form-label">Type</label>
+                                              <select name="type" class="form-select">
+                                                <?php
+                                                $allowedTypes = ['image','video','audio','pdf','doc','url','other'];
+                                                foreach ($allowedTypes as $t) {
+                                                    $sel = (($ev['type'] ?? 'other') === $t) ? ' selected' : '';
+                                                    echo '<option value="'.htmlspecialchars($t).'"'.$sel.'>'.htmlspecialchars(ucfirst($t)).'</option>';
+                                                }
+                                                ?>
+                                              </select>
+                                            </div>
+                                            <div class="mb-3" id="owner-url-wrap-<?php echo (int)$ev['id']; ?>" style="<?php echo (($ev['type'] ?? '') === 'url') ? '' : 'display:none;'; ?>">
+                                              <label class="form-label">Destination URL</label>
+                                              <input type="url" name="url_value" class="form-control" value="<?php echo (($ev['type'] ?? '') === 'url') ? htmlspecialchars($ev['filepath'] ?? '') : ''; ?>" placeholder="https://example.com/page">
+                                            </div>
+                                          </div>
+                                          <div class="modal-footer">
+                                            <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+                                            <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save</button>
+                                          </div>
+                                        </form>
+                                      </div>
+                                    </div>
+                                  </div>
+                                  <script>
+                                  (function(){
+                                    var modal = document.getElementById('editEvidenceModal<?php echo (int)$ev['id']; ?>');
+                                    if (modal) {
+                                      modal.addEventListener('shown.bs.modal', function(){
+                                        var sel = modal.querySelector('select[name="type"]');
+                                        var urlDiv = document.getElementById('owner-url-wrap-<?php echo (int)$ev['id']; ?>');
+                                        if (sel && urlDiv) {
+                                          sel.addEventListener('change', function(){
+                                            if (this.value === 'url') { urlDiv.style.display = ''; }
+                                            else { urlDiv.style.display = 'none'; }
+                                          }, { once: true });
+                                        }
+                                      });
+                                    }
+                                  })();
+                                  </script>
+                                <?php endforeach; ?>
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </div>
+                      <?php else: ?>
+                        <div class="card glass mb-4">
+                          <div class="card-body">
+                            <div class="small text-secondary">You haven't uploaded any evidence yet.</div>
+                          </div>
+                        </div>
+                      <?php endif; ?>
                     </div>
                   </main>
                   <?php
