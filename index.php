@@ -972,6 +972,8 @@ if (isset($_GET['logout'])) {
 <body>
   <?php if ($msg = flash('success')): ?>
     <div class="alert alert-success border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
+          </div> <!-- /#case-evidence-panel -->
+        </div> <!-- /.tab-content -->
   <?php endif; ?>
   <?php if ($msg = flash('error')): ?>
     <div class="alert alert-danger border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
@@ -1473,6 +1475,58 @@ if ($rs && count($rs) > 0):
             <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
           </div>
         </div>
+        <!-- Case View Tabs -->
+        <ul class="nav nav-tabs mt-3" id="caseViewTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="tab-evidence" data-bs-toggle="tab" data-bs-target="#case-evidence-panel" type="button" role="tab" aria-controls="case-evidence-panel" aria-selected="true">
+              <i class="bi bi-collection me-1"></i> Evidence
+            </button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-timeline" data-bs-toggle="tab" data-bs-target="#case-timeline-panel" type="button" role="tab" aria-controls="case-timeline-panel" aria-selected="false">
+              <i class="bi bi-clock-history me-1"></i> Case Timeline
+            </button>
+          </li>
+        </ul>
+        <div class="tab-content pt-3" id="caseViewTabContent">
+          <!-- Timeline Pane -->
+          <div class="tab-pane fade" id="case-timeline-panel" role="tabpanel" aria-labelledby="tab-timeline">
+            <?php if (!empty($timelineEvents)): ?>
+              <div class="timeline">
+                <?php foreach ($timelineEvents as $ev): 
+                  $when   = htmlspecialchars(date('d M Y H:i', strtotime($ev['ts'] ?? '')));
+                  $label  = htmlspecialchars($ev['label'] ?? 'Event');
+                  $detail = htmlspecialchars($ev['detail'] ?? '');
+                  $meta   = htmlspecialchars($ev['meta'] ?? '');
+                  $eid    = (int)($ev['evidence_id'] ?? 0);
+                ?>
+                  <div class="item">
+                    <div class="d-flex justify-content-between">
+                      <div>
+                        <div class="fw-semibold">
+                          <?php echo $label; ?>
+                          <?php if ($meta): ?><span class="badge text-bg-dark border ms-1"><?php echo $meta; ?></span><?php endif; ?>
+                        </div>
+                        <?php if ($detail): ?><div class="text-secondary small"><?php echo $detail; ?></div><?php endif; ?>
+                        <?php if ($eid > 0): ?>
+                          <div class="mt-1">
+                            <a class="btn btn-outline-light btn-sm" href="?view=case&amp;code=<?php echo urlencode($viewCase['case_code'] ?? ''); ?>#evidence-<?php echo $eid; ?>">
+                              <i class="bi bi-box-arrow-up-right me-1"></i> Jump to evidence
+                            </a>
+                          </div>
+                        <?php endif; ?>
+                      </div>
+                      <div class="text-secondary small"><?php echo $when; ?></div>
+                    </div>
+                  </div>
+                <?php endforeach; ?>
+              </div>
+            <?php else: ?>
+              <div class="alert alert-secondary">No timeline events yet.</div>
+            <?php endif; ?>
+          </div>
+          <!-- Evidence Pane (open wrapper; existing evidence markup continues) -->
+          <div class="tab-pane fade show active" id="case-evidence-panel" role="tabpanel" aria-labelledby="tab-evidence">
         <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
   <div class="modal fade" id="addEvidenceModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
