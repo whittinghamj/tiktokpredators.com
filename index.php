@@ -1702,7 +1702,7 @@ document.addEventListener('DOMContentLoaded', function(){
         ?>
         <div class="card glass">
           <div class="card-header d-flex align-items-center justify-content-between">
-            <h5 class="mb-0"><i class="bi bi-inbox me-2"></i>Removal Requests (Admin)</h5>
+            <h5 class="mb-0"><i class="bi bi-inbox me-2"></i>Removal Requests</h5>
           </div>
           <div class="card-body">
             <?php if (!$reqs): ?>
