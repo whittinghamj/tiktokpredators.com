@@ -867,16 +867,49 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     if (!is_dir($uploadDir)) { @mkdir($uploadDir, 0755, true); }
 
     $f = $_FILES['evidence_file'];
-    if ($f['error'] !== UPLOAD_ERR_OK) { flash('error', 'Upload failed with code: '. (int)$f['error']); $redirUrl = trim($_POST['redirect_url'] ?? ''); if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; } header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit; }
+    if ($f['error'] !== UPLOAD_ERR_OK) {
+        flash('error', 'Upload failed with code: '. (int)$f['error']);
+        $redirUrl = trim($_POST['redirect_url'] ?? '');
+        if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+    }
 
+    // New flow: temp move → hash → final unique name
     $safeName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', basename($f['name']));
-    $destRel = 'uploads/' . uniqid('ev_', true) . '_' . $safeName;
+    $origBase = pathinfo($safeName, PATHINFO_FILENAME);
+    $origExt  = pathinfo($safeName, PATHINFO_EXTENSION);
+    $origExt  = $origExt !== '' ? ('.' . strtolower($origExt)) : '';
+
+    // 1) Move to a temporary unique path first
+    $tmpRel = 'uploads/tmp_' . uniqid('', true);
+    $tmpAbs = __DIR__ . '/' . $tmpRel;
+    if (!move_uploaded_file($f['tmp_name'], $tmpAbs)) {
+        flash('error', 'Unable to save uploaded file.');
+        $redirUrl = trim($_POST['redirect_url'] ?? '');
+        if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+    }
+
+    // 2) Compute hash and build a final, unique filename
+    $hash = hash_file('sha256', $tmpAbs);
+    $uniq = date('Ymd_His') . '_' . bin2hex(random_bytes(4)); // timestamp + 8 hex chars
+    $finalName = $origBase . '_' . $uniq . '_' . substr($hash, 0, 12) . $origExt;
+    $destRel = 'uploads/' . $finalName;
     $destAbs = __DIR__ . '/' . $destRel;
-    if (!move_uploaded_file($f['tmp_name'], $destAbs)) { flash('error', 'Unable to save uploaded file.'); $redirUrl = trim($_POST['redirect_url'] ?? ''); if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; } header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit; }
+
+    // 3) Move temp file into place with final unique name
+    if (!@rename($tmpAbs, $destAbs)) {
+        // Cleanup and abort if rename fails
+        @unlink($tmpAbs);
+        flash('error', 'Unable to finalize uploaded file.');
+        $redirUrl = trim($_POST['redirect_url'] ?? '');
+        if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+    }
 
     $mime = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
     $size = filesize($destAbs) ?: 0;
-    $hash = hash_file('sha256', $destAbs);
+    // $hash is already set above
     // Deduplicate by file content hash before insert
     try {
         $dupChk = $pdo->prepare('SELECT id, case_id, title FROM evidence WHERE (hash_sha256 = ? OR sha256_hex = ?) LIMIT 1');
@@ -895,13 +928,12 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     }
 
     try {
-
         // Use global storage path and set uploaded_by and created_by to current user
         $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
             $case_id,
             $type,
-            ($title !== '' ? $title : $safeName),
+            ($title !== '' ? $title : $finalName),
             $destRel,
             $storagePath,
             $safeName,
@@ -913,7 +945,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
             $_SESSION['user']['id'] ?? null
         ]);
         $newEvidenceId = (int)$pdo->lastInsertId();
-        log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $safeName), 'Type: '.$type, $newEvidenceId, null);
+        log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $finalName), 'Type: '.$type, $newEvidenceId, null);
         flash('success', 'Evidence uploaded.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
