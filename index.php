@@ -1302,14 +1302,41 @@ if ($rs && count($rs) > 0):
                   </h2>
                   <div id="faq-dbs" class="accordion-collapse collapse" aria-labelledby="faq-dbs-heading" data-bs-parent="#faqAccordion">
                     <div class="accordion-body">
-                      <p>DBS (Disclosure and Barring Service) checks help organisations make safer recruitment decisions. Common levels include:</p>
+                      <p>DBS (Disclosure and Barring Service) checks are background checks used in England and Wales to help organisations make safer recruitment decisions. There are four main levels, each showing different information:</p>
+
+                      <h6>Basic DBS Check</h6>
                       <ul>
-                        <li><strong>Basic</strong> — shows unspent convictions.</li>
-                        <li><strong>Standard</strong> — shows spent &amp; unspent convictions, cautions, reprimands and final warnings.</li>
-                        <li><strong>Enhanced</strong> — everything in Standard, plus relevant <em>local police information</em> if held.</li>
-                        <li><strong>Enhanced with Barred Lists</strong> — Enhanced plus a check of the children’s and/or adults’ barred list when the role is eligible.</li>
+                        <li><strong>Shows:</strong> Only unspent convictions held on the Police National Computer (PNC).</li>
+                        <li><strong>Does not show:</strong> Spent convictions, cautions, reprimands, warnings, local police information, or barred list information.</li>
+                        <li><strong>Who can apply:</strong> Any individual for themselves or via an employer.</li>
+                        <li><strong>Typical uses:</strong> Roles where only basic honesty or integrity needs confirming, e.g. retail, delivery, some financial services.</li>
                       </ul>
-                      <p class="small text-secondary">Eligibility for Standard/Enhanced levels is defined by role and legal criteria. Individuals can apply for a Basic check; employers/organisations request Standard/Enhanced where permitted.</p>
+
+                      <h6>Standard DBS Check</h6>
+                      <ul>
+                        <li><strong>Shows:</strong> Both spent and unspent convictions, cautions, reprimands and final warnings recorded on the PNC (subject to filtering rules).</li>
+                        <li><strong>Does not show:</strong> Local police intelligence or barred list information.</li>
+                        <li><strong>Who can request:</strong> Employers/organisations, not individuals, and only for roles legally entitled to this level.</li>
+                        <li><strong>Typical uses:</strong> Accountants, legal professionals, security roles not involving vulnerable groups.</li>
+                      </ul>
+
+                      <h6>Enhanced DBS Check</h6>
+                      <ul>
+                        <li><strong>Shows:</strong> Everything a Standard check shows <em>plus</em> any relevant information held by local police forces (for example, investigations, allegations, or intelligence considered pertinent).</li>
+                        <li><strong>Does not show:</strong> Barred list information unless specifically requested; information irrelevant to the role should be excluded by police disclosure officers.</li>
+                        <li><strong>Who can request:</strong> Employers/organisations entitled by law, for roles working closely with children or vulnerable adults.</li>
+                        <li><strong>Typical uses:</strong> Teachers, healthcare professionals, social workers, foster carers.</li>
+                      </ul>
+
+                      <h6>Enhanced DBS with Barred List Check</h6>
+                      <ul>
+                        <li><strong>Shows:</strong> Everything an Enhanced check shows <em>plus</em> a check against the children’s barred list, the adults’ barred list, or both, depending on the role.</li>
+                        <li><strong>Does not show:</strong> Information beyond the scope of police records and barred lists; filtering rules still apply for old/minor convictions.</li>
+                        <li><strong>Who can request:</strong> Only for positions legally classed as “regulated activity” with children and/or vulnerable adults.</li>
+                        <li><strong>Typical uses:</strong> School teachers, childcare workers, medical staff providing direct care, care‑home workers.</li>
+                      </ul>
+
+                      <p class="small text-secondary">Filtering rules: Certain old and minor convictions/cautions are “filtered” and will not appear on Standard or Enhanced checks after a set period. The DBS filtering guidance defines exactly what is filtered and what is not.</p>
                     </div>
                   </div>
                 </div>
