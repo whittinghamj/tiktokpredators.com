@@ -1867,13 +1867,13 @@ if ($rs && count($rs) > 0):
                 <table class="table table-sm align-middle mb-0">
                   <thead>
                     <tr>
-                      <th style="width: 12rem;">Case Code</th>
-                      <th>Case Name</th>
-                      <th>Submitted By</th>
-                      <th style="width: 16rem;">Subject</th>
-                      <th style="width: 10rem;">Evidence</th>
-                      <th style="width: 14rem;">Last Activity</th>
-                      <th style="width: 18rem;" class="text-end">Actions</th>
+                      <th style="width: 12rem;" class="text-nowrap">Case Code</th>
+                      <th class="text-nowrap">Case Name</th>
+                      <th class="text-nowrap">Submitted By</th>
+                      <th style="width: 16rem;" class="text-nowrap">Subject</th>
+                      <th style="width: 10rem;" class="text-nowrap">Evidence</th>
+                      <th style="width: 14rem;" class="text-nowrap">Last Activity</th>
+                      <th style="width: 18rem;" class="text-end text-nowrap">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -1886,13 +1886,13 @@ if ($rs && count($rs) > 0):
                       $creatorName = trim($r['creator_name'] ?? '');
                   ?>
                     <tr>
-                      <td><span class="badge text-bg-dark border"><?php echo htmlspecialchars($code); ?></span></td>
-                      <td class="fw-semibold"><?php echo htmlspecialchars($name); ?></td>
-                      <td><?php echo $creatorName !== '' ? htmlspecialchars($creatorName) : '—'; ?></td>
-                      <td><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></td>
-                      <td><?php echo $evc; ?></td>
-                      <td><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
-                      <td class="text-end">
+                      <td class="text-nowrap"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($code); ?></span></td>
+                      <td class="fw-semibold text-nowrap"><?php echo htmlspecialchars($name); ?></td>
+                      <td class="text-nowrap"><?php echo $creatorName !== '' ? htmlspecialchars($creatorName) : '—'; ?></td>
+                      <td class="text-nowrap"><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></td>
+                      <td class="text-nowrap"><?php echo $evc; ?></td>
+                      <td class="text-nowrap"><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
+                      <td class="text-end text-nowrap">
                         <a class="btn btn-outline-light btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-eye me-1"></i>View</a>
                         <?php if (is_admin()): ?>
                           <a class="btn btn-primary btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-pencil-square me-1"></i>Edit</a>
