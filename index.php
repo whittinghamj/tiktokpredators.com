@@ -1859,11 +1859,22 @@ document.addEventListener('DOMContentLoaded', function(){
                             <a class="btn btn-sm btn-outline-primary" href="?view=removal_request&amp;id=<?php echo (int)$r['id']; ?>#removal-request">
                               <i class="bi bi-eye me-1"></i>View
                             </a>
+                            <?php $isLocked = (($row['status'] ?? $r['status'] ?? '') === 'Approved / Closed'); ?>
+
                             <form method="post" action="" onsubmit="return confirm('Delete this removal request?');">
-                              <?php csrf_field(); ?>
-                              <input type="hidden" name="action" value="delete_removal">
-                              <input type="hidden" name="removal_id" value="<?php echo (int)$r['id']; ?>">
-                              <button type="submit" class="btn btn-danger btn-sm"><i class="bi bi-trash"></i> Delete</button>
+                                <?php csrf_field(); ?>
+                                <input type="hidden" name="action" value="delete_removal">
+                                <input type="hidden" name="removal_id" value="<?php echo (int)$r['id']; ?>">
+
+                                <?php if ($isLocked): ?>
+                                    <button type="button" class="btn btn-danger btn-sm" disabled>
+                                        <i class="bi bi-trash"></i> Delete
+                                    </button>
+                                <?php else: ?>
+                                    <button type="submit" class="btn btn-danger btn-sm">
+                                        <i class="bi bi-trash"></i> Delete
+                                    </button>
+                                <?php endif; ?>
                             </form>
                           </div>
                         </td>
