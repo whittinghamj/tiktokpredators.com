@@ -1675,8 +1675,18 @@ document.addEventListener('DOMContentLoaded', function(){
           <input type="hidden" name="action" value="delete_removal">
           <?php csrf_field(); ?>
           <input type="hidden" name="removal_id" value="<?php echo (int)$req['id']; ?>">
-          <button type="submit" class="btn btn-outline-danger"><i class="bi bi-trash me-1"></i>Delete 1</button>
-        </form>
+
+          <?php if ($isLocked): ?>
+              <button type="button" class="btn btn-outline-danger" disabled>
+                  <i class="bi bi-trash me-1"></i>Delete 1
+              </button>
+          <?php else: ?>
+              <button type="submit" class="btn btn-outline-danger">
+                  <i class="bi bi-trash me-1"></i>Delete 1
+              </button>
+          <?php endif; ?>
+      </form>
+
       </div>
     </div>
 
