@@ -1679,8 +1679,14 @@ if ($rs && count($rs) > 0):
                 }
             } catch (Throwable $e) { $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage(); }
             // Sort by timestamp ascending
-            usort($timelineEvents, function($a, $b) {
-                return strtotime($a['ts']) <=> strtotime($b['ts']);
+            // usort($timelineEvents, function($a, $b) {
+                // return strtotime($a['ts']) <=> strtotime($b['ts']);
+            // });
+            usort($timelineEvents, function($a,$b){
+              $ta = strtotime($a['ts'] ?? ''); 
+              $tb = strtotime($b['ts'] ?? '');
+              if ($ta === $tb) return 0;
+              return ($ta > $tb) ? -1 : 1; // Newest first
             });
             ?>
             <?php if (!empty($timelineEvents)): ?>
