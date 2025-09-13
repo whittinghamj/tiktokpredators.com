@@ -1,4 +1,31 @@
 <?php
+
+// --- Cross-subdomain session cookie for tiktokpredators.com and www.tiktokpredators.com
+// Must be set BEFORE session_start()
+$tp_cookie_domain = '.tiktokpredators.com'; // covers apex and www
+$tp_cookie_path   = '/';
+$tp_cookie_secure = (
+    (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+    || (isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] === 443)
+) ? true : false; // secure on HTTPS; allow HTTP when not secure
+
+$tp_cookie_params = [
+    'lifetime' => 0,
+    'path'     => $tp_cookie_path,
+    'domain'   => $tp_cookie_domain,
+    'secure'   => $tp_cookie_secure,
+    'httponly' => true,
+    'samesite' => 'Lax', // allows top-level nav across apex/www
+];
+
+if (PHP_VERSION_ID >= 70300) {
+    session_set_cookie_params($tp_cookie_params);
+} else {
+    // PHP < 7.3 fallback (array form not supported)
+    $legacyPath = $tp_cookie_path . '; samesite=' . $tp_cookie_params['samesite'];
+    session_set_cookie_params(0, $legacyPath, $tp_cookie_domain, $tp_cookie_secure, true);
+}
+
 // ---- Minimal auth bootstrap (no frameworks) ----
 if (session_status() === PHP_SESSION_NONE) {
     // Secure session settings
@@ -1251,8 +1278,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
 if (isset($_GET['logout'])) {
     $_SESSION = [];
     if (ini_get('session.use_cookies')) {
-        $params = session_get_cookie_params();
-        setcookie(session_name(), '', time() - 42000, $params['path'], $params['domain'], $params['secure'], $params['httponly']);
+        // Clear session cookie for both apex and www on HTTP/HTTPS
+        $tp_cookie_domain = '.tiktokpredators.com';
+        $tp_cookie_path   = '/';
+        // Expire both the non-secure and secure variants
+        @setcookie(session_name(), '', time() - 42000, $tp_cookie_path, $tp_cookie_domain, false, true);
+        @setcookie(session_name(), '', time() - 42000, $tp_cookie_path, $tp_cookie_domain, true,  true);
     }
     session_destroy();
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
