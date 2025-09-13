@@ -1085,9 +1085,134 @@ if (isset($_GET['logout'])) {
 <body>
   <?php if ($msg = flash('success')): ?>
     <div class="alert alert-success border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
-          </div> <!-- /#case-evidence-panel -->
-        </div> <!-- /.tab-content -->
   <?php endif; ?>
+</body>
+<!-- Bootstrap JS (required for modal/tabs) -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+<!-- Auth Modal -->
+<div class="modal fade" id="authModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content glass">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-person-lock me-2"></i>Account</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+
+        <ul class="nav nav-tabs" id="authTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="tab-login" data-bs-toggle="tab" data-bs-target="#pane-login" type="button" role="tab" aria-controls="pane-login" aria-selected="true">
+              <i class="bi bi-box-arrow-in-right me-1"></i> Login
+            </button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-register" data-bs-toggle="tab" data-bs-target="#pane-register" type="button" role="tab" aria-controls="pane-register" aria-selected="false">
+              <i class="bi bi-person-plus me-1"></i> Register
+            </button>
+          </li>
+        </ul>
+
+        <div class="tab-content pt-3" id="authTabsContent">
+          <!-- Login pane -->
+          <div class="tab-pane fade show active" id="pane-login" role="tabpanel" aria-labelledby="tab-login" tabindex="0">
+            <form method="post" action="">
+              <input type="hidden" name="action" value="login">
+              <?php csrf_field(); ?>
+              <div class="mb-3">
+                <label for="login_email" class="form-label">Email</label>
+                <input type="email" class="form-control" id="login_email" name="email" placeholder="you@example.com" required>
+              </div>
+              <div class="mb-3">
+                <label for="login_password" class="form-label">Password</label>
+                <input type="password" class="form-control" id="login_password" name="password" minlength="8" required>
+              </div>
+              <div class="d-grid">
+                <button type="submit" class="btn btn-primary">
+                  <i class="bi bi-box-arrow-in-right me-1"></i> Sign in
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Register pane -->
+          <div class="tab-pane fade" id="pane-register" role="tabpanel" aria-labelledby="tab-register" tabindex="0">
+            <form method="post" action="">
+              <input type="hidden" name="action" value="register">
+              <?php csrf_field(); ?>
+              <div class="mb-3">
+                <label for="reg_display_name" class="form-label">Display Name</label>
+                <input type="text" class="form-control" id="reg_display_name" name="display_name" required>
+              </div>
+              <div class="mb-3">
+                <label for="reg_email" class="form-label">Email</label>
+                <input type="email" class="form-control" id="reg_email" name="email" placeholder="you@example.com" required>
+              </div>
+              <div class="mb-3">
+                <label for="reg_password" class="form-label">Password</label>
+                <input type="password" class="form-control" id="reg_password" name="password" minlength="8" required>
+              </div>
+              <div class="mb-3">
+                <label for="reg_password_confirm" class="form-label">Confirm Password</label>
+                <input type="password" class="form-control" id="reg_password_confirm" name="password_confirm" minlength="8" required>
+              </div>
+              <div class="form-check mb-3">
+                <input class="form-check-input" type="checkbox" value="1" id="reg_agree" name="agree" required>
+                <label class="form-check-label" for="reg_agree">
+                  I agree to the Terms and Privacy Policy
+                </label>
+              </div>
+              <div class="d-grid">
+                <button type="submit" class="btn btn-primary">
+                  <i class="bi bi-person-plus me-1"></i> Create account
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Open the auth modal on demand and select correct tab -->
+<script>
+(function(){
+  var authModalEl = document.getElementById('authModal');
+  if (authModalEl) {
+    authModalEl.addEventListener('show.bs.modal', function (ev) {
+      var trigger = ev.relatedTarget;
+      var wanted = trigger && trigger.getAttribute('data-auth-tab');
+      if (wanted === 'register') {
+        var tabBtn = document.getElementById('tab-register');
+        if (tabBtn) new bootstrap.Tab(tabBtn).show();
+      } else if (wanted === 'login') {
+        var tabBtn = document.getElementById('tab-login');
+        if (tabBtn) new bootstrap.Tab(tabBtn).show();
+      }
+    });
+  }
+})();
+</script>
+
+<?php if (!empty($openAuth)): ?>
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+  var modalEl = document.getElementById('authModal');
+  if (!modalEl) return;
+  var modal = new bootstrap.Modal(modalEl);
+  modal.show();
+  <?php if ($openAuth === 'register'): ?>
+    var tabBtn = document.getElementById('tab-register');
+    if (tabBtn) new bootstrap.Tab(tabBtn).show();
+  <?php else: ?>
+    var tabBtn = document.getElementById('tab-login');
+    if (tabBtn) new bootstrap.Tab(tabBtn).show();
+  <?php endif; ?>
+});
+</script>
+<?php endif; ?>
   <?php if ($msg = flash('error')): ?>
     <div class="alert alert-danger border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
   <?php endif; ?>
