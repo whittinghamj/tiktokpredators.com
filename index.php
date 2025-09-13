@@ -1678,11 +1678,11 @@ document.addEventListener('DOMContentLoaded', function(){
 
           <?php if ($isLocked): ?>
               <button type="button" class="btn btn-outline-danger" disabled>
-                  <i class="bi bi-trash me-1"></i>Delete 1
+                  <i class="bi bi-trash me-1"></i>Delete
               </button>
           <?php else: ?>
               <button type="submit" class="btn btn-outline-danger">
-                  <i class="bi bi-trash me-1"></i>Delete 1
+                  <i class="bi bi-trash me-1"></i>Delete
               </button>
           <?php endif; ?>
       </form>
