@@ -2451,7 +2451,7 @@ if ($rs && count($rs) > 0):
               <div class="col-md-3">
                 <label class="form-label">Status</label>
                 <select name="status" class="form-select" required>
-                  <?php $statOpts = ['Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($viewCase['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                  <?php $statOpts = ['Pending','Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($viewCase['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                 </select>
               </div>
             </div>
@@ -2818,7 +2818,7 @@ if ($rs && count($rs) > 0):
                   <div class="col-md-3">
                     <label class="form-label">Status</label>
                     <select name="status" class="form-select" required>
-                      <?php $statOpts = ['Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($caseRow['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                      <?php $statOpts = ['Pending','Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($caseRow['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                     </select>
                   </div>
                 </div>
