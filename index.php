@@ -1395,6 +1395,110 @@ document.addEventListener('DOMContentLoaded', function(){
     </div>
   </nav>
 
+  <?php
+  // --- Owner Pending Case Edit Controls (viewer can edit like admin while Pending)
+  if ($view === 'case') {
+      $case_code_param = trim($_GET['code'] ?? '');
+      if ($case_code_param !== '') {
+          try {
+              $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE case_code = ? LIMIT 1');
+              $stmt->execute([$case_code_param]);
+              $caseRow = $stmt->fetch();
+          } catch (Throwable $e) { $caseRow = null; }
+          if ($caseRow) {
+              $ownerCanInline = can_manage_pending_case($pdo, (int)$caseRow['id']);
+              if ($ownerCanInline) {
+                  // Owner can edit while Pending — show compact edit form
+                  ?>
+                  <main class="py-3" id="owner-edit">
+                    <div class="container-xl">
+                      <div class="alert alert-info d-flex align-items-start glass">
+                        <i class="bi bi-pencil-square me-2 fs-5"></i>
+                        <div>
+                          <div class="fw-semibold">You opened this case and it is currently <span class="text-warning">Pending</span>.</div>
+                          <div class="small">You may edit the Case Details and manage evidence until an admin changes the status.</div>
+                        </div>
+                      </div>
+                      <div class="card glass mb-4">
+                        <div class="card-body">
+                          <div class="d-flex align-items-center justify-content-between mb-2">
+                            <h2 class="h6 mb-0"><i class="bi bi-sliders me-2"></i>Edit Case Details</h2>
+                            <a class="btn btn-outline-light btn-sm" href="?view=case&amp;code=<?php echo urlencode($caseRow['case_code']); ?>#case-view"><i class="bi bi-arrow-repeat me-1"></i>Refresh</a>
+                          </div>
+                          <form method="post" action="" enctype="multipart/form-data" class="mt-2">
+                            <input type="hidden" name="action" value="update_case">
+                            <?php csrf_field(); ?>
+                            <input type="hidden" name="case_id" value="<?php echo (int)$caseRow['id']; ?>">
+                            <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseRow['case_code']); ?>">
+                            <div class="row">
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">Case Name</label>
+                                <input type="text" name="case_name" class="form-control" value="<?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?>" required>
+                              </div>
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">Person Name</label>
+                                <input type="text" name="person_name" class="form-control" value="<?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?>">
+                              </div>
+                            </div>
+                            <div class="row">
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">TikTok Username</label>
+                                <div class="input-group">
+                                  <span class="input-group-text">@</span>
+                                  <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars(ltrim((string)$caseRow['tiktok_username'], '@')); ?>">
+                                </div>
+                              </div>
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">Person Photo (optional)</label>
+                                <input type="file" name="person_photo" class="form-control" accept="image/*">
+                              </div>
+                            </div>
+                            <div class="mb-3">
+                              <label class="form-label">Summary</label>
+                              <textarea name="initial_summary" class="form-control" rows="4" required><?php echo htmlspecialchars($caseRow['initial_summary'] ?? ''); ?></textarea>
+                            </div>
+                            <div class="row">
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">Sensitivity</label>
+                                <select name="sensitivity" class="form-select">
+                                  <?php
+                                  $sensOpts = ['Standard','Restricted','Sealed'];
+                                  foreach ($sensOpts as $opt) {
+                                      $sel = ($caseRow['sensitivity'] ?? 'Standard') === $opt ? ' selected' : '';
+                                      echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt).'</option>';
+                                  }
+                                  ?>
+                                </select>
+                              </div>
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">Status</label>
+                                <select name="status" class="form-select">
+                                  <?php
+                                  $statusOpts = ['Pending','Open','In Review','Verified','Closed'];
+                                  foreach ($statusOpts as $opt) {
+                                      $sel = ($caseRow['status'] ?? 'Pending') === $opt ? ' selected' : '';
+                                      echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt).'</option>';
+                                  }
+                                  ?>
+                                </select>
+                              </div>
+                            </div>
+                            <div class="d-flex gap-2">
+                              <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save Changes</button>
+                              <a href="?view=case&amp;code=<?php echo urlencode($caseRow['case_code']); ?>#case-view" class="btn btn-outline-light">Cancel</a>
+                            </div>
+                          </form>
+                        </div>
+                      </div>
+                    </div>
+                  </main>
+                  <?php
+              }
+          }
+      }
+  }
+  ?>
+
 
 
   <!-- Cases Grid + Right Rail -->
