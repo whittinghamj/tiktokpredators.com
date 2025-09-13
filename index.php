@@ -2315,7 +2315,31 @@ if ($rs && count($rs) > 0):
               <?php if ($tuser !== ''): ?><?php if($person!==''): ?>&nbsp;•&nbsp;<?php endif; ?><span class="text-white"><?php echo $tuser; ?></span><?php endif; ?>
             </div>
           </div>
-          <span class="badge rounded-pill text-bg-dark border"><?php echo htmlspecialchars($status); ?></span>
+          <?php
+        $badgeClass = 'dark'; // default
+
+        switch ($status) {
+            case 'Pending':
+                $badgeClass = 'warning'; // yellow
+                break;
+            case 'Open':
+                $badgeClass = 'primary'; // blue
+                break;
+            case 'In Review':
+                $badgeClass = 'info'; // light blue
+                break;
+            case 'Verified':
+                $badgeClass = 'success'; // green
+                break;
+            case 'Closed':
+                $badgeClass = 'secondary'; // gray
+                break;
+        }
+        ?>
+        <span class="badge rounded-pill text-bg-<?php echo $badgeClass; ?> border">
+            <?php echo htmlspecialchars($status); ?>
+        </span>
+
         </div>
         <p class="small mt-3 mb-2 text-secondary"><?php echo htmlspecialchars($sum); ?></p>
         <div class="mt-2 d-flex gap-2 flex-wrap">
