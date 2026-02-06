@@ -1408,7 +1408,18 @@ if (isset($_GET['logout'])) {
   <meta name="msapplication-TileColor" content="#ffffff">
   <meta name="msapplication-TileImage" content="/assets/favicon/ms-icon-144x144.png">
   <meta name="theme-color" content="#ffffff">
-  <meta name="description" content="Secure, auditable case & evidence management platform for vetted users." />
+  <meta name="description" content="A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability." />
+  <!-- Open Graph / Social sharing -->
+  <meta property="og:title" content="TikTokPredators — Cases & Evidence" />
+  <meta property="og:description" content="A public, auditable repository documenting abusive behaviour by TikTok accounts. We collect case records, evidence, and verifiable proof to expose predators and support accountability on the TikTok platform." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://tiktokpredators.com/" />
+  <meta property="og:site_name" content="TikTokPredators" />
+  <meta property="og:image" content="https://tiktokpredators.com/assets/og-image.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="TikTokPredators — Cases & Evidence" />
+  <meta name="twitter:description" content="A public, auditable repository documenting abusive behaviour by TikTok accounts. We collect case records, evidence, and verifiable proof to expose predators and support accountability on the TikTok platform." />
+  <meta name="twitter:image" content="https://tiktokpredators.com/assets/og-image.png" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
 
