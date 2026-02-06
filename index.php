@@ -1449,6 +1449,11 @@ if (isset($_GET['logout'])) {
   </style>
 </head>
 <body>
+  <!-- Ownership banner -->
+  <div role="banner" style="background:#3a0f4a;color:#ffffff;font-weight:700;text-align:center;padding:10px 12px;">
+    This site is owned and operated by Jamie Whittingham | <a href="https://www.tiktok.com/@jamiewhittinghamofficial" target="_blank" rel="noopener noreferrer" style="color:#ffffff;text-decoration:underline;">Mouldy Sausage</a>
+  </div>
+
   <?php if ($msg = flash('success')): ?>
     <div class="alert alert-success border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
   <?php endif; ?>
