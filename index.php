@@ -196,7 +196,43 @@ try {
 } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
-function log_case_event(PDO $pdo, int $caseId, string $type, string $subject = null, string $detail = null, ?int $refEvidenceId = null, ?int $refNoteId = null): void {
+// --- Case views tracking setup ---
+try {
+  $pdo->exec(" 
+    CREATE TABLE IF NOT EXISTS case_views (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      case_id BIGINT UNSIGNED NOT NULL,
+      viewer_user_id BIGINT UNSIGNED NULL,
+      viewer_role VARCHAR(16) NULL,
+      is_authenticated TINYINT(1) NOT NULL DEFAULT 0,
+      session_key CHAR(64) NULL,
+      public_ip VARCHAR(45) NULL,
+      forwarded_for VARCHAR(255) NULL,
+      geo_country CHAR(2) NULL,
+      geo_region VARCHAR(128) NULL,
+      geo_city VARCHAR(128) NULL,
+      geo_source VARCHAR(64) NULL,
+      device_type VARCHAR(32) NULL,
+      os_name VARCHAR(64) NULL,
+      browser_name VARCHAR(64) NULL,
+      browser_version VARCHAR(32) NULL,
+      user_agent VARCHAR(1024) NULL,
+      accept_language VARCHAR(255) NULL,
+      referer VARCHAR(1024) NULL,
+      request_uri VARCHAR(1024) NULL,
+      request_method VARCHAR(16) NULL,
+      viewed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_case_id_viewed_at (case_id, viewed_at),
+      INDEX idx_viewer_user (viewer_user_id),
+      INDEX idx_public_ip (public_ip),
+      INDEX idx_geo_country (geo_country)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  ");
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+
+function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = null, ?string $detail = null, ?int $refEvidenceId = null, ?int $refNoteId = null): void {
     try {
         $stmt = $pdo->prepare("INSERT INTO case_events (case_id, event_type, subject, detail, ref_evidence_id, ref_note_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)");
         $stmt->execute([$caseId, $type, $subject, $detail, $refEvidenceId, $refNoteId, $_SESSION['user']['id'] ?? null]);
@@ -204,6 +240,159 @@ function log_case_event(PDO $pdo, int $caseId, string $type, string $subject = n
         $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
     }
 }
+
+    function tp_header(string $name): string {
+      $key = 'HTTP_' . strtoupper(str_replace('-', '_', $name));
+      return trim((string)($_SERVER[$key] ?? ''));
+    }
+
+    function tp_client_ip(): array {
+      $forwarded = tp_header('X-Forwarded-For');
+      $candidates = [
+        tp_header('CF-Connecting-IP'),
+        tp_header('True-Client-IP'),
+        tp_header('X-Real-IP'),
+      ];
+      if ($forwarded !== '') {
+        $first = trim(explode(',', $forwarded)[0]);
+        if ($first !== '') { $candidates[] = $first; }
+      }
+      $remoteAddr = trim((string)($_SERVER['REMOTE_ADDR'] ?? ''));
+      if ($remoteAddr !== '') { $candidates[] = $remoteAddr; }
+
+      $publicIp = '';
+      foreach ($candidates as $ip) {
+        if ($ip !== '' && filter_var($ip, FILTER_VALIDATE_IP)) {
+          $publicIp = $ip;
+          break;
+        }
+      }
+      return [$publicIp, $forwarded];
+    }
+
+    function tp_parse_user_agent(string $ua): array {
+      $u = strtolower($ua);
+
+      $device = 'Desktop';
+      if (preg_match('/bot|crawl|spider|slurp|bingpreview/i', $ua)) {
+        $device = 'Bot';
+      } elseif (preg_match('/ipad|tablet|kindle|silk|playbook/i', $ua) || (strpos($u, 'android') !== false && strpos($u, 'mobile') === false)) {
+        $device = 'Tablet';
+      } elseif (preg_match('/iphone|ipod|android|mobile|windows phone|opera mini/i', $ua)) {
+        $device = 'Mobile';
+      }
+
+      $os = 'Unknown';
+      if (strpos($u, 'windows nt') !== false) { $os = 'Windows'; }
+      elseif (strpos($u, 'iphone') !== false || strpos($u, 'ipad') !== false || strpos($u, 'ipod') !== false) { $os = 'iOS'; }
+      elseif (strpos($u, 'android') !== false) { $os = 'Android'; }
+      elseif (strpos($u, 'mac os x') !== false || strpos($u, 'macintosh') !== false) { $os = 'macOS'; }
+      elseif (strpos($u, 'cros') !== false) { $os = 'ChromeOS'; }
+      elseif (strpos($u, 'linux') !== false) { $os = 'Linux'; }
+
+      $browser = 'Unknown';
+      $version = '';
+      $patterns = [
+        'Edge' => '/Edg\/([0-9\.]+)/i',
+        'Opera' => '/(?:OPR|Opera)\/([0-9\.]+)/i',
+        'Samsung Internet' => '/SamsungBrowser\/([0-9\.]+)/i',
+        'Chrome' => '/Chrome\/([0-9\.]+)/i',
+        'Firefox' => '/Firefox\/([0-9\.]+)/i',
+        'Safari' => '/Version\/([0-9\.]+).*Safari/i',
+        'Internet Explorer' => '/(?:MSIE\s([0-9\.]+)|Trident\/.*rv:([0-9\.]+))/i',
+      ];
+      foreach ($patterns as $name => $regex) {
+        if (preg_match($regex, $ua, $m)) {
+          $browser = $name;
+          $version = $m[1] ?: ($m[2] ?? '');
+          break;
+        }
+      }
+
+      return [$device, $os, $browser, $version];
+    }
+
+    function tp_geo_from_headers(): array {
+      $country = '';
+      $region = '';
+      $city = '';
+      $source = '';
+
+      $cfCountry = tp_header('CF-IPCountry');
+      if ($cfCountry !== '') {
+        $country = strtoupper(substr($cfCountry, 0, 2));
+        $source = 'Cloudflare';
+      }
+
+      if ($country === '') {
+        $awsCountry = tp_header('CloudFront-Viewer-Country');
+        if ($awsCountry !== '') {
+          $country = strtoupper(substr($awsCountry, 0, 2));
+          $source = 'CloudFront';
+        }
+      }
+
+      $region = tp_header('CloudFront-Viewer-Country-Region') ?: tp_header('X-AppEngine-Region');
+      $city = tp_header('CloudFront-Viewer-City') ?: tp_header('X-AppEngine-City');
+
+      return [$country, $region, $city, $source];
+    }
+
+    function log_case_view(PDO $pdo, int $caseId): void {
+      static $loggedCaseIds = [];
+      if ($caseId <= 0 || isset($loggedCaseIds[$caseId])) { return; }
+      $loggedCaseIds[$caseId] = true;
+
+      try {
+        [$publicIp, $forwardedFor] = tp_client_ip();
+        $ua = trim((string)($_SERVER['HTTP_USER_AGENT'] ?? ''));
+        [$deviceType, $osName, $browserName, $browserVersion] = tp_parse_user_agent($ua);
+        [$geoCountry, $geoRegion, $geoCity, $geoSource] = tp_geo_from_headers();
+
+        $viewerId = (int)($_SESSION['user']['id'] ?? 0);
+        $viewerRole = trim((string)($_SESSION['user']['role'] ?? 'guest'));
+        $isAuthed = !empty($_SESSION['user']) ? 1 : 0;
+        $sessionKey = session_id() !== '' ? hash('sha256', session_id()) : null;
+
+        $stmt = $pdo->prepare('INSERT INTO case_views (case_id, viewer_user_id, viewer_role, is_authenticated, session_key, public_ip, forwarded_for, geo_country, geo_region, geo_city, geo_source, device_type, os_name, browser_name, browser_version, user_agent, accept_language, referer, request_uri, request_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $stmt->execute([
+          $caseId,
+          $viewerId > 0 ? $viewerId : null,
+          $viewerRole !== '' ? substr($viewerRole, 0, 16) : null,
+          $isAuthed,
+          $sessionKey,
+          $publicIp !== '' ? substr($publicIp, 0, 45) : null,
+          $forwardedFor !== '' ? substr($forwardedFor, 0, 255) : null,
+          $geoCountry !== '' ? substr($geoCountry, 0, 2) : null,
+          $geoRegion !== '' ? substr($geoRegion, 0, 128) : null,
+          $geoCity !== '' ? substr($geoCity, 0, 128) : null,
+          $geoSource !== '' ? substr($geoSource, 0, 64) : null,
+          $deviceType,
+          $osName,
+          $browserName,
+          $browserVersion !== '' ? substr($browserVersion, 0, 32) : null,
+          $ua !== '' ? substr($ua, 0, 1024) : null,
+          ($al = trim((string)($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? ''))) !== '' ? substr($al, 0, 255) : null,
+          ($ref = trim((string)($_SERVER['HTTP_REFERER'] ?? ''))) !== '' ? substr($ref, 0, 1024) : null,
+          ($uri = trim((string)($_SERVER['REQUEST_URI'] ?? ''))) !== '' ? substr($uri, 0, 1024) : null,
+          ($method = trim((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'))) !== '' ? substr($method, 0, 16) : 'GET',
+        ]);
+      } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+      }
+    }
+
+    function get_case_view_count(PDO $pdo, int $caseId): int {
+      if ($caseId <= 0) { return 0; }
+      try {
+        $s = $pdo->prepare('SELECT COUNT(*) AS cnt FROM case_views WHERE case_id = ?');
+        $s->execute([$caseId]);
+        $r = $s->fetch();
+        return (int)($r['cnt'] ?? 0);
+      } catch (Throwable $e) {
+        return 0;
+      }
+    }
 
 // Secure evidence streaming endpoint
 if (($_GET['action'] ?? '') === 'serve_evidence') {
@@ -1622,6 +1811,7 @@ document.addEventListener('DOMContentLoaded', function(){
 <?php endif; ?>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='viewer_stats')?'active':''; ?>" href="?view=viewer_stats#viewer-stats">Viewer Stats</a></li>
   <li class="nav-item">
     <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#devModal">Dev</a>
   </li>
@@ -2843,10 +3033,428 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
   </main>
   <?php endif; ?>
 
+  <?php if ($view === 'viewer_stats'): ?>
+  <main class="py-4" id="viewer-stats">
+    <div class="container-xl">
+      <div class="d-flex align-items-center justify-content-between mb-3">
+        <h2 class="h4 mb-0">Viewer Statistics</h2>
+        <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+      </div>
+
+      <?php if (!is_admin()): ?>
+        <div class="alert alert-danger"><i class="bi bi-shield-lock me-2"></i>Unauthorized. Admins only.</div>
+      <?php else: ?>
+        <?php
+          $stats = [
+            'total_views' => 0,
+            'views_24h' => 0,
+            'views_7d' => 0,
+            'unique_cases' => 0,
+            'unique_users' => 0,
+            'unique_ips' => 0,
+            'auth_views' => 0,
+            'guest_views' => 0,
+          ];
+          $mostViewedCases = [];
+          $recentViews = [];
+          $topCountries = [];
+          $topBrowsers = [];
+          $topDevices = [];
+          $topOperatingSystems = [];
+          $topIps = [];
+
+          try {
+            $q = $pdo->query("SELECT
+                COUNT(*) AS total_views,
+                SUM(CASE WHEN viewed_at >= (NOW() - INTERVAL 1 DAY) THEN 1 ELSE 0 END) AS views_24h,
+                SUM(CASE WHEN viewed_at >= (NOW() - INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS views_7d,
+                COUNT(DISTINCT case_id) AS unique_cases,
+                COUNT(DISTINCT viewer_user_id) AS unique_users,
+                COUNT(DISTINCT public_ip) AS unique_ips,
+                SUM(CASE WHEN is_authenticated = 1 THEN 1 ELSE 0 END) AS auth_views,
+                SUM(CASE WHEN is_authenticated = 0 THEN 1 ELSE 0 END) AS guest_views
+              FROM case_views");
+            $r = $q->fetch();
+            if ($r) { $stats = array_merge($stats, $r); }
+          } catch (Throwable $e) {
+            $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+            log_console('ERROR', 'SQL: ' . $e->getMessage());
+          }
+
+          try {
+            $q = $pdo->query("SELECT
+                cv.case_id,
+                c.case_code,
+                c.case_name,
+                COUNT(*) AS total_views,
+                COUNT(DISTINCT cv.viewer_user_id) AS unique_users,
+                COUNT(DISTINCT cv.public_ip) AS unique_ips,
+                MAX(cv.viewed_at) AS last_viewed_at
+              FROM case_views cv
+              JOIN cases c ON c.id = cv.case_id
+              GROUP BY cv.case_id, c.case_code, c.case_name
+              ORDER BY total_views DESC, last_viewed_at DESC
+              LIMIT 15");
+            $mostViewedCases = $q->fetchAll() ?: [];
+          } catch (Throwable $e) {
+            $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+          }
+
+          try {
+            $q = $pdo->query("SELECT
+                cv.id,
+                cv.case_id,
+                c.case_code,
+                c.case_name,
+                cv.viewer_user_id,
+                u.email AS viewer_email,
+                u.display_name AS viewer_display_name,
+                cv.viewer_role,
+                cv.is_authenticated,
+                cv.public_ip,
+                cv.forwarded_for,
+                cv.geo_country,
+                cv.geo_region,
+                cv.geo_city,
+                cv.geo_source,
+                cv.device_type,
+                cv.os_name,
+                cv.browser_name,
+                cv.browser_version,
+                cv.accept_language,
+                cv.referer,
+                cv.request_uri,
+                cv.request_method,
+                cv.viewed_at
+              FROM case_views cv
+              JOIN cases c ON c.id = cv.case_id
+              LEFT JOIN users u ON u.id = cv.viewer_user_id
+              ORDER BY cv.viewed_at DESC
+              LIMIT 250");
+            $recentViews = $q->fetchAll() ?: [];
+          } catch (Throwable $e) {
+            $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+          }
+
+          try {
+            $q = $pdo->query("SELECT COALESCE(NULLIF(TRIM(geo_country), ''), 'Unknown') AS label, COUNT(*) AS cnt
+              FROM case_views
+              GROUP BY label
+              ORDER BY cnt DESC
+              LIMIT 10");
+            $topCountries = $q->fetchAll() ?: [];
+          } catch (Throwable $e) {}
+
+          try {
+            $q = $pdo->query("SELECT COALESCE(NULLIF(TRIM(CONCAT(browser_name, IF(browser_version IS NOT NULL AND browser_version != '', CONCAT(' ', browser_version), ''))), ''), 'Unknown') AS label, COUNT(*) AS cnt
+              FROM case_views
+              GROUP BY label
+              ORDER BY cnt DESC
+              LIMIT 10");
+            $topBrowsers = $q->fetchAll() ?: [];
+          } catch (Throwable $e) {}
+
+          try {
+            $q = $pdo->query("SELECT COALESCE(NULLIF(TRIM(device_type), ''), 'Unknown') AS label, COUNT(*) AS cnt
+              FROM case_views
+              GROUP BY label
+              ORDER BY cnt DESC
+              LIMIT 10");
+            $topDevices = $q->fetchAll() ?: [];
+          } catch (Throwable $e) {}
+
+          try {
+            $q = $pdo->query("SELECT COALESCE(NULLIF(TRIM(os_name), ''), 'Unknown') AS label, COUNT(*) AS cnt
+              FROM case_views
+              GROUP BY label
+              ORDER BY cnt DESC
+              LIMIT 10");
+            $topOperatingSystems = $q->fetchAll() ?: [];
+          } catch (Throwable $e) {}
+
+          try {
+            $q = $pdo->query("SELECT
+                COALESCE(NULLIF(TRIM(public_ip), ''), 'Unknown') AS ip,
+                COUNT(*) AS cnt,
+                MAX(viewed_at) AS last_seen
+              FROM case_views
+              GROUP BY ip
+              ORDER BY cnt DESC, last_seen DESC
+              LIMIT 20");
+            $topIps = $q->fetchAll() ?: [];
+          } catch (Throwable $e) {}
+
+          $totalViews = (int)($stats['total_views'] ?? 0);
+          $authViews = (int)($stats['auth_views'] ?? 0);
+          $guestViews = (int)($stats['guest_views'] ?? 0);
+          $authPct = $totalViews > 0 ? round(($authViews / $totalViews) * 100, 1) : 0;
+          $guestPct = $totalViews > 0 ? round(($guestViews / $totalViews) * 100, 1) : 0;
+        ?>
+
+        <div class="row g-3 mb-4">
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">Total Views</div>
+              <div class="h4 mb-0"><?php echo number_format($totalViews); ?></div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">Views (24h)</div>
+              <div class="h4 mb-0"><?php echo number_format((int)($stats['views_24h'] ?? 0)); ?></div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">Views (7d)</div>
+              <div class="h4 mb-0"><?php echo number_format((int)($stats['views_7d'] ?? 0)); ?></div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">Cases Viewed</div>
+              <div class="h4 mb-0"><?php echo number_format((int)($stats['unique_cases'] ?? 0)); ?></div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">Unique Logged-In Viewers</div>
+              <div class="h4 mb-0"><?php echo number_format((int)($stats['unique_users'] ?? 0)); ?></div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">Unique Public IPs</div>
+              <div class="h4 mb-0"><?php echo number_format((int)($stats['unique_ips'] ?? 0)); ?></div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">Authenticated Views</div>
+              <div class="h4 mb-0"><?php echo number_format($authViews); ?></div>
+              <div class="small text-secondary"><?php echo $authPct; ?>%</div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">Guest Views</div>
+              <div class="h4 mb-0"><?php echo number_format($guestViews); ?></div>
+              <div class="small text-secondary"><?php echo $guestPct; ?>%</div>
+            </div></div>
+          </div>
+        </div>
+
+        <div class="row g-4 mb-4">
+          <div class="col-lg-7">
+            <div class="card glass h-100">
+              <div class="card-body">
+                <h3 class="h6 mb-3">Most Viewed Cases</h3>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead>
+                      <tr>
+                        <th>Case</th>
+                        <th class="text-end">Views</th>
+                        <th class="text-end">Unique Users</th>
+                        <th class="text-end">Unique IPs</th>
+                        <th>Last Viewed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (!empty($mostViewedCases)): foreach ($mostViewedCases as $mv): ?>
+                        <tr>
+                          <td>
+                            <a class="text-decoration-none" href="?view=case&code=<?php echo urlencode($mv['case_code'] ?? ''); ?>#case-view">
+                              <?php echo htmlspecialchars($mv['case_name'] ?: ($mv['case_code'] ?? 'Case')); ?>
+                            </a>
+                            <div class="small text-secondary"><?php echo htmlspecialchars($mv['case_code'] ?? ''); ?></div>
+                          </td>
+                          <td class="text-end fw-semibold"><?php echo number_format((int)($mv['total_views'] ?? 0)); ?></td>
+                          <td class="text-end"><?php echo number_format((int)($mv['unique_users'] ?? 0)); ?></td>
+                          <td class="text-end"><?php echo number_format((int)($mv['unique_ips'] ?? 0)); ?></td>
+                          <td class="small text-secondary"><?php echo htmlspecialchars($mv['last_viewed_at'] ?? ''); ?></td>
+                        </tr>
+                      <?php endforeach; else: ?>
+                        <tr><td colspan="5" class="text-secondary">No case view data available yet.</td></tr>
+                      <?php endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-5">
+            <div class="card glass h-100">
+              <div class="card-body">
+                <h3 class="h6 mb-3">Top Public IPs</h3>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead>
+                      <tr>
+                        <th>IP</th>
+                        <th class="text-end">Views</th>
+                        <th>Last Seen</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <?php if (!empty($topIps)): foreach ($topIps as $ip): ?>
+                        <tr>
+                          <td class="small"><?php echo htmlspecialchars($ip['ip'] ?? 'Unknown'); ?></td>
+                          <td class="text-end fw-semibold"><?php echo number_format((int)($ip['cnt'] ?? 0)); ?></td>
+                          <td class="small text-secondary"><?php echo htmlspecialchars($ip['last_seen'] ?? ''); ?></td>
+                        </tr>
+                      <?php endforeach; else: ?>
+                        <tr><td colspan="3" class="text-secondary">No IP data available yet.</td></tr>
+                      <?php endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row g-4 mb-4">
+          <div class="col-lg-3 col-md-6">
+            <div class="card glass h-100">
+              <div class="card-body">
+                <h3 class="h6 mb-3">Countries</h3>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle mb-0">
+                    <tbody>
+                      <?php if (!empty($topCountries)): foreach ($topCountries as $x): ?>
+                        <tr><td><?php echo htmlspecialchars($x['label'] ?? 'Unknown'); ?></td><td class="text-end fw-semibold"><?php echo number_format((int)($x['cnt'] ?? 0)); ?></td></tr>
+                      <?php endforeach; else: ?>
+                        <tr><td class="text-secondary">No data</td><td></td></tr>
+                      <?php endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-3 col-md-6">
+            <div class="card glass h-100">
+              <div class="card-body">
+                <h3 class="h6 mb-3">Browsers</h3>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle mb-0">
+                    <tbody>
+                      <?php if (!empty($topBrowsers)): foreach ($topBrowsers as $x): ?>
+                        <tr><td><?php echo htmlspecialchars($x['label'] ?? 'Unknown'); ?></td><td class="text-end fw-semibold"><?php echo number_format((int)($x['cnt'] ?? 0)); ?></td></tr>
+                      <?php endforeach; else: ?>
+                        <tr><td class="text-secondary">No data</td><td></td></tr>
+                      <?php endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-3 col-md-6">
+            <div class="card glass h-100">
+              <div class="card-body">
+                <h3 class="h6 mb-3">Devices</h3>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle mb-0">
+                    <tbody>
+                      <?php if (!empty($topDevices)): foreach ($topDevices as $x): ?>
+                        <tr><td><?php echo htmlspecialchars($x['label'] ?? 'Unknown'); ?></td><td class="text-end fw-semibold"><?php echo number_format((int)($x['cnt'] ?? 0)); ?></td></tr>
+                      <?php endforeach; else: ?>
+                        <tr><td class="text-secondary">No data</td><td></td></tr>
+                      <?php endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="col-lg-3 col-md-6">
+            <div class="card glass h-100">
+              <div class="card-body">
+                <h3 class="h6 mb-3">Operating Systems</h3>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle mb-0">
+                    <tbody>
+                      <?php if (!empty($topOperatingSystems)): foreach ($topOperatingSystems as $x): ?>
+                        <tr><td><?php echo htmlspecialchars($x['label'] ?? 'Unknown'); ?></td><td class="text-end fw-semibold"><?php echo number_format((int)($x['cnt'] ?? 0)); ?></td></tr>
+                      <?php endforeach; else: ?>
+                        <tr><td class="text-secondary">No data</td><td></td></tr>
+                      <?php endif; ?>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card glass">
+          <div class="card-body">
+            <h3 class="h6 mb-3">Detailed Recent Viewer Activity (Last 250 views)</h3>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead>
+                  <tr>
+                    <th>Viewed At</th>
+                    <th>Case</th>
+                    <th>Viewer</th>
+                    <th>Auth</th>
+                    <th>Role</th>
+                    <th>Public IP</th>
+                    <th>Location</th>
+                    <th>Device</th>
+                    <th>Browser</th>
+                    <th>OS</th>
+                    <th>Language</th>
+                    <th>Request</th>
+                    <th>Referrer</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php if (!empty($recentViews)): foreach ($recentViews as $rv): ?>
+                    <tr>
+                      <td class="small"><?php echo htmlspecialchars($rv['viewed_at'] ?? ''); ?></td>
+                      <td>
+                        <a class="text-decoration-none" href="?view=case&code=<?php echo urlencode($rv['case_code'] ?? ''); ?>#case-view"><?php echo htmlspecialchars($rv['case_code'] ?? ''); ?></a>
+                        <div class="small text-secondary"><?php echo htmlspecialchars($rv['case_name'] ?? ''); ?></div>
+                      </td>
+                      <td>
+                        <?php if (!empty($rv['viewer_user_id'])): ?>
+                          <div class="small fw-semibold"><?php echo htmlspecialchars($rv['viewer_display_name'] ?: ('User #'.$rv['viewer_user_id'])); ?></div>
+                          <div class="small text-secondary"><?php echo htmlspecialchars($rv['viewer_email'] ?? ''); ?></div>
+                        <?php else: ?>
+                          <span class="small text-secondary">Anonymous / Guest</span>
+                        <?php endif; ?>
+                      </td>
+                      <td><?php echo ((int)($rv['is_authenticated'] ?? 0) === 1) ? '<span class="badge bg-success-subtle border">Yes</span>' : '<span class="badge bg-secondary">No</span>'; ?></td>
+                      <td class="small"><?php echo htmlspecialchars($rv['viewer_role'] ?? 'guest'); ?></td>
+                      <td class="small"><?php echo htmlspecialchars($rv['public_ip'] ?? ''); ?></td>
+                      <td class="small"><?php echo htmlspecialchars(trim(($rv['geo_country'] ?? '').' '.($rv['geo_region'] ?? '').' '.($rv['geo_city'] ?? '')) ?: 'Unknown'); ?></td>
+                      <td class="small"><?php echo htmlspecialchars($rv['device_type'] ?? 'Unknown'); ?></td>
+                      <td class="small"><?php echo htmlspecialchars(trim(($rv['browser_name'] ?? '').' '.($rv['browser_version'] ?? '')) ?: 'Unknown'); ?></td>
+                      <td class="small"><?php echo htmlspecialchars($rv['os_name'] ?? 'Unknown'); ?></td>
+                      <td class="small"><?php echo htmlspecialchars($rv['accept_language'] ?? ''); ?></td>
+                      <td class="small"><span class="text-secondary"><?php echo htmlspecialchars(($rv['request_method'] ?? 'GET').' '.($rv['request_uri'] ?? '')); ?></span></td>
+                      <td class="small text-break" style="max-width: 260px;"><?php echo htmlspecialchars($rv['referer'] ?? ''); ?></td>
+                    </tr>
+                  <?php endforeach; else: ?>
+                    <tr><td colspan="13" class="text-secondary">No viewer activity has been recorded yet.</td></tr>
+                  <?php endif; ?>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      <?php endif; ?>
+    </div>
+  </main>
+  <?php endif; ?>
+
   <?php if ($view === 'case'): ?>
     <?php
       $caseCode = trim($_GET['code'] ?? '');
-      $viewCase = null; $viewCaseId = 0; $viewEv = [];
+      $viewCase = null; $viewCaseId = 0; $viewEv = []; $viewTotalViews = 0;
       if ($caseCode !== '') {
         try {
           $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
@@ -2856,6 +3464,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
         } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         if ($viewCaseId > 0) {
+          log_case_view($pdo, $viewCaseId);
+          $viewTotalViews = get_case_view_count($pdo, $viewCaseId);
           try {
             $st2 = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC');
             $st2->execute([$viewCaseId]);
@@ -2887,7 +3497,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
     <section class="py-5 border-top" id="case-view">
       <div class="container-xl">
         <div class="d-flex align-items-center justify-content-between mb-3">
-          <h2 class="h4 mb-0">Case <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
+          <div>
+            <h2 class="h4 mb-0">Case <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
+            <?php if ($viewCaseId > 0): ?>
+              <div class="small text-secondary">Total views: <?php echo (int)$viewTotalViews; ?></div>
+            <?php endif; ?>
+          </div>
           <div class="d-flex gap-2">
 <?php if ($tp_canAddEvidence): ?>
             <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence</button>
@@ -3410,7 +4025,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
   $adminCaseCode = $_GET['admin_case'] ?? '';
   if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')) {
       // Fetch case meta
-      $caseRow = null; $caseId = 0;
+      $caseRow = null; $caseId = 0; $adminCaseTotalViews = 0;
       try {
           $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
           $s->execute([$adminCaseCode]);
@@ -3419,6 +4034,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       } catch (Throwable $e) {
           $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
+      }
+      if ($caseId > 0) {
+        log_case_view($pdo, $caseId);
+        $adminCaseTotalViews = get_case_view_count($pdo, $caseId);
       }
       // Fetch notes
       $notes = [];
@@ -3444,7 +4063,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 <section class="py-5 border-top" id="admin-case">
   <div class="container-xl">
     <div class="d-flex align-items-center justify-content-between mb-3">
-      <h2 class="h4 mb-0">Admin: Case <?php echo htmlspecialchars($adminCaseCode); ?></h2>
+      <div>
+        <h2 class="h4 mb-0">Admin: Case <?php echo htmlspecialchars($adminCaseCode); ?></h2>
+        <?php if ($caseId > 0): ?>
+          <div class="small text-secondary">Total views: <?php echo (int)$adminCaseTotalViews; ?></div>
+        <?php endif; ?>
+      </div>
       <a class="btn btn-outline-light btn-sm" href="#cases"><i class="bi bi-grid-1x2 me-1"></i> Back to dashboard</a>
     </div>
 
