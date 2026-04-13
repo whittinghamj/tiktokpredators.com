@@ -2451,6 +2451,7 @@ try {
     $stmt = $pdo->prepare("
       SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
              COALESCE(ev.cnt, 0) AS evidence_count,
+             COALESCE(cv.cnt, 0) AS case_view_count,
              COALESCE(ev.last_added, c.opened_at) AS last_activity
       FROM cases c
       LEFT JOIN (
@@ -2458,6 +2459,11 @@ try {
         FROM evidence
         GROUP BY case_id
       ) ev ON ev.case_id = c.id
+      LEFT JOIN (
+        SELECT case_id, COUNT(*) AS cnt
+        FROM case_views
+        GROUP BY case_id
+      ) cv ON cv.case_id = c.id
       WHERE c.status <> 'Pending'
         AND (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ?)
       ORDER BY last_activity DESC
@@ -2468,6 +2474,7 @@ try {
   } else {
     $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
                    COALESCE(ev.cnt, 0) AS evidence_count,
+                   COALESCE(cv.cnt, 0) AS case_view_count,
                    COALESCE(ev.last_added, c.opened_at) AS last_activity
             FROM cases c
             LEFT JOIN (
@@ -2475,6 +2482,11 @@ try {
               FROM evidence
               GROUP BY case_id
             ) ev ON ev.case_id = c.id
+            LEFT JOIN (
+              SELECT case_id, COUNT(*) AS cnt
+              FROM case_views
+              GROUP BY case_id
+            ) cv ON cv.case_id = c.id
             WHERE c.status <> 'Pending'
             ORDER BY last_activity DESC
             LIMIT 1000";
@@ -2495,6 +2507,7 @@ if ($rs && count($rs) > 0):
     $sum   = trim($row['initial_summary'] ?? '');
     $sum   = $sum !== '' ? mb_strimwidth($sum, 0, 180, '…', 'UTF-8') : 'No summary provided.';
     $evc   = (int)($row['evidence_count'] ?? 0);
+    $vwc   = (int)($row['case_view_count'] ?? 0);
     $status= $row['status'] ?? 'Open';
     $sens  = $row['sensitivity'] ?? 'Standard';
     $opened= $row['opened_at'] ?? '';
@@ -2550,6 +2563,7 @@ if ($rs && count($rs) > 0):
         <p class="small mt-3 mb-2 text-secondary"><?php echo htmlspecialchars($sum); ?></p>
         <div class="mt-2 d-flex gap-2 flex-wrap">
           <span class="badge text-bg-dark border"><i class="bi bi-files me-1"></i><?php echo $evc; ?> evidence</span>
+          <span class="badge text-bg-dark border"><i class="bi bi-eye me-1"></i><?php echo $vwc; ?> views</span>
           <span class="badge text-bg-dark border"><i class="bi bi-shield-lock me-1"></i><?php echo htmlspecialchars($sens); ?></span>
           <span class="badge text-bg-dark border" title="Last activity">
             <i class="bi bi-clock-history me-1"></i><?php echo htmlspecialchars(date('d M Y H:i', strtotime($last))); ?>
