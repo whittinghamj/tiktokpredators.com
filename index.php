@@ -2563,11 +2563,11 @@ if ($rs && count($rs) > 0):
         <p class="small mt-3 mb-2 text-secondary"><?php echo htmlspecialchars($sum); ?></p>
         <div class="mt-2 d-flex gap-2 flex-wrap">
           <span class="badge text-bg-dark border"><i class="bi bi-files me-1"></i><?php echo $evc; ?> evidence</span>
-          <span class="badge text-bg-dark border"><i class="bi bi-eye me-1"></i><?php echo $vwc; ?> views</span>
           <span class="badge text-bg-dark border"><i class="bi bi-shield-lock me-1"></i><?php echo htmlspecialchars($sens); ?></span>
           <span class="badge text-bg-dark border" title="Last activity">
             <i class="bi bi-clock-history me-1"></i><?php echo htmlspecialchars(date('d M Y H:i', strtotime($last))); ?>
           </span>
+          <span class="badge text-bg-dark border"><i class="bi bi-eye me-1"></i><?php echo $vwc; ?> views</span>
         </div>
       </div>
       <div class="card-footer d-flex justify-content-between align-items-center small">
