@@ -1661,6 +1661,13 @@ if (isset($_GET['logout'])) {
     .evidence-modal img,
     .evidence-modal video,
     .evidence-modal iframe { width: 100%; height: auto; display: block; object-fit: contain; }
+    .evidence-modal #evPreview img {
+      width: auto;
+      max-width: 100%;
+      max-height: 75vh;
+      margin: 0 auto;
+      object-fit: contain;
+    }
     
     /* Restricted-mode media blurring (non-admins on Restricted cases) */
     footer a { color: inherit }
