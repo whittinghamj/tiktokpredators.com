@@ -1188,6 +1188,24 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
 
     $mime = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
     $size = filesize($destAbs) ?: 0;
+    $extLower = strtolower((string)pathinfo($safeName, PATHINFO_EXTENSION));
+
+    // Enforce browser-compatible video containers for evidence type=video.
+    if ($type === 'video') {
+      $allowedVideoExts = ['mp4', 'webm', 'ogg', 'ogv', 'm4v'];
+      $allowedVideoMimes = ['video/mp4', 'video/webm', 'video/ogg', 'application/ogg'];
+      $mimeLower = strtolower((string)$mime);
+      $extOk = in_array($extLower, $allowedVideoExts, true);
+      $mimeOk = (strpos($mimeLower, 'video/') === 0) || in_array($mimeLower, $allowedVideoMimes, true);
+      if (!$extOk || !$mimeOk) {
+        if (is_file($destAbs)) { @unlink($destAbs); }
+        flash('error', 'Unsupported video format. Please upload MP4, WebM, or OGG/OGV video files.');
+        $redirUrl = trim($_POST['redirect_url'] ?? '');
+        if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+      }
+    }
+
     // $hash is already set above
     // Deduplicate by file content hash before insert
     try {
@@ -3702,13 +3720,15 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     <label class="form-label">Type</label>
                     <select name="type" class="form-select">
                       <option value="image">Image</option>
+                      <option value="video">Video</option>
                       <option value="pdf">PDF</option>
                       <option value="url">URL (no file)</option>
                     </select>
                   </div>
                   <div class="col-md-4">
                     <label class="form-label">File</label>
-                    <input type="file" name="evidence_file" class="form-control" accept="image/*,application/pdf" required>
+                    <input type="file" name="evidence_file" class="form-control" accept="image/*,video/mp4,video/webm,video/ogg,application/pdf" required>
+                    <div class="form-text">Video uploads: MP4, WebM, OGG/OGV only.</div>
                   </div>
                 </div>
               </form>
@@ -4184,7 +4204,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 </div>
                 <div class="col-md-5">
                   <label class="form-label">File</label>
-                  <input type="file" name="evidence_file" class="form-control" required>
+                  <input type="file" name="evidence_file" class="form-control" accept="image/*,video/mp4,video/webm,video/ogg,audio/*,application/pdf,.doc,.docx,.txt" required>
+                  <div class="form-text">Video uploads: MP4, WebM, OGG/OGV only.</div>
                 </div>
               </div>
               <div class="text-end mt-2"><button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button></div>
@@ -4758,7 +4779,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             img.className = 'img-fluid rounded';
             preview.appendChild(img);
           } else if (type === 'video' || mime.indexOf('video/') === 0) {
-            preview.innerHTML = '<video controls class="w-100 h-100"><source src="'+safeSrc+'" type="'+mime+'"></video>';
+            preview.innerHTML = '<video controls playsinline preload="metadata" class="w-100 h-100"><source src="'+safeSrc+'" type="'+mime+'">Your browser does not support the HTML5 video element.</video>';
           } else if (type === 'audio' || mime.indexOf('audio/') === 0) {
             preview.classList.remove('ratio','ratio-16x9');
             preview.innerHTML = '<audio controls class="w-100"><source src="'+safeSrc+'" type="'+mime+'"></audio>';
