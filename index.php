@@ -217,9 +217,29 @@ try {
       session_key CHAR(64) NULL,
       public_ip VARCHAR(45) NULL,
       forwarded_for VARCHAR(255) NULL,
+      geo_ip VARCHAR(45) NULL,
+      geo_continent_name VARCHAR(64) NULL,
+      geo_continent_code CHAR(2) NULL,
+      geo_country_name VARCHAR(128) NULL,
       geo_country CHAR(2) NULL,
+      geo_region_code VARCHAR(16) NULL,
       geo_region VARCHAR(128) NULL,
       geo_city VARCHAR(128) NULL,
+      geo_district VARCHAR(128) NULL,
+      geo_postcode VARCHAR(32) NULL,
+      geo_lat DECIMAL(10,6) NULL,
+      geo_lon DECIMAL(10,6) NULL,
+      geo_timezone VARCHAR(64) NULL,
+      geo_utc_offset INT NULL,
+      geo_currency VARCHAR(8) NULL,
+      net_isp VARCHAR(255) NULL,
+      net_org VARCHAR(255) NULL,
+      net_as VARCHAR(255) NULL,
+      net_as_name VARCHAR(255) NULL,
+      net_reverse_dns VARCHAR(255) NULL,
+      is_mobile TINYINT(1) NULL,
+      is_proxy TINYINT(1) NULL,
+      is_hosting TINYINT(1) NULL,
       geo_source VARCHAR(64) NULL,
       device_type VARCHAR(32) NULL,
       os_name VARCHAR(64) NULL,
@@ -234,9 +254,54 @@ try {
       INDEX idx_case_id_viewed_at (case_id, viewed_at),
       INDEX idx_viewer_user (viewer_user_id),
       INDEX idx_public_ip (public_ip),
+      INDEX idx_geo_ip (geo_ip),
       INDEX idx_geo_country (geo_country)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   ");
+
+  // Safe schema migration for existing installations.
+  $caseViewColumns = [
+    'geo_ip' => "ALTER TABLE case_views ADD COLUMN geo_ip VARCHAR(45) NULL AFTER forwarded_for",
+    'geo_continent_name' => "ALTER TABLE case_views ADD COLUMN geo_continent_name VARCHAR(64) NULL AFTER geo_ip",
+    'geo_continent_code' => "ALTER TABLE case_views ADD COLUMN geo_continent_code CHAR(2) NULL AFTER geo_continent_name",
+    'geo_country_name' => "ALTER TABLE case_views ADD COLUMN geo_country_name VARCHAR(128) NULL AFTER geo_continent_code",
+    'geo_region_code' => "ALTER TABLE case_views ADD COLUMN geo_region_code VARCHAR(16) NULL AFTER geo_country",
+    'geo_district' => "ALTER TABLE case_views ADD COLUMN geo_district VARCHAR(128) NULL AFTER geo_city",
+    'geo_postcode' => "ALTER TABLE case_views ADD COLUMN geo_postcode VARCHAR(32) NULL AFTER geo_district",
+    'geo_lat' => "ALTER TABLE case_views ADD COLUMN geo_lat DECIMAL(10,6) NULL AFTER geo_postcode",
+    'geo_lon' => "ALTER TABLE case_views ADD COLUMN geo_lon DECIMAL(10,6) NULL AFTER geo_lat",
+    'geo_timezone' => "ALTER TABLE case_views ADD COLUMN geo_timezone VARCHAR(64) NULL AFTER geo_lon",
+    'geo_utc_offset' => "ALTER TABLE case_views ADD COLUMN geo_utc_offset INT NULL AFTER geo_timezone",
+    'geo_currency' => "ALTER TABLE case_views ADD COLUMN geo_currency VARCHAR(8) NULL AFTER geo_utc_offset",
+    'net_isp' => "ALTER TABLE case_views ADD COLUMN net_isp VARCHAR(255) NULL AFTER geo_currency",
+    'net_org' => "ALTER TABLE case_views ADD COLUMN net_org VARCHAR(255) NULL AFTER net_isp",
+    'net_as' => "ALTER TABLE case_views ADD COLUMN net_as VARCHAR(255) NULL AFTER net_org",
+    'net_as_name' => "ALTER TABLE case_views ADD COLUMN net_as_name VARCHAR(255) NULL AFTER net_as",
+    'net_reverse_dns' => "ALTER TABLE case_views ADD COLUMN net_reverse_dns VARCHAR(255) NULL AFTER net_as_name",
+    'is_mobile' => "ALTER TABLE case_views ADD COLUMN is_mobile TINYINT(1) NULL AFTER net_reverse_dns",
+    'is_proxy' => "ALTER TABLE case_views ADD COLUMN is_proxy TINYINT(1) NULL AFTER is_mobile",
+    'is_hosting' => "ALTER TABLE case_views ADD COLUMN is_hosting TINYINT(1) NULL AFTER is_proxy",
+  ];
+
+  foreach ($caseViewColumns as $colName => $alterSql) {
+    try {
+      $col = $pdo->query("SHOW COLUMNS FROM case_views LIKE " . $pdo->quote($colName));
+      if (!$col || !$col->fetch()) {
+        $pdo->exec($alterSql);
+      }
+    } catch (Throwable $e) {
+      $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+    }
+  }
+
+  try {
+    $idx = $pdo->query("SHOW INDEX FROM case_views WHERE Key_name = 'idx_geo_ip'");
+    if (!$idx || !$idx->fetch()) {
+      $pdo->exec("ALTER TABLE case_views ADD INDEX idx_geo_ip (geo_ip)");
+    }
+  } catch (Throwable $e) {
+    $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+  }
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
@@ -347,6 +412,86 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
       return [$country, $region, $city, $source];
     }
 
+    function tp_geo_lookup_api(string $ip): ?array {
+      static $cache = [];
+
+      $ip = trim($ip);
+      if ($ip === '' || !filter_var($ip, FILTER_VALIDATE_IP)) {
+        return null;
+      }
+
+      if (array_key_exists($ip, $cache)) {
+        return $cache[$ip];
+      }
+
+      $isPublicIp = filter_var(
+        $ip,
+        FILTER_VALIDATE_IP,
+        FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
+      ) !== false;
+      if (!$isPublicIp) {
+        $cache[$ip] = null;
+        return null;
+      }
+
+      $url = 'https://tiktokpredators.com/geoip.php?ip=' . rawurlencode($ip);
+      $ch = curl_init();
+      curl_setopt_array($ch, [
+        CURLOPT_URL => $url,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_CONNECTTIMEOUT => 2,
+        CURLOPT_TIMEOUT => 4,
+        CURLOPT_FAILONERROR => false,
+        CURLOPT_USERAGENT => 'tiktokpredators-case-view-geo/1.0',
+      ]);
+
+      $response = curl_exec($ch);
+      $curlErr = curl_error($ch);
+      $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+      curl_close($ch);
+
+      if ($response === false || $curlErr !== '' || $httpCode < 200 || $httpCode >= 300) {
+        $cache[$ip] = null;
+        return null;
+      }
+
+      $payload = json_decode($response, true);
+      if (!is_array($payload) || empty($payload['success']) || !is_array($payload['data'] ?? null)) {
+        $cache[$ip] = null;
+        return null;
+      }
+
+      $data = $payload['data'];
+      $cache[$ip] = [
+        'geo_ip' => (string)($data['ip'] ?? $ip),
+        'geo_continent_name' => trim((string)($data['continent']['name'] ?? '')),
+        'geo_continent_code' => strtoupper(substr(trim((string)($data['continent']['code'] ?? '')), 0, 2)),
+        'geo_country_name' => trim((string)($data['country']['name'] ?? '')),
+        'geo_country' => strtoupper(substr(trim((string)($data['country']['code'] ?? '')), 0, 2)),
+        'geo_region_code' => trim((string)($data['region']['code'] ?? '')),
+        'geo_region' => trim((string)($data['region']['name'] ?? '')),
+        'geo_city' => trim((string)($data['city'] ?? '')),
+        'geo_district' => trim((string)($data['district'] ?? '')),
+        'geo_postcode' => trim((string)($data['postcode'] ?? '')),
+        'geo_lat' => isset($data['location']['lat']) ? (float)$data['location']['lat'] : null,
+        'geo_lon' => isset($data['location']['lon']) ? (float)$data['location']['lon'] : null,
+        'geo_timezone' => trim((string)($data['location']['timezone'] ?? '')),
+        'geo_utc_offset' => isset($data['location']['utc_offset']) ? (int)$data['location']['utc_offset'] : null,
+        'geo_currency' => trim((string)($data['currency'] ?? '')),
+        'net_isp' => trim((string)($data['network']['isp'] ?? '')),
+        'net_org' => trim((string)($data['network']['org'] ?? '')),
+        'net_as' => trim((string)($data['network']['as'] ?? '')),
+        'net_as_name' => trim((string)($data['network']['as_name'] ?? '')),
+        'net_reverse_dns' => trim((string)($data['network']['reverse_dns'] ?? '')),
+        'is_mobile' => isset($data['flags']['mobile']) ? ((bool)$data['flags']['mobile'] ? 1 : 0) : null,
+        'is_proxy' => isset($data['flags']['proxy']) ? ((bool)$data['flags']['proxy'] ? 1 : 0) : null,
+        'is_hosting' => isset($data['flags']['hosting']) ? ((bool)$data['flags']['hosting'] ? 1 : 0) : null,
+        'geo_source' => 'geoip.php',
+      ];
+
+      return $cache[$ip];
+    }
+
     function log_case_view(PDO $pdo, int $caseId): void {
       static $loggedCaseIds = [];
       if ($caseId <= 0 || isset($loggedCaseIds[$caseId])) { return; }
@@ -356,14 +501,68 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
         [$publicIp, $forwardedFor] = tp_client_ip();
         $ua = trim((string)($_SERVER['HTTP_USER_AGENT'] ?? ''));
         [$deviceType, $osName, $browserName, $browserVersion] = tp_parse_user_agent($ua);
-        [$geoCountry, $geoRegion, $geoCity, $geoSource] = tp_geo_from_headers();
+        [$hdrGeoCountry, $hdrGeoRegion, $hdrGeoCity, $hdrGeoSource] = tp_geo_from_headers();
+        $geo = tp_geo_lookup_api($publicIp);
+
+        $geoIp = $publicIp;
+        $geoCountry = $hdrGeoCountry;
+        $geoRegion = $hdrGeoRegion;
+        $geoCity = $hdrGeoCity;
+        $geoSource = $hdrGeoSource;
+
+        $geoContinentName = '';
+        $geoContinentCode = '';
+        $geoCountryName = '';
+        $geoRegionCode = '';
+        $geoDistrict = '';
+        $geoPostcode = '';
+        $geoLat = null;
+        $geoLon = null;
+        $geoTimezone = '';
+        $geoUtcOffset = null;
+        $geoCurrency = '';
+        $netIsp = '';
+        $netOrg = '';
+        $netAs = '';
+        $netAsName = '';
+        $netReverseDns = '';
+        $isMobile = null;
+        $isProxy = null;
+        $isHosting = null;
+
+        if (is_array($geo)) {
+          $geoIp = trim((string)($geo['geo_ip'] ?? $geoIp));
+          $geoContinentName = trim((string)($geo['geo_continent_name'] ?? ''));
+          $geoContinentCode = trim((string)($geo['geo_continent_code'] ?? ''));
+          $geoCountryName = trim((string)($geo['geo_country_name'] ?? ''));
+          $geoCountry = trim((string)($geo['geo_country'] ?? $geoCountry));
+          $geoRegionCode = trim((string)($geo['geo_region_code'] ?? ''));
+          $geoRegion = trim((string)($geo['geo_region'] ?? $geoRegion));
+          $geoCity = trim((string)($geo['geo_city'] ?? $geoCity));
+          $geoDistrict = trim((string)($geo['geo_district'] ?? ''));
+          $geoPostcode = trim((string)($geo['geo_postcode'] ?? ''));
+          $geoLat = $geo['geo_lat'];
+          $geoLon = $geo['geo_lon'];
+          $geoTimezone = trim((string)($geo['geo_timezone'] ?? ''));
+          $geoUtcOffset = $geo['geo_utc_offset'];
+          $geoCurrency = trim((string)($geo['geo_currency'] ?? ''));
+          $netIsp = trim((string)($geo['net_isp'] ?? ''));
+          $netOrg = trim((string)($geo['net_org'] ?? ''));
+          $netAs = trim((string)($geo['net_as'] ?? ''));
+          $netAsName = trim((string)($geo['net_as_name'] ?? ''));
+          $netReverseDns = trim((string)($geo['net_reverse_dns'] ?? ''));
+          $isMobile = isset($geo['is_mobile']) ? (int)$geo['is_mobile'] : null;
+          $isProxy = isset($geo['is_proxy']) ? (int)$geo['is_proxy'] : null;
+          $isHosting = isset($geo['is_hosting']) ? (int)$geo['is_hosting'] : null;
+          $geoSource = trim((string)($geo['geo_source'] ?? $geoSource));
+        }
 
         $viewerId = (int)($_SESSION['user']['id'] ?? 0);
         $viewerRole = trim((string)($_SESSION['user']['role'] ?? 'guest'));
         $isAuthed = !empty($_SESSION['user']) ? 1 : 0;
         $sessionKey = session_id() !== '' ? hash('sha256', session_id()) : null;
 
-        $stmt = $pdo->prepare('INSERT INTO case_views (case_id, viewer_user_id, viewer_role, is_authenticated, session_key, public_ip, forwarded_for, geo_country, geo_region, geo_city, geo_source, device_type, os_name, browser_name, browser_version, user_agent, accept_language, referer, request_uri, request_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $stmt = $pdo->prepare('INSERT INTO case_views (case_id, viewer_user_id, viewer_role, is_authenticated, session_key, public_ip, forwarded_for, geo_ip, geo_continent_name, geo_continent_code, geo_country_name, geo_country, geo_region_code, geo_region, geo_city, geo_district, geo_postcode, geo_lat, geo_lon, geo_timezone, geo_utc_offset, geo_currency, net_isp, net_org, net_as, net_as_name, net_reverse_dns, is_mobile, is_proxy, is_hosting, geo_source, device_type, os_name, browser_name, browser_version, user_agent, accept_language, referer, request_uri, request_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
           $caseId,
           $viewerId > 0 ? $viewerId : null,
@@ -372,9 +571,29 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
           $sessionKey,
           $publicIp !== '' ? substr($publicIp, 0, 45) : null,
           $forwardedFor !== '' ? substr($forwardedFor, 0, 255) : null,
+          $geoIp !== '' ? substr($geoIp, 0, 45) : null,
+          $geoContinentName !== '' ? substr($geoContinentName, 0, 64) : null,
+          $geoContinentCode !== '' ? substr($geoContinentCode, 0, 2) : null,
+          $geoCountryName !== '' ? substr($geoCountryName, 0, 128) : null,
           $geoCountry !== '' ? substr($geoCountry, 0, 2) : null,
+          $geoRegionCode !== '' ? substr($geoRegionCode, 0, 16) : null,
           $geoRegion !== '' ? substr($geoRegion, 0, 128) : null,
           $geoCity !== '' ? substr($geoCity, 0, 128) : null,
+          $geoDistrict !== '' ? substr($geoDistrict, 0, 128) : null,
+          $geoPostcode !== '' ? substr($geoPostcode, 0, 32) : null,
+          $geoLat,
+          $geoLon,
+          $geoTimezone !== '' ? substr($geoTimezone, 0, 64) : null,
+          $geoUtcOffset,
+          $geoCurrency !== '' ? substr($geoCurrency, 0, 8) : null,
+          $netIsp !== '' ? substr($netIsp, 0, 255) : null,
+          $netOrg !== '' ? substr($netOrg, 0, 255) : null,
+          $netAs !== '' ? substr($netAs, 0, 255) : null,
+          $netAsName !== '' ? substr($netAsName, 0, 255) : null,
+          $netReverseDns !== '' ? substr($netReverseDns, 0, 255) : null,
+          $isMobile,
+          $isProxy,
+          $isHosting,
           $geoSource !== '' ? substr($geoSource, 0, 64) : null,
           $deviceType,
           $osName,
