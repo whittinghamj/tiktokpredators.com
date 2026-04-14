@@ -155,6 +155,15 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     flash('error', 'Database connection failed. Please check configuration.');
     $_SESSION['auth_tab'] = 'register';
 }
+  // --- Cases schema safety: ensure location column exists ---
+  try {
+    $col = $pdo->query("SHOW COLUMNS FROM cases LIKE 'location'");
+    if (!$col || !$col->fetch()) {
+      $pdo->exec("ALTER TABLE cases ADD COLUMN location VARCHAR(255) NULL AFTER person_name");
+    }
+  } catch (Throwable $e) {
+    $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+  }
 // --- Case events logging setup ---
 try {
     $pdo->exec("
@@ -662,6 +671,7 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
     // Collect & validate basic inputs
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
+    $location = trim($_POST['location'] ?? '');
     $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
     $initial_summary = trim($_POST['initial_summary'] ?? '');
 
@@ -674,11 +684,12 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
 
     try {
         $case_code = generate_case_code($pdo);
-        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
         $stmt->execute([
             $case_code,
             $case_name,
             ($person_name !== '' ? $person_name : null),
+          ($location !== '' ? $location : null),
             ($tiktok_username !== '' ? $tiktok_username : null),
             $initial_summary,
             'Standard',
@@ -729,6 +740,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
     // Collect & validate inputs
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
+    $location = trim($_POST['location'] ?? '');
     $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
     $initial_summary = trim($_POST['initial_summary'] ?? '');
     $sensitivity = $_POST['sensitivity'] ?? '';
@@ -758,11 +770,12 @@ if (($_POST['action'] ?? '') === 'create_case') {
 
     try {
         $case_code = generate_case_code($pdo);
-        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
         $stmt->execute([
             $case_code,
             $case_name,
             ($person_name !== '' ? $person_name : null),
+          ($location !== '' ? $location : null),
             ($tiktok_username !== '' ? $tiktok_username : null),
             $initial_summary,
             $sensitivity,
@@ -823,6 +836,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $case_code = trim($_POST['case_code'] ?? '');
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
+    $location = trim($_POST['location'] ?? '');
     $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
     $initial_summary = trim($_POST['initial_summary'] ?? '');
     $sensitivity = $_POST['sensitivity'] ?? '';
@@ -844,7 +858,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
 
     // Fetch current values to compute diffs
     $prev = [];
-    try { $ps = $pdo->prepare('SELECT case_name, person_name, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; } catch (Throwable $e) {}
+    try { $ps = $pdo->prepare('SELECT case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; } catch (Throwable $e) {}
 
     // Optional: update person photo
     if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
@@ -869,10 +883,11 @@ if (($_POST['action'] ?? '') === 'update_case') {
     }
 
     try {
-        $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
+        $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, location = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
         $u->execute([
             $case_name,
             ($person_name !== '' ? $person_name : null),
+          ($location !== '' ? $location : null),
             ($tiktok_username !== '' ? $tiktok_username : null),
             $initial_summary,
             $sensitivity,
@@ -881,10 +896,11 @@ if (($_POST['action'] ?? '') === 'update_case') {
         ]);
         // Build diff summary
         $changes = [];
-        $fields = ['case_name','person_name','tiktok_username','initial_summary','sensitivity','status'];
+        $fields = ['case_name','person_name','location','tiktok_username','initial_summary','sensitivity','status'];
         $newVals = [
             'case_name' => $case_name,
             'person_name' => ($person_name !== '' ? $person_name : null),
+          'location' => ($location !== '' ? $location : null),
             'tiktok_username' => ($tiktok_username !== '' ? $tiktok_username : null),
             'initial_summary' => $initial_summary,
             'sensitivity' => $sensitivity,
@@ -2222,7 +2238,7 @@ document.addEventListener('DOMContentLoaded', function(){
       $case_code_param = trim($_GET['code'] ?? '');
       if ($case_code_param !== '') {
           try {
-              $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE case_code = ? LIMIT 1');
+              $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE case_code = ? LIMIT 1');
               $stmt->execute([$case_code_param]);
               $caseRow = $stmt->fetch();
           } catch (Throwable $e) { $caseRow = null; }
@@ -2262,6 +2278,12 @@ document.addEventListener('DOMContentLoaded', function(){
                               <div class="col-md-6 mb-3">
                                 <label class="form-label">Person Name</label>
                                 <input type="text" name="person_name" class="form-control" value="<?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?>">
+                              </div>
+                            </div>
+                            <div class="row">
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">Location</label>
+                                <input type="text" name="location" class="form-control" value="<?php echo htmlspecialchars($caseRow['location'] ?? ''); ?>" placeholder="City, region, or country">
                               </div>
                             </div>
                             <div class="row">
@@ -2647,6 +2669,12 @@ if ($rs && count($rs) > 0):
                       <label class="form-label">Person Name</label>
                       <input type="text" name="person_name" class="form-control">
                     </div>
+                    <div class="col-md-6 mb-3">
+                      <label class="form-label">Location</label>
+                      <input type="text" name="location" class="form-control" placeholder="City, region, or country">
+                    </div>
+                  </div>
+                  <div class="row">
                     <div class="col-md-6 mb-3">
                       <label class="form-label">TikTok Username</label>
                       <div class="input-group">
@@ -3496,7 +3524,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       $viewCase = null; $viewCaseId = 0; $viewEv = []; $viewTotalViews = 0;
       if ($caseCode !== '') {
         try {
-          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
+          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
           $viewCaseId = (int)($viewCase['id'] ?? 0);
@@ -3535,9 +3563,16 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
     ?>
     <section class="py-5 border-top" id="case-view">
       <div class="container-xl">
+        <?php
+          $tp_headerName = trim((string)($viewCase['person_name'] ?? ''));
+          if ($tp_headerName === '') { $tp_headerName = trim((string)($viewCase['case_name'] ?? '')); }
+          if ($tp_headerName === '') { $tp_headerName = 'Unknown'; }
+          $tp_headerLocation = trim((string)($viewCase['location'] ?? ''));
+          if ($tp_headerLocation === '') { $tp_headerLocation = 'Unknown Location'; }
+        ?>
         <div class="d-flex align-items-center justify-content-between mb-3">
           <div>
-            <h2 class="h4 mb-0">Case <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
+            <h2 class="h4 mb-0"><?php echo htmlspecialchars($tp_headerName); ?> | <?php echo htmlspecialchars($tp_headerLocation); ?> | <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
             <?php if ($viewCaseId > 0): ?>
               <div class="small text-secondary">Total views: <?php echo (int)$viewTotalViews; ?></div>
             <?php endif; ?>
@@ -3826,6 +3861,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                           <div><?php echo htmlspecialchars($viewCase['person_name'] ?? ''); ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Location</div>
+                          <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars($viewCase['location']) : '<span class="text-secondary">—</span>'; ?></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">TikTok Username</div>
                           <div><?php echo $viewCase['tiktok_username'] ? '@'.htmlspecialchars($viewCase['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
                         </div>
@@ -4019,6 +4058,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 <label class="form-label">Person Name</label>
                 <input type="text" name="person_name" class="form-control" value="<?php echo htmlspecialchars($viewCase['person_name'] ?? ''); ?>">
               </div>
+              <div class="col-md-6">
+                <label class="form-label">Location</label>
+                <input type="text" name="location" class="form-control" value="<?php echo htmlspecialchars($viewCase['location'] ?? ''); ?>" placeholder="City, region, or country">
+              </div>
+            </div>
+            <div class="row g-2 mt-2">
               <div class="col-md-3">
                 <label class="form-label">Sensitivity</label>
                 <select name="sensitivity" class="form-select" required>
@@ -4068,7 +4113,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       // Fetch case meta
       $caseRow = null; $caseId = 0; $adminCaseTotalViews = 0;
       try {
-          $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
+          $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
           $s->execute([$adminCaseCode]);
           $caseRow = $s->fetch();
           $caseId = (int)($caseRow['id'] ?? 0);
@@ -4103,9 +4148,16 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
   ?>
 <section class="py-5 border-top" id="admin-case">
   <div class="container-xl">
+    <?php
+      $tp_adminHeaderName = trim((string)($caseRow['person_name'] ?? ''));
+      if ($tp_adminHeaderName === '') { $tp_adminHeaderName = trim((string)($caseRow['case_name'] ?? '')); }
+      if ($tp_adminHeaderName === '') { $tp_adminHeaderName = 'Unknown'; }
+      $tp_adminHeaderLocation = trim((string)($caseRow['location'] ?? ''));
+      if ($tp_adminHeaderLocation === '') { $tp_adminHeaderLocation = 'Unknown Location'; }
+    ?>
     <div class="d-flex align-items-center justify-content-between mb-3">
       <div>
-        <h2 class="h4 mb-0">Admin: Case <?php echo htmlspecialchars($adminCaseCode); ?></h2>
+        <h2 class="h4 mb-0">Admin: <?php echo htmlspecialchars($tp_adminHeaderName); ?> | <?php echo htmlspecialchars($tp_adminHeaderLocation); ?> | <?php echo htmlspecialchars($adminCaseCode); ?></h2>
         <?php if ($caseId > 0): ?>
           <div class="small text-secondary">Total views: <?php echo (int)$adminCaseTotalViews; ?></div>
         <?php endif; ?>
@@ -4131,6 +4183,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
                   <div class="small text-secondary">Person Name</div>
                   <div class="mb-2"><?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?></div>
+                  <div class="small text-secondary">Location</div>
+                  <div class="mb-2"><?php echo ($caseRow['location'] ?? '') !== '' ? htmlspecialchars($caseRow['location']) : '<span class="text-secondary">—</span>'; ?></div>
                   <div class="small text-secondary">TikTok Username</div>
                   <div class="mb-2"><?php echo $caseRow['tiktok_username'] ? '@'.htmlspecialchars($caseRow['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
                   <div class="small text-secondary">Status</div>
@@ -4399,6 +4453,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     <label class="form-label">Person Name</label>
                     <input type="text" name="person_name" class="form-control" value="<?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?>">
                   </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Location</label>
+                    <input type="text" name="location" class="form-control" value="<?php echo htmlspecialchars($caseRow['location'] ?? ''); ?>" placeholder="City, region, or country">
+                  </div>
+                </div>
+                <div class="row g-2 mt-2">
                   <div class="col-md-3">
                     <label class="form-label">Sensitivity</label>
                     <select name="sensitivity" class="form-select" required>
@@ -4588,6 +4648,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <div class="col-md-6">
                 <label class="form-label">Person Name</label>
                 <input type="text" name="person_name" class="form-control" placeholder="Optional">
+              </div>
+            </div>
+            <div class="row g-2 mt-2">
+              <div class="col-md-6">
+                <label class="form-label">Location</label>
+                <input type="text" name="location" class="form-control" placeholder="City, region, or country">
               </div>
             </div>
             <div class="row g-2 mt-2">
