@@ -494,7 +494,7 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
 
     function log_case_view(PDO $pdo, int $caseId): void {
       static $loggedCaseIds = [];
-      if ($caseId <= 0 || isset($loggedCaseIds[$caseId])) { return; }
+      if ($caseId < 0 || isset($loggedCaseIds[$caseId])) { return; }
       $loggedCaseIds[$caseId] = true;
 
       try {
@@ -2681,6 +2681,7 @@ document.addEventListener('DOMContentLoaded', function(){
 
   <!-- Cases Grid + Right Rail -->
   <?php if ($view === 'cases'): ?>
+  <?php log_case_view($pdo, 0); ?>
   <main class="py-4" id="cases">
     <div class="container-xl">
       <div class="row g-4">
@@ -3355,7 +3356,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 COUNT(*) AS total_views,
                 SUM(CASE WHEN viewed_at >= (NOW() - INTERVAL 1 DAY) THEN 1 ELSE 0 END) AS views_24h,
                 SUM(CASE WHEN viewed_at >= (NOW() - INTERVAL 7 DAY) THEN 1 ELSE 0 END) AS views_7d,
-                COUNT(DISTINCT case_id) AS unique_cases,
+                COUNT(DISTINCT CASE WHEN case_id > 0 THEN case_id END) AS unique_cases,
                 COUNT(DISTINCT viewer_user_id) AS unique_users,
                 COUNT(DISTINCT public_ip) AS unique_ips,
                 SUM(CASE WHEN is_authenticated = 1 THEN 1 ELSE 0 END) AS auth_views,
@@ -3371,14 +3372,20 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           try {
             $q = $pdo->query("SELECT
                 cv.case_id,
-                c.case_code,
-                c.case_name,
+                CASE
+                  WHEN cv.case_id = 0 THEN 'Home Page'
+                  ELSE COALESCE(c.case_code, CONCAT('Case #', cv.case_id))
+                END AS case_code,
+                CASE
+                  WHEN cv.case_id = 0 THEN 'Home Page'
+                  ELSE COALESCE(c.case_name, 'Unknown Case')
+                END AS case_name,
                 COUNT(*) AS total_views,
                 COUNT(DISTINCT cv.viewer_user_id) AS unique_users,
                 COUNT(DISTINCT cv.public_ip) AS unique_ips,
                 MAX(cv.viewed_at) AS last_viewed_at
               FROM case_views cv
-              JOIN cases c ON c.id = cv.case_id
+              LEFT JOIN cases c ON c.id = cv.case_id
               GROUP BY cv.case_id, c.case_code, c.case_name
               ORDER BY total_views DESC, last_viewed_at DESC
               LIMIT 15");
@@ -3391,8 +3398,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             $q = $pdo->query("SELECT
                 cv.id,
                 cv.case_id,
-                c.case_code,
-                c.case_name,
+                CASE
+                  WHEN cv.case_id = 0 THEN 'Home Page'
+                  ELSE COALESCE(c.case_code, CONCAT('Case #', cv.case_id))
+                END AS case_code,
+                CASE
+                  WHEN cv.case_id = 0 THEN 'Home Page'
+                  ELSE COALESCE(c.case_name, 'Unknown Case')
+                END AS case_name,
                 cv.viewer_user_id,
                 u.email AS viewer_email,
                 u.display_name AS viewer_display_name,
@@ -3414,7 +3427,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 cv.request_method,
                 cv.viewed_at
               FROM case_views cv
-              JOIN cases c ON c.id = cv.case_id
+              LEFT JOIN cases c ON c.id = cv.case_id
               LEFT JOIN users u ON u.id = cv.viewer_user_id
               ORDER BY cv.viewed_at DESC
               LIMIT 250");
@@ -3551,10 +3564,15 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       <?php if (!empty($mostViewedCases)): foreach ($mostViewedCases as $mv): ?>
                         <tr>
                           <td>
-                            <a class="text-decoration-none" href="?view=case&code=<?php echo urlencode($mv['case_code'] ?? ''); ?>#case-view">
-                              <?php echo htmlspecialchars($mv['case_name'] ?: ($mv['case_code'] ?? 'Case')); ?>
-                            </a>
-                            <div class="small text-secondary"><?php echo htmlspecialchars($mv['case_code'] ?? ''); ?></div>
+                            <?php if ((int)($mv['case_id'] ?? 0) === 0): ?>
+                              <span class="fw-semibold">Home Page</span>
+                              <div class="small text-secondary">Main dashboard</div>
+                            <?php else: ?>
+                              <a class="text-decoration-none" href="?view=case&code=<?php echo urlencode($mv['case_code'] ?? ''); ?>#case-view">
+                                <?php echo htmlspecialchars($mv['case_name'] ?: ($mv['case_code'] ?? 'Case')); ?>
+                              </a>
+                              <div class="small text-secondary"><?php echo htmlspecialchars($mv['case_code'] ?? ''); ?></div>
+                            <?php endif; ?>
                           </td>
                           <td class="text-end fw-semibold"><?php echo number_format((int)($mv['total_views'] ?? 0)); ?></td>
                           <td class="text-end"><?php echo number_format((int)($mv['unique_users'] ?? 0)); ?></td>
@@ -3701,8 +3719,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                     <tr>
                       <td class="small"><?php echo htmlspecialchars($rv['viewed_at'] ?? ''); ?></td>
                       <td>
-                        <a class="text-decoration-none" href="?view=case&code=<?php echo urlencode($rv['case_code'] ?? ''); ?>#case-view"><?php echo htmlspecialchars($rv['case_code'] ?? ''); ?></a>
-                        <div class="small text-secondary"><?php echo htmlspecialchars($rv['case_name'] ?? ''); ?></div>
+                        <?php if ((int)($rv['case_id'] ?? 0) === 0): ?>
+                          <span class="fw-semibold">Home Page</span>
+                          <div class="small text-secondary">Main dashboard</div>
+                        <?php else: ?>
+                          <a class="text-decoration-none" href="?view=case&code=<?php echo urlencode($rv['case_code'] ?? ''); ?>#case-view"><?php echo htmlspecialchars($rv['case_code'] ?? ''); ?></a>
+                          <div class="small text-secondary"><?php echo htmlspecialchars($rv['case_name'] ?? ''); ?></div>
+                        <?php endif; ?>
                       </td>
                       <td>
                         <?php if (!empty($rv['viewer_user_id'])): ?>
