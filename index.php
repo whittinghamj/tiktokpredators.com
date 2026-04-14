@@ -1864,6 +1864,7 @@ if (isset($_GET['logout'])) {
   <meta name="twitter:image" content="https://tiktokpredators.com/assets/og-image.png" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
+  <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet" />
 
   <!-- Bootstrap JS (required for modal/tabs) -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -3679,7 +3680,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           <div class="card-body">
             <h3 class="h6 mb-3">Detailed Recent Viewer Activity (Last 250 views)</h3>
             <div class="table-responsive">
-              <table class="table table-sm align-middle">
+              <table id="recentViewerActivityTable" class="table table-sm align-middle">
                 <thead>
                   <tr>
                     <th>Viewed At</th>
@@ -3692,8 +3693,6 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                     <th>Device</th>
                     <th>Browser</th>
                     <th>OS</th>
-                    <th>Language</th>
-                    <th>Request</th>
                     <th>Referrer</th>
                   </tr>
                 </thead>
@@ -3720,12 +3719,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       <td class="small"><?php echo htmlspecialchars($rv['device_type'] ?? 'Unknown'); ?></td>
                       <td class="small"><?php echo htmlspecialchars(trim(($rv['browser_name'] ?? '').' '.($rv['browser_version'] ?? '')) ?: 'Unknown'); ?></td>
                       <td class="small"><?php echo htmlspecialchars($rv['os_name'] ?? 'Unknown'); ?></td>
-                      <td class="small"><?php echo htmlspecialchars($rv['accept_language'] ?? ''); ?></td>
-                      <td class="small"><span class="text-secondary"><?php echo htmlspecialchars(($rv['request_method'] ?? 'GET').' '.($rv['request_uri'] ?? '')); ?></span></td>
                       <td class="small text-break" style="max-width: 260px;"><?php echo htmlspecialchars($rv['referer'] ?? ''); ?></td>
                     </tr>
                   <?php endforeach; else: ?>
-                    <tr><td colspan="13" class="text-secondary">No viewer activity has been recorded yet.</td></tr>
+                    <tr><td colspan="11" class="text-secondary">No viewer activity has been recorded yet.</td></tr>
                   <?php endif; ?>
                 </tbody>
               </table>
@@ -5027,8 +5024,23 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 </div>
 <?php endif; ?>
 
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
+  <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+
   <script>
   document.addEventListener('DOMContentLoaded', function () {
+    if (window.jQuery && window.jQuery.fn && typeof window.jQuery.fn.DataTable === 'function') {
+      var activityTable = window.jQuery('#recentViewerActivityTable');
+      if (activityTable.length) {
+        activityTable.DataTable({
+          pageLength: 25,
+          lengthMenu: [[25, 50, 100, 250], [25, 50, 100, 250]],
+          order: [[0, 'desc']]
+        });
+      }
+    }
+
     // Evidence modal dynamic preview + admin edit wiring
     (function () {
       var evModal = document.getElementById('evidenceModal');
