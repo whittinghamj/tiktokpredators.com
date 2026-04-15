@@ -129,8 +129,7 @@ function find_person_photo_url(string $caseCode): string {
 // --- Face / Evidence Scanner helpers (GD-based perceptual hashing + histogram) ---
 
 /**
- * Return a cached table of DCT-II cosine values for a given size.
- * Precomputing avoids repeated cos() calls in the inner DCT loops.
+ * Cached DCT-II cosine table.
  */
 function tp_scanner_dct_cos(int $sz): array {
     static $cache = [];
@@ -147,43 +146,54 @@ function tp_scanner_dct_cos(int $sz): array {
 }
 
 /**
- * pHash — 8×8 DCT of a 32×32 greyscale thumbnail → 63-bit binary string.
- * This is the industry-standard perceptual hash: rotation/scale/compression
- * resistant and far more discriminative for faces than average hash.
- * DC component (index 0) is omitted; remaining 63 values compared to median.
+ * Prepare: resize a GdImage to 32×32 greyscale and return a flat pixel array.
+ * Called ONCE per candidate — all hashes are derived from this array without
+ * additional GD calls, reducing per-image GD operations from ~7 down to 1.
  */
-function tp_scanner_phash(GdImage $img): string {
-    $sz = 32; $keep = 8;
+function tp_scanner_prepare_pixels(GdImage $img): array {
+    $sz = 32;
     $t = imagecreatetruecolor($sz, $sz);
     imagecopyresampled($t, $img, 0, 0, 0, 0, $sz, $sz, imagesx($img), imagesy($img));
     imagefilter($t, IMG_FILTER_GRAYSCALE);
     $p = [];
     for ($y = 0; $y < $sz; $y++) {
         for ($x = 0; $x < $sz; $x++) {
-            $p[$y][$x] = (float)((imagecolorat($t, $x, $y) >> 16) & 0xFF);
+            $p[$y * $sz + $x] = (imagecolorat($t, $x, $y) >> 16) & 0xFF;
         }
     }
     imagedestroy($t);
+    return $p; // 1024-element flat int array
+}
+
+/**
+ * pHash from a pre-prepared 32×32 flat pixel array.
+ * 8×8 DCT → 63-bit binary string (DC component dropped).
+ */
+function tp_scanner_phash_from_pixels(array $p): string {
+    $sz = 32; $keep = 8;
     $cos = tp_scanner_dct_cos($sz);
-    // Row DCT pass (all rows, all $sz frequencies)
+    // Row DCT pass
     $r = [];
     for ($y = 0; $y < $sz; $y++) {
+        $off = $y * $sz;
         for ($u = 0; $u < $sz; $u++) {
             $sum = 0.0;
-            for ($x = 0; $x < $sz; $x++) { $sum += $p[$y][$x] * $cos[$u][$x]; }
-            $r[$y][$u] = $sum * (($u === 0) ? sqrt(1.0/$sz) : sqrt(2.0/$sz));
+            $cu = $cos[$u];
+            for ($x = 0; $x < $sz; $x++) { $sum += $p[$off + $x] * $cu[$x]; }
+            $r[$y][$u] = $sum * (($u === 0) ? 0.17677669529663689 /* sqrt(1/32) */ : 0.25); /* sqrt(2/32) */
         }
     }
-    // Column DCT pass — only the top-left $keep×$keep block needed
+    // Column DCT pass — top-left $keep×$keep block only
     $vals = [];
     for ($u = 0; $u < $keep; $u++) {
         for ($v = 0; $v < $keep; $v++) {
             $sum = 0.0;
-            for ($y = 0; $y < $sz; $y++) { $sum += $r[$y][$u] * $cos[$v][$y]; }
-            $vals[] = $sum * (($v === 0) ? sqrt(1.0/$sz) : sqrt(2.0/$sz));
+            $cv = $cos[$v];
+            for ($y = 0; $y < $sz; $y++) { $sum += $r[$y][$u] * $cv[$y]; }
+            $vals[] = $sum * (($v === 0) ? 0.17677669529663689 : 0.25);
         }
     }
-    array_shift($vals); // drop DC component [0,0]
+    array_shift($vals); // drop DC [0,0]
     $sorted = $vals; sort($sorted);
     $median = $sorted[(int)(count($sorted) / 2)];
     $hash = '';
@@ -191,40 +201,47 @@ function tp_scanner_phash(GdImage $img): string {
     return $hash;
 }
 
-/** Compute 16×16 average hash (256-bit binary string '0'/'1') — used as a lightweight secondary metric */
-function tp_scanner_ahash(GdImage $img): string {
-    $sz = 16;
-    $t = imagecreatetruecolor($sz, $sz);
-    imagecopyresampled($t, $img, 0, 0, 0, 0, $sz, $sz, imagesx($img), imagesy($img));
-    imagefilter($t, IMG_FILTER_GRAYSCALE);
-    $pixels = []; $sum = 0;
-    for ($y = 0; $y < $sz; $y++) {
-        for ($x = 0; $x < $sz; $x++) {
-            $v = (imagecolorat($t, $x, $y) >> 16) & 0xFF;
-            $pixels[] = $v; $sum += $v;
-        }
-    }
-    imagedestroy($t);
-    $mean = $sum / ($sz * $sz);
+/**
+ * dHash from a 32×32 flat pixel array (subsampled 9×8 for gradient direction).
+ * Avoids any extra GD call.
+ */
+function tp_scanner_dhash_from_pixels(array $p): string {
+    // Sample 9×8 grid from the 32×32 pixel array
     $h = '';
-    foreach ($pixels as $p) { $h .= ($p >= $mean) ? '1' : '0'; }
-    return $h;
-}
-
-/** Compute 9×8 difference hash (64-bit binary string) — captures edge/gradient direction */
-function tp_scanner_dhash(GdImage $img): string {
-    $t = imagecreatetruecolor(9, 8);
-    imagecopyresampled($t, $img, 0, 0, 0, 0, 9, 8, imagesx($img), imagesy($img));
-    imagefilter($t, IMG_FILTER_GRAYSCALE);
-    $h = '';
-    for ($y = 0; $y < 8; $y++) {
-        for ($x = 0; $x < 8; $x++) {
-            $l = (imagecolorat($t, $x,   $y) >> 16) & 0xFF;
-            $r = (imagecolorat($t, $x+1, $y) >> 16) & 0xFF;
+    for ($gy = 0; $gy < 8; $gy++) {
+        $sy = (int)round($gy * 31 / 7);
+        for ($gx = 0; $gx < 8; $gx++) {
+            $sx  = (int)round($gx * 31 / 8);
+            $sx1 = (int)round(($gx + 1) * 31 / 8);
+            $l = $p[$sy * 32 + $sx];
+            $r = $p[$sy * 32 + $sx1];
             $h .= ($l > $r) ? '1' : '0';
         }
     }
-    imagedestroy($t);
+    return $h;
+}
+
+/**
+ * aHash from a 32×32 flat pixel array (sub-averaged to 8×8 blocks).
+ */
+function tp_scanner_ahash_from_pixels(array $p): string {
+    // Average down to 8×8 blocks (each block covers 4×4 pixels in 32×32)
+    $block = 4;
+    $blocks = [];
+    $tot = $block * $block;
+    for ($by = 0; $by < 8; $by++) {
+        for ($bx = 0; $bx < 8; $bx++) {
+            $sum = 0;
+            for ($dy = 0; $dy < $block; $dy++) {
+                $row = ($by * $block + $dy) * 32 + $bx * $block;
+                for ($dx = 0; $dx < $block; $dx++) { $sum += $p[$row + $dx]; }
+            }
+            $blocks[] = $sum / $tot;
+        }
+    }
+    $mean = array_sum($blocks) / 64;
+    $h = '';
+    foreach ($blocks as $v) { $h .= ($v >= $mean) ? '1' : '0'; }
     return $h;
 }
 
@@ -238,8 +255,15 @@ function tp_scanner_hamming_sim(string $a, string $b): float {
 }
 
 /**
- * Crop the central cx×cy fraction of an image (where faces typically appear).
- * Caller is responsible for destroying the returned GdImage.
+ * pHash from a GdImage directly (used for the query image & its center crop,
+ * which are only computed once — not in any loop).
+ */
+function tp_scanner_phash(GdImage $img): string {
+    return tp_scanner_phash_from_pixels(tp_scanner_prepare_pixels($img));
+}
+
+/**
+ * Crop the central cx×cy fraction of an image — used on the query image only.
  */
 function tp_scanner_center_crop(GdImage $img, float $cx = 0.6, float $cy = 0.7): GdImage {
     $ow = imagesx($img); $oh = imagesy($img);
@@ -250,30 +274,6 @@ function tp_scanner_center_crop(GdImage $img, float $cx = 0.6, float $cy = 0.7):
     $out = imagecreatetruecolor($cw, $ch);
     imagecopy($out, $img, 0, 0, $ox, $oy, $cw, $ch);
     return $out;
-}
-
-/**
- * Normalised direct pixel similarity on a tiny greyscale downscale.
- * Catches near-exact duplicates regardless of format/compression differences.
- * Returns 1.0 for identical images, approaching 0.0 as RMSE approaches 128.
- */
-function tp_scanner_pixel_sim(GdImage $q, GdImage $c, int $sz = 16): float {
-    $a = imagecreatetruecolor($sz, $sz);
-    $b = imagecreatetruecolor($sz, $sz);
-    imagecopyresampled($a, $q, 0, 0, 0, 0, $sz, $sz, imagesx($q), imagesy($q));
-    imagecopyresampled($b, $c, 0, 0, 0, 0, $sz, $sz, imagesx($c), imagesy($c));
-    imagefilter($a, IMG_FILTER_GRAYSCALE);
-    imagefilter($b, IMG_FILTER_GRAYSCALE);
-    $mse = 0.0; $n = $sz * $sz;
-    for ($y = 0; $y < $sz; $y++) {
-        for ($x = 0; $x < $sz; $x++) {
-            $d = ((imagecolorat($a, $x, $y) >> 16) & 0xFF)
-              - ((imagecolorat($b, $x, $y) >> 16) & 0xFF);
-            $mse += $d * $d;
-        }
-    }
-    imagedestroy($a); imagedestroy($b);
-    return max(0.0, 1.0 - (sqrt($mse / $n) / 128.0));
 }
 
 /** Load a GD image from file path (any GD-supported format) */
@@ -2000,30 +2000,34 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
             if (!$queryImg || !($queryImg instanceof GdImage)) {
                 $scanError = 'Could not decode the uploaded image. Please try a different file.';
             } else {
-                // ── Compute all query-image features once ──────────────────────
-                // pHash (DCT) is the primary metric — robust, compression/scale resistant.
-                // $queryImg is kept alive through both loops so pixel_sim can use it.
-                $qPhash  = tp_scanner_phash($queryImg);          // full image DCT hash
-                $qCrop   = tp_scanner_center_crop($queryImg);    // central 60×70% crop
-                $qCPhash = tp_scanner_phash($qCrop);             // crop DCT hash (face region)
-                imagedestroy($qCrop);
-                $qDhash  = tp_scanner_dhash($queryImg);          // gradient/edge hash
-                $qAhash  = tp_scanner_ahash($queryImg);          // luminance hash
-                // Warm the cosine cache now (called once before the loops)
+                // Warm cosine cache before loops
                 tp_scanner_dct_cos(32);
+
+                // ── Query-image features (computed once) ──────────────────────
+                // Full pHash + center-crop pHash are computed from the query only.
+                // Per-candidate we use the fast prepare_pixels path (1 GD op each).
+                $qPixels = tp_scanner_prepare_pixels($queryImg);
+                $qPhash  = tp_scanner_phash_from_pixels($qPixels);
+                $qDhash  = tp_scanner_dhash_from_pixels($qPixels);
+                $qAhash  = tp_scanner_ahash_from_pixels($qPixels);
+                // Center-crop pHash for face-region sensitivity (query only)
+                $qCrop   = tp_scanner_center_crop($queryImg);
+                $qCPhash = tp_scanner_phash(($qCrop));
+                imagedestroy($qCrop);
+                imagedestroy($queryImg);
 
                 $uploadsRoot = realpath(__DIR__ . '/uploads');
                 $sensFilter  = is_admin() ? '' : "AND c.sensitivity != 'Sealed'";
                 $scored      = [];
 
-                // ── Scoring weights (must sum to 1.0) ─────────────────────────
-                // pHash full    40% – DCT structural similarity (faces, structure)
-                // pHash crop    20% – face-region focused comparison
-                // dHash         20% – edge/gradient direction
-                // aHash         10% – luminance structure
-                // pixel direct  10% – catches near-exact duplicates after compression
+                // ── Scoring formula (weights sum to 1.0) ──────────────────────
+                // pHash full   40% – DCT structural fingerprint
+                // pHash crop   20% – query face-region vs candidate full image
+                // dHash        25% – edge/gradient direction
+                // aHash        15% – luminance structure
+                // All candidate hashes derived from ONE 32×32 pixel array (no extra GD ops)
 
-                // ── 1. Score person profile photos ──────────────────────────────
+                // ── 1. Score person profile photos ────────────────────────────
                 try {
                     $sensWhere2 = is_admin() ? '' : "WHERE sensitivity != 'Sealed'";
                     $pq = $pdo->query(
@@ -2033,39 +2037,36 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                     foreach ($pq->fetchAll() as $pr) {
                         $photoRel = find_person_photo_url($pr['case_code']);
                         if ($photoRel === '') continue;
-                        $photoAbs = __DIR__ . '/' . $photoRel;
-                        $cImg = tp_scanner_load_image($photoAbs);
+                        $cImg = tp_scanner_load_image(__DIR__ . '/' . $photoRel);
                         if (!$cImg) continue;
-                        $cCrop = tp_scanner_center_crop($cImg);
-                        $score = 0.40 * tp_scanner_hamming_sim($qPhash,  tp_scanner_phash($cImg))
-                               + 0.20 * tp_scanner_hamming_sim($qCPhash, tp_scanner_phash($cCrop))
-                               + 0.20 * tp_scanner_hamming_sim($qDhash,  tp_scanner_dhash($cImg))
-                               + 0.10 * tp_scanner_hamming_sim($qAhash,  tp_scanner_ahash($cImg))
-                               + 0.10 * tp_scanner_pixel_sim($queryImg, $cImg);
-                        imagedestroy($cCrop);
+                        $cp    = tp_scanner_prepare_pixels($cImg); // 1 GD op
                         imagedestroy($cImg);
+                        $score = 0.40 * tp_scanner_hamming_sim($qPhash,  tp_scanner_phash_from_pixels($cp))
+                               + 0.20 * tp_scanner_hamming_sim($qCPhash, tp_scanner_phash_from_pixels($cp))
+                               + 0.25 * tp_scanner_hamming_sim($qDhash,  tp_scanner_dhash_from_pixels($cp))
+                               + 0.15 * tp_scanner_hamming_sim($qAhash,  tp_scanner_ahash_from_pixels($cp));
                         $pct = round($score * 100, 1);
                         $key = $pr['case_code'];
                         if (!isset($scored[$key]) || $scored[$key]['pct'] < $pct) {
                             $scored[$key] = [
-                                'pct'           => $pct,
-                                'case_code'     => $pr['case_code'],
-                                'case_name'     => $pr['case_name'],
-                                'person_name'   => $pr['person_name'],
+                                'pct'             => $pct,
+                                'case_code'       => $pr['case_code'],
+                                'case_name'       => $pr['case_name'],
+                                'person_name'     => $pr['person_name'],
                                 'tiktok_username' => $pr['tiktok_username'],
-                                'status'        => $pr['status'],
-                                'sensitivity'   => $pr['sensitivity'],
-                                'location'      => $pr['location'] ?? '',
-                                'photo_url'     => $photoRel,
-                                'match_source'  => 'profile_photo',
-                                'evidence_id'   => null,
-                                'evidence_title'=> '',
+                                'status'          => $pr['status'],
+                                'sensitivity'     => $pr['sensitivity'],
+                                'location'        => $pr['location'] ?? '',
+                                'photo_url'       => $photoRel,
+                                'match_source'    => 'profile_photo',
+                                'evidence_id'     => null,
+                                'evidence_title'  => '',
                             ];
                         }
                     }
                 } catch (Throwable $ex) { /* non-fatal */ }
 
-                // ── 2. Score image evidence files ────────────────────────────────
+                // ── 2. Score image evidence files ─────────────────────────────
                 try {
                     $sq = $pdo->query(
                         "SELECT e.id, e.filepath, e.mime_type, e.title,
@@ -2083,18 +2084,16 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                         $absPath = __DIR__ . '/' . ltrim($row['filepath'], '/');
                         $absReal = @realpath($absPath);
                         if (!$absReal || !$uploadsRoot || strncmp($absReal, $uploadsRoot, strlen($uploadsRoot)) !== 0) {
-                            continue; // path-traversal safety
+                            continue;
                         }
                         $cImg = tp_scanner_load_image($absReal);
                         if (!$cImg) continue;
-                        $cCrop = tp_scanner_center_crop($cImg);
-                        $score = 0.40 * tp_scanner_hamming_sim($qPhash,  tp_scanner_phash($cImg))
-                               + 0.20 * tp_scanner_hamming_sim($qCPhash, tp_scanner_phash($cCrop))
-                               + 0.20 * tp_scanner_hamming_sim($qDhash,  tp_scanner_dhash($cImg))
-                               + 0.10 * tp_scanner_hamming_sim($qAhash,  tp_scanner_ahash($cImg))
-                               + 0.10 * tp_scanner_pixel_sim($queryImg, $cImg);
-                        imagedestroy($cCrop);
+                        $cp    = tp_scanner_prepare_pixels($cImg); // 1 GD op
                         imagedestroy($cImg);
+                        $score = 0.40 * tp_scanner_hamming_sim($qPhash,  tp_scanner_phash_from_pixels($cp))
+                               + 0.20 * tp_scanner_hamming_sim($qCPhash, tp_scanner_phash_from_pixels($cp))
+                               + 0.25 * tp_scanner_hamming_sim($qDhash,  tp_scanner_dhash_from_pixels($cp))
+                               + 0.15 * tp_scanner_hamming_sim($qAhash,  tp_scanner_ahash_from_pixels($cp));
                         $pct      = round($score * 100, 1);
                         $key      = $row['case_code'];
                         $photoRel = find_person_photo_url($row['case_code']);
@@ -2117,10 +2116,7 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                     }
                 } catch (Throwable $ex) { /* non-fatal */ }
 
-                // Free query image now that all comparisons are done
-                imagedestroy($queryImg);
-
-                // Sort descending, keep top 20 above 15 %
+                // Sort descending, keep top 20 above 15%
                 usort($scored, fn($a, $b) => $b['pct'] <=> $a['pct']);
                 $scanResults = array_values(array_slice(
                     array_filter($scored, fn($r) => $r['pct'] >= 15.0), 0, 20
