@@ -2116,10 +2116,10 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                     }
                 } catch (Throwable $ex) { /* non-fatal */ }
 
-                // Sort descending, keep top 20 above 15%
+                // Sort descending, keep top 10 above 15%
                 usort($scored, fn($a, $b) => $b['pct'] <=> $a['pct']);
                 $scanResults = array_values(array_slice(
-                    array_filter($scored, fn($r) => $r['pct'] >= 15.0), 0, 20
+                    array_filter($scored, fn($r) => $r['pct'] >= 15.0), 0, 10
                 ));
                 $scanDone = true;
                 log_console('INFO', 'Face scanner: scanned evidence+photos, ' . count($scanResults) . ' results >= 15%.');
