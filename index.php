@@ -126,6 +126,92 @@ function find_person_photo_url(string $caseCode): string {
     return '';
 }
 
+// --- Face / Evidence Scanner helpers (GD-based perceptual hashing + histogram) ---
+
+/** Compute 16×16 average hash (256-bit binary string '0'/'1') */
+function tp_scanner_ahash(GdImage $img): string {
+    $sz = 16;
+    $t = imagecreatetruecolor($sz, $sz);
+    imagecopyresampled($t, $img, 0, 0, 0, 0, $sz, $sz, imagesx($img), imagesy($img));
+    imagefilter($t, IMG_FILTER_GRAYSCALE);
+    $pixels = []; $sum = 0;
+    for ($y = 0; $y < $sz; $y++) {
+        for ($x = 0; $x < $sz; $x++) {
+            $v = (imagecolorat($t, $x, $y) >> 16) & 0xFF;
+            $pixels[] = $v; $sum += $v;
+        }
+    }
+    imagedestroy($t);
+    $mean = $sum / ($sz * $sz);
+    $h = '';
+    foreach ($pixels as $p) { $h .= ($p >= $mean) ? '1' : '0'; }
+    return $h;
+}
+
+/** Compute 9×8 difference hash (64-bit binary string '0'/'1') */
+function tp_scanner_dhash(GdImage $img): string {
+    $t = imagecreatetruecolor(9, 8);
+    imagecopyresampled($t, $img, 0, 0, 0, 0, 9, 8, imagesx($img), imagesy($img));
+    imagefilter($t, IMG_FILTER_GRAYSCALE);
+    $h = '';
+    for ($y = 0; $y < 8; $y++) {
+        for ($x = 0; $x < 8; $x++) {
+            $l = (imagecolorat($t, $x,   $y) >> 16) & 0xFF;
+            $r = (imagecolorat($t, $x+1, $y) >> 16) & 0xFF;
+            $h .= ($l > $r) ? '1' : '0';
+        }
+    }
+    imagedestroy($t);
+    return $h;
+}
+
+/** Compute normalised colour histogram (64×64 downsample, 32 buckets per R/G/B = 96 floats) */
+function tp_scanner_histogram(GdImage $img): array {
+    $sz = 64; $bk = 32;
+    $t = imagecreatetruecolor($sz, $sz);
+    imagecopyresampled($t, $img, 0, 0, 0, 0, $sz, $sz, imagesx($img), imagesy($img));
+    $h = array_fill(0, $bk * 3, 0);
+    $tot = $sz * $sz;
+    for ($y = 0; $y < $sz; $y++) {
+        for ($x = 0; $x < $sz; $x++) {
+            $c = imagecolorat($t, $x, $y);
+            $h[(int)((($c >> 16) & 0xFF) * $bk / 256)]++;
+            $h[$bk + (int)((($c >> 8) & 0xFF) * $bk / 256)]++;
+            $h[$bk * 2 + (int)(($c & 0xFF) * $bk / 256)]++;
+        }
+    }
+    imagedestroy($t);
+    foreach ($h as &$v) { $v /= $tot; }
+    return $h;
+}
+
+/** Hamming similarity between two binary hash strings → 0.0–1.0 */
+function tp_scanner_hamming_sim(string $a, string $b): float {
+    $len = strlen($a);
+    if ($len === 0) return 0.0;
+    $dist = 0;
+    for ($i = 0; $i < $len; $i++) { if (($b[$i] ?? '0') !== $a[$i]) $dist++; }
+    return max(0.0, 1.0 - ($dist / $len));
+}
+
+/** Histogram intersection similarity → 0.0–1.0 */
+function tp_scanner_hist_sim(array $h1, array $h2): float {
+    $sum = 0.0;
+    foreach ($h1 as $i => $v) { $sum += min($v, $h2[$i] ?? 0.0); }
+    return min(1.0, $sum / 3.0); // 3 channels each sum to 1.0
+}
+
+/** Load a GD image from file path (any GD-supported format) */
+function tp_scanner_load_image(string $path): ?GdImage {
+    if (!is_file($path) || !is_readable($path)) return null;
+    $sz = @filesize($path);
+    if ($sz === false || $sz > 20 * 1024 * 1024) return null; // skip >20 MB files
+    $data = @file_get_contents($path);
+    if ($data === false || $data === '') return null;
+    $img = @imagecreatefromstring($data);
+    return ($img instanceof GdImage) ? $img : null;
+}
+
 // Generate a unique case code like CASE-2025-AB12CD34 (random, collision-checked)
 function generate_case_code(PDO $pdo): string {
     $year = date('Y');
@@ -1812,6 +1898,141 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     header('Location: '. $ru); exit;
 }
 
+// --- Face / Evidence Scanner: POST handler ---
+$scanResults = [];
+$scanError   = '';
+$scanDone    = false;
+
+if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'face_scan') {
+    throttle();
+    if (!function_exists('imagecreatetruecolor')) {
+        $scanError = 'Image processing (GD library) is not available on this server.';
+    } elseif (!check_csrf()) {
+        $scanError = 'Security check failed. Please refresh and try again.';
+    } elseif (empty($_FILES['scan_image']['name']) || ($_FILES['scan_image']['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+        $scanError = 'Please upload a valid image file.';
+    } elseif (($_FILES['scan_image']['size'] ?? 0) > 10 * 1024 * 1024) {
+        $scanError = 'Image must be under 10 MB.';
+    } else {
+        $f = $_FILES['scan_image'];
+        $detMime = @mime_content_type($f['tmp_name']) ?: '';
+        $allowedMimes = ['image/jpeg','image/jpg','image/png','image/webp','image/gif','image/bmp'];
+        if (!in_array($detMime, $allowedMimes, true)) {
+            $scanError = 'Unsupported file type. Please upload a JPEG, PNG, WebP, or GIF image.';
+        } else {
+            $rawData  = @file_get_contents($f['tmp_name']);
+            $queryImg = ($rawData !== false) ? @imagecreatefromstring($rawData) : false;
+            if (!$queryImg || !($queryImg instanceof GdImage)) {
+                $scanError = 'Could not decode the uploaded image. Please try a different file.';
+            } else {
+                // Compute features for the query image
+                $qAhash = tp_scanner_ahash($queryImg);
+                $qDhash = tp_scanner_dhash($queryImg);
+                $qHist  = tp_scanner_histogram($queryImg);
+                imagedestroy($queryImg);
+
+                $uploadsRoot = realpath(__DIR__ . '/uploads');
+                $sensFilter  = is_admin() ? '' : "AND c.sensitivity != 'Sealed'";
+                $scored      = [];
+
+                // ── 1. Score person profile photos ──────────────────────────────
+                try {
+                    $sensWhere2 = is_admin() ? '' : "WHERE sensitivity != 'Sealed'";
+                    $pq = $pdo->query(
+                        "SELECT case_code, case_name, person_name, tiktok_username, status, sensitivity, location
+                         FROM cases $sensWhere2 ORDER BY id DESC"
+                    );
+                    foreach ($pq->fetchAll() as $pr) {
+                        $photoRel = find_person_photo_url($pr['case_code']);
+                        if ($photoRel === '') continue;
+                        $photoAbs = __DIR__ . '/' . $photoRel;
+                        $cImg = tp_scanner_load_image($photoAbs);
+                        if (!$cImg) continue;
+                        $score = 0.45 * tp_scanner_hamming_sim($qAhash, tp_scanner_ahash($cImg))
+                               + 0.15 * tp_scanner_hamming_sim($qDhash, tp_scanner_dhash($cImg))
+                               + 0.40 * tp_scanner_hist_sim($qHist, tp_scanner_histogram($cImg));
+                        imagedestroy($cImg);
+                        $pct = round($score * 100, 1);
+                        $key = $pr['case_code'];
+                        if (!isset($scored[$key]) || $scored[$key]['pct'] < $pct) {
+                            $scored[$key] = [
+                                'pct'           => $pct,
+                                'case_code'     => $pr['case_code'],
+                                'case_name'     => $pr['case_name'],
+                                'person_name'   => $pr['person_name'],
+                                'tiktok_username' => $pr['tiktok_username'],
+                                'status'        => $pr['status'],
+                                'sensitivity'   => $pr['sensitivity'],
+                                'location'      => $pr['location'] ?? '',
+                                'photo_url'     => $photoRel,
+                                'match_source'  => 'profile_photo',
+                                'evidence_id'   => null,
+                                'evidence_title'=> '',
+                            ];
+                        }
+                    }
+                } catch (Throwable $ex) { /* non-fatal */ }
+
+                // ── 2. Score image evidence files ────────────────────────────────
+                try {
+                    $sq = $pdo->query(
+                        "SELECT e.id, e.filepath, e.mime_type, e.title,
+                                c.case_code, c.case_name, c.person_name, c.tiktok_username,
+                                c.status, c.sensitivity, c.location
+                         FROM evidence e
+                         JOIN cases c ON c.id = e.case_id
+                         WHERE e.type = 'image'
+                           AND e.mime_type LIKE 'image/%'
+                           $sensFilter
+                         ORDER BY e.id DESC
+                         LIMIT 400"
+                    );
+                    foreach ($sq->fetchAll() as $row) {
+                        $absPath = __DIR__ . '/' . ltrim($row['filepath'], '/');
+                        $absReal = @realpath($absPath);
+                        if (!$absReal || !$uploadsRoot || strncmp($absReal, $uploadsRoot, strlen($uploadsRoot)) !== 0) {
+                            continue; // path-traversal safety
+                        }
+                        $cImg = tp_scanner_load_image($absReal);
+                        if (!$cImg) continue;
+                        $score = 0.45 * tp_scanner_hamming_sim($qAhash, tp_scanner_ahash($cImg))
+                               + 0.15 * tp_scanner_hamming_sim($qDhash, tp_scanner_dhash($cImg))
+                               + 0.40 * tp_scanner_hist_sim($qHist, tp_scanner_histogram($cImg));
+                        imagedestroy($cImg);
+                        $pct      = round($score * 100, 1);
+                        $key      = $row['case_code'];
+                        $photoRel = find_person_photo_url($row['case_code']);
+                        if (!isset($scored[$key]) || $scored[$key]['pct'] < $pct) {
+                            $scored[$key] = [
+                                'pct'            => $pct,
+                                'case_code'      => $row['case_code'],
+                                'case_name'      => $row['case_name'],
+                                'person_name'    => $row['person_name'],
+                                'tiktok_username'=> $row['tiktok_username'],
+                                'status'         => $row['status'],
+                                'sensitivity'    => $row['sensitivity'],
+                                'location'       => $row['location'] ?? '',
+                                'photo_url'      => $photoRel ?: ('?action=serve_evidence&id=' . (int)$row['id']),
+                                'match_source'   => $photoRel ? 'evidence_with_photo' : 'evidence_image',
+                                'evidence_id'    => (int)$row['id'],
+                                'evidence_title' => $row['title'],
+                            ];
+                        }
+                    }
+                } catch (Throwable $ex) { /* non-fatal */ }
+
+                // Sort descending, keep top 20 above 15 %
+                usort($scored, fn($a, $b) => $b['pct'] <=> $a['pct']);
+                $scanResults = array_values(array_slice(
+                    array_filter($scored, fn($r) => $r['pct'] >= 15.0), 0, 20
+                ));
+                $scanDone = true;
+                log_console('INFO', 'Face scanner: scanned evidence+photos, ' . count($scanResults) . ' results >= 15%.');
+            }
+        }
+    }
+}
+
 // Handle logout
 if (isset($_GET['logout'])) {
     $_SESSION = [];
@@ -2078,6 +2299,7 @@ document.addEventListener('DOMContentLoaded', function(){
   </li>
 <?php endif; ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='scanner')?'active':''; ?>" href="?view=scanner#scanner"><i class="bi bi-camera-fill me-1"></i>Face Scanner</a></li>
     
       </ul>
       <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-center">
@@ -3189,6 +3411,258 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     </div>
   </main>
   <?php endif; ?>
+
+  <!-- ══════════════════════════════════════════════════════════
+       Face / Evidence Scanner
+  ══════════════════════════════════════════════════════════ -->
+  <?php if ($view === 'scanner'): ?>
+  <main class="py-4" id="scanner">
+    <div class="container-xl">
+
+      <!-- Page header -->
+      <div class="d-flex align-items-center gap-3 mb-4">
+        <div class="rounded-circle bg-primary bg-opacity-10 d-flex align-items-center justify-content-center" style="width:54px;height:54px;flex-shrink:0;">
+          <i class="bi bi-camera-fill fs-3 text-primary"></i>
+        </div>
+        <div>
+          <h1 class="h3 mb-0 fw-bold">Face &amp; Evidence Scanner</h1>
+          <p class="text-secondary mb-0 small">Upload a photo to search for visual matches across all case evidence and profile photos.</p>
+        </div>
+      </div>
+
+      <!-- Disclaimer -->
+      <div class="alert alert-warning d-flex gap-2 mb-4" role="alert">
+        <i class="bi bi-exclamation-triangle-fill fs-5 flex-shrink-0 mt-1"></i>
+        <div>
+          <strong>Similarity analysis — not definitive identification.</strong>
+          Results are based on perceptual image hashing and colour histogram comparison.
+          A high match percentage indicates visual similarity; it is <em>not</em> a confirmed identity match.
+          Always corroborate findings through independent investigation.
+          Sealed cases are excluded from public results.
+        </div>
+      </div>
+
+      <!-- Upload form -->
+      <div class="card glass mb-4">
+        <div class="card-body">
+          <h2 class="h5 mb-3"><i class="bi bi-upload me-2 text-primary"></i>Upload Image to Scan</h2>
+          <form method="post" action="?view=scanner#scanner-results" enctype="multipart/form-data" id="scannerForm">
+            <input type="hidden" name="action" value="face_scan">
+            <?php csrf_field(); ?>
+
+            <!-- Drag-drop zone -->
+            <div class="dropzone mb-3 position-relative" id="scanDropzone" style="cursor:pointer;"
+                 onclick="document.getElementById('scan_image_input').click()">
+              <i class="bi bi-person-bounding-box display-4 d-block mb-2 text-primary"></i>
+              <p class="mb-1 fw-semibold">Drag &amp; drop an image here, or click to browse</p>
+              <small class="text-secondary">JPEG · PNG · WebP · GIF &nbsp;·&nbsp; Max 10 MB</small>
+              <div id="scanPreviewWrap" class="mt-3 d-none">
+                <img id="scanPreviewImg" src="" alt="Preview" class="rounded" style="max-height:200px;max-width:100%;object-fit:contain;">
+                <p class="text-success small mt-1 mb-0" id="scanPreviewName"></p>
+              </div>
+            </div>
+            <input type="file" name="scan_image" id="scan_image_input" accept="image/*" class="d-none" required>
+
+            <?php if ($scanError !== ''): ?>
+              <div class="alert alert-danger mb-3"><i class="bi bi-exclamation-circle me-2"></i><?php echo htmlspecialchars($scanError); ?></div>
+            <?php endif; ?>
+
+            <div class="d-flex gap-2 align-items-center">
+              <button type="submit" class="btn btn-primary px-4" id="scanBtn">
+                <i class="bi bi-search me-2"></i>Scan for Matches
+              </button>
+              <span class="text-secondary small">Images are processed server-side and never stored.</span>
+            </div>
+          </form>
+        </div>
+      </div>
+
+      <!-- Results -->
+      <?php if ($scanDone): ?>
+      <div id="scanner-results">
+        <div class="d-flex align-items-center justify-content-between mb-3">
+          <h2 class="h5 mb-0"><i class="bi bi-bar-chart-steps me-2 text-primary"></i>
+            <?php if (count($scanResults) > 0): ?>
+              Top <?php echo count($scanResults); ?> potential match<?php echo count($scanResults) !== 1 ? 'es' : ''; ?> found
+            <?php else: ?>
+              No matches found above threshold
+            <?php endif; ?>
+          </h2>
+          <?php if (count($scanResults) > 0): ?>
+            <span class="badge bg-secondary">Sorted by highest similarity first</span>
+          <?php endif; ?>
+        </div>
+
+        <?php if (count($scanResults) === 0): ?>
+          <div class="card glass">
+            <div class="card-body text-center py-5">
+              <i class="bi bi-emoji-frown display-4 text-secondary d-block mb-3"></i>
+              <p class="text-secondary mb-0">No visual matches were found above the 15% similarity threshold.<br>
+              Try a clearer, well-lit front-facing photo for better results.</p>
+            </div>
+          </div>
+        <?php else: ?>
+          <div class="row g-3">
+          <?php foreach ($scanResults as $idx => $res): ?>
+            <?php
+              $pct       = (float)$res['pct'];
+              $badgeClass = $pct >= 65 ? 'bg-success' : ($pct >= 40 ? 'bg-warning text-dark' : 'bg-danger');
+              $badgeLabel = $pct >= 65 ? 'High' : ($pct >= 40 ? 'Moderate' : 'Low');
+              $photoUrl   = htmlspecialchars($res['photo_url'] ?? '');
+              $caseLink   = '?view=case&code=' . urlencode($res['case_code']) . '#case-view';
+              $statusBadge = match($res['status'] ?? '') {
+                  'Verified'  => 'text-bg-success',
+                  'Open'      => 'text-bg-primary',
+                  'In Review' => 'text-bg-warning',
+                  'Closed'    => 'text-bg-secondary',
+                  default     => 'text-bg-secondary',
+              };
+            ?>
+            <div class="col-12">
+              <div class="card glass">
+                <div class="card-body">
+                  <div class="row g-3 align-items-center">
+
+                    <!-- Rank badge -->
+                    <div class="col-auto d-none d-md-block text-center" style="min-width:48px;">
+                      <div class="fw-bold text-secondary" style="font-size:1.6rem;line-height:1;">#<?php echo $idx + 1; ?></div>
+                    </div>
+
+                    <!-- Profile/evidence photo -->
+                    <div class="col-auto">
+                      <?php if ($photoUrl !== ''): ?>
+                        <a href="<?php echo $caseLink; ?>">
+                          <img src="<?php echo $photoUrl; ?>"
+                               alt="Case photo"
+                               class="rounded"
+                               style="width:90px;height:90px;object-fit:cover;border:2px solid rgba(124,77,255,.4);"
+                               onerror="this.onerror=null;this.src='https://placehold.co/90x90/1a1a2e/666?text=No+Photo';">
+                        </a>
+                      <?php else: ?>
+                        <div class="rounded d-flex align-items-center justify-content-center bg-secondary bg-opacity-25"
+                             style="width:90px;height:90px;">
+                          <i class="bi bi-person-fill fs-1 text-secondary"></i>
+                        </div>
+                      <?php endif; ?>
+                    </div>
+
+                    <!-- Case details -->
+                    <div class="col">
+                      <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+                        <!-- Match percentage pill -->
+                        <span class="badge <?php echo $badgeClass; ?> fs-6 px-3 py-1">
+                          <?php echo number_format($pct, 1); ?>% — <?php echo $badgeLabel; ?> similarity
+                        </span>
+                        <span class="badge <?php echo $statusBadge; ?>"><?php echo htmlspecialchars($res['status'] ?? '—'); ?></span>
+                        <?php if (($res['sensitivity'] ?? '') === 'Restricted'): ?>
+                          <span class="badge bg-warning text-dark"><i class="bi bi-lock me-1"></i>Restricted</span>
+                        <?php endif; ?>
+                      </div>
+
+                      <h3 class="h6 mb-1">
+                        <a href="<?php echo $caseLink; ?>" class="text-decoration-none text-white">
+                          <?php echo htmlspecialchars($res['case_name'] ?? '—'); ?>
+                        </a>
+                        <small class="text-secondary ms-2"><?php echo htmlspecialchars($res['case_code']); ?></small>
+                      </h3>
+
+                      <div class="row row-cols-auto g-3 small text-secondary mt-1">
+                        <?php if (!empty($res['person_name'])): ?>
+                        <div class="col">
+                          <i class="bi bi-person me-1"></i>
+                          <strong class="text-white"><?php echo htmlspecialchars($res['person_name']); ?></strong>
+                        </div>
+                        <?php endif; ?>
+                        <?php if (!empty($res['tiktok_username'])): ?>
+                        <div class="col">
+                          <i class="bi bi-tiktok me-1"></i>@<?php echo htmlspecialchars($res['tiktok_username']); ?>
+                        </div>
+                        <?php endif; ?>
+                        <?php if (!empty($res['location'])): ?>
+                        <div class="col">
+                          <i class="bi bi-geo-alt me-1"></i><?php echo htmlspecialchars($res['location']); ?>
+                        </div>
+                        <?php endif; ?>
+                        <div class="col">
+                          <i class="bi bi-tag me-1"></i>
+                          <?php echo $res['match_source'] === 'profile_photo' ? 'Matched on profile photo' : 'Matched on evidence image'; ?>
+                          <?php if (!empty($res['evidence_title']) && $res['match_source'] !== 'profile_photo'): ?>
+                            — <em><?php echo htmlspecialchars(mb_strimwidth($res['evidence_title'], 0, 60, '…')); ?></em>
+                          <?php endif; ?>
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- View case button -->
+                    <div class="col-auto">
+                      <a href="<?php echo $caseLink; ?>" class="btn btn-outline-primary btn-sm">
+                        <i class="bi bi-box-arrow-up-right me-1"></i>View Case
+                      </a>
+                    </div>
+
+                  </div><!-- /row -->
+                </div><!-- /card-body -->
+              </div><!-- /card -->
+            </div><!-- /col-12 -->
+          <?php endforeach; ?>
+          </div><!-- /row -->
+        <?php endif; ?>
+      </div><!-- /scanner-results -->
+      <?php endif; ?>
+
+    </div><!-- /container -->
+  </main>
+  <?php endif; ?>
+
+  <!-- Drag-drop + preview JS for scanner -->
+  <script>
+  (function () {
+    var dz    = document.getElementById('scanDropzone');
+    var input = document.getElementById('scan_image_input');
+    var prev  = document.getElementById('scanPreviewImg');
+    var wrap  = document.getElementById('scanPreviewWrap');
+    var pname = document.getElementById('scanPreviewName');
+    var btn   = document.getElementById('scanBtn');
+
+    if (!dz || !input) return;
+
+    function showPreview(file) {
+      if (!file || !file.type.startsWith('image/')) return;
+      var url = URL.createObjectURL(file);
+      prev.src  = url;
+      pname.textContent = file.name + ' (' + (file.size / 1024).toFixed(0) + ' KB)';
+      wrap.classList.remove('d-none');
+    }
+
+    input.addEventListener('change', function () {
+      if (this.files && this.files[0]) showPreview(this.files[0]);
+    });
+
+    dz.addEventListener('dragover', function (e) {
+      e.preventDefault();
+      dz.classList.add('border-primary');
+    });
+    dz.addEventListener('dragleave', function () {
+      dz.classList.remove('border-primary');
+    });
+    dz.addEventListener('drop', function (e) {
+      e.preventDefault();
+      dz.classList.remove('border-primary');
+      var files = e.dataTransfer.files;
+      if (files && files[0]) {
+        input.files = files;
+        showPreview(files[0]);
+      }
+    });
+
+    if (btn) {
+      document.getElementById('scannerForm').addEventListener('submit', function () {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status"></span>Scanning…';
+      });
+    }
+  })();
+  </script>
 
   <?php if ($view === 'users'): ?>
   <main class="py-4" id="users">
