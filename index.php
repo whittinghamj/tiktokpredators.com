@@ -2029,7 +2029,9 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
 
                 // ── 1. Score person profile photos ────────────────────────────
                 try {
-                    $sensWhere2 = is_admin() ? '' : "WHERE sensitivity != 'Sealed'";
+                    $sensWhere2 = is_admin()
+                        ? "WHERE status = 'Verified'"
+                        : "WHERE status = 'Verified' AND sensitivity != 'Sealed'";
                     $pq = $pdo->query(
                         "SELECT case_code, case_name, person_name, tiktok_username, status, sensitivity, location
                          FROM cases $sensWhere2 ORDER BY id DESC"
@@ -2076,6 +2078,7 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                          JOIN cases c ON c.id = e.case_id
                          WHERE e.type = 'image'
                            AND e.mime_type LIKE 'image/%'
+                           AND c.status = 'Verified'
                            $sensFilter
                          ORDER BY e.id DESC
                          LIMIT 400"
