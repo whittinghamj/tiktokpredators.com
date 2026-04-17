@@ -1651,6 +1651,111 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
 }
 
+// Handle evidence AJAX upload (single file, returns JSON — used by multi-file uploader)
+if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
+    header('Content-Type: application/json');
+    throttle();
+    if (!check_csrf()) { echo json_encode(['ok'=>false,'error'=>'Security check failed.']); exit; }
+    if (empty($_SESSION['user'])) { echo json_encode(['ok'=>false,'error'=>'Unauthorized.']); exit; }
+    $isAdminUser = (($_SESSION['user']['role'] ?? '') === 'admin');
+    $isOwnerViewer = false;
+    $case_id_check = (int)($_POST['case_id'] ?? 0);
+    if (!$isAdminUser && $case_id_check > 0) {
+        try {
+            $cs = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
+            $cs->execute([$case_id_check]);
+            $crow = $cs->fetch();
+            if ($crow && (int)($crow['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && ($crow['status'] ?? '') === 'Pending') {
+                $isOwnerViewer = true;
+            }
+        } catch (Throwable $e) {}
+    }
+    if (!$isAdminUser && !$isOwnerViewer) { echo json_encode(['ok'=>false,'error'=>'Unauthorized.']); exit; }
+
+    $case_id  = (int)($_POST['case_id'] ?? 0);
+    $title    = trim($_POST['title'] ?? '');
+    $type     = $_POST['type'] ?? 'other';
+    $allowedTypes = ['image','video','audio','pdf','doc','other'];
+    if (!in_array($type, $allowedTypes, true)) $type = 'other';
+
+    if ($case_id <= 0 || empty($_FILES['evidence_file']['name'])) {
+        echo json_encode(['ok'=>false,'error'=>'No file provided.']); exit;
+    }
+
+    $f = $_FILES['evidence_file'];
+    if ($f['error'] !== UPLOAD_ERR_OK) {
+        echo json_encode(['ok'=>false,'error'=>'Upload error code: '.(int)$f['error']]); exit;
+    }
+
+    $uploadDir = __DIR__ . '/uploads';
+    if (!is_dir($uploadDir)) { @mkdir($uploadDir, 0755, true); }
+
+    $safeName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', basename($f['name']));
+    $origBase = pathinfo($safeName, PATHINFO_FILENAME);
+    $origExt  = pathinfo($safeName, PATHINFO_EXTENSION);
+    $origExt  = $origExt !== '' ? ('.' . strtolower($origExt)) : '';
+
+    $tmpRel = 'uploads/tmp_' . uniqid('', true);
+    $tmpAbs = __DIR__ . '/' . $tmpRel;
+    if (!move_uploaded_file($f['tmp_name'], $tmpAbs)) {
+        echo json_encode(['ok'=>false,'error'=>'Unable to save uploaded file.']); exit;
+    }
+
+    $hash    = hash_file('sha256', $tmpAbs);
+    $uniq    = date('Ymd_His') . '_' . bin2hex(random_bytes(4));
+    $finalName = $origBase . '_' . $uniq . '_' . substr($hash, 0, 12) . $origExt;
+    $destRel = 'uploads/' . $finalName;
+    $destAbs = __DIR__ . '/' . $destRel;
+
+    if (!@rename($tmpAbs, $destAbs)) {
+        @unlink($tmpAbs);
+        echo json_encode(['ok'=>false,'error'=>'Unable to finalize uploaded file.']); exit;
+    }
+
+    $mime    = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
+    $size    = filesize($destAbs) ?: 0;
+    $extLower = strtolower((string)pathinfo($safeName, PATHINFO_EXTENSION));
+
+    if ($type === 'video') {
+        $allowedVideoExts  = ['mp4','webm','ogg','ogv','m4v'];
+        $allowedVideoMimes = ['video/mp4','video/webm','video/ogg','application/ogg'];
+        $mimeLower = strtolower((string)$mime);
+        if (!in_array($extLower, $allowedVideoExts, true) || !(strpos($mimeLower,'video/') === 0 || in_array($mimeLower, $allowedVideoMimes, true))) {
+            if (is_file($destAbs)) { @unlink($destAbs); }
+            echo json_encode(['ok'=>false,'error'=>'Unsupported video format. Use MP4, WebM or OGG/OGV.']); exit;
+        }
+    }
+
+    // Deduplicate
+    try {
+        $dupChk = $pdo->prepare('SELECT id FROM evidence WHERE (hash_sha256 = ? OR sha256_hex = ?) LIMIT 1');
+        $dupChk->execute([$hash, $hash]);
+        $dup = $dupChk->fetch();
+        if ($dup) {
+            if (is_file($destAbs)) { @unlink($destAbs); }
+            echo json_encode(['ok'=>false,'error'=>'Duplicate file already exists (Evidence #'.(int)$dup['id'].').']); exit;
+        }
+    } catch (Throwable $e) {}
+
+    try {
+        $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $stmt->execute([
+            $case_id, $type,
+            ($title !== '' ? $title : $finalName),
+            $destRel, $storagePath, $safeName, $mime, $size, $hash, $hash,
+            $_SESSION['user']['id'] ?? null,
+            $_SESSION['user']['id'] ?? null
+        ]);
+        $newEvidenceId = (int)$pdo->lastInsertId();
+        log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $finalName), 'Type: '.$type, $newEvidenceId, null);
+        log_console('SUCCESS', 'AJAX evidence uploaded for case_id '.$case_id.' ('.$finalName.')');
+        echo json_encode(['ok'=>true,'evidence_id'=>$newEvidenceId,'filename'=>$finalName]); exit;
+    } catch (Throwable $e) {
+        log_console('ERROR', 'AJAX upload SQL: '.$e->getMessage());
+        echo json_encode(['ok'=>false,'error'=>'Database error: unable to save evidence.']); exit;
+    }
+}
+
 // Handle update evidence (admin only)
 if (($_POST['action'] ?? '') === 'update_evidence') {
     throttle();
@@ -4558,33 +4663,38 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           </ul>
           <div class="tab-content pt-3">
             <div class="tab-pane fade show active" id="ev-upload-pane" role="tabpanel">
-              <form class="mb-2" method="post" action="" enctype="multipart/form-data" id="evUploadForm">
-                <input type="hidden" name="action" value="upload_evidence">
-                <?php csrf_field(); ?>
-                <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
-                <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
-                <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
-                <div class="row g-2 align-items-end">
-                  <div class="col-md-5">
-                    <label class="form-label">Title</label>
-                    <input type="text" name="title" class="form-control" placeholder="Optional title">
-                  </div>
-                  <div class="col-md-3">
-                    <label class="form-label">Type</label>
-                    <select name="type" class="form-select">
-                      <option value="image">Image</option>
-                      <option value="video">Video</option>
-                      <option value="pdf">PDF</option>
-                      <option value="url">URL (no file)</option>
-                    </select>
-                  </div>
-                  <div class="col-md-4">
-                    <label class="form-label">File</label>
-                    <input type="file" name="evidence_file" class="form-control" accept="image/*,video/mp4,video/webm,video/ogg,application/pdf" required>
-                    <div class="form-text">Video uploads: MP4, WebM, OGG/OGV only.</div>
-                  </div>
+              <!-- Multi-file evidence uploader -->
+              <input type="hidden" id="evMultiCaseId" value="<?php echo (int)$viewCaseId; ?>">
+              <input type="hidden" id="evMultiCsrf" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
+              <!-- Drop zone -->
+              <div class="dropzone mb-3 position-relative" id="evDropzone" style="cursor:pointer;" onclick="document.getElementById('evMultiFileInput').click()">
+                <i class="bi bi-cloud-upload display-4 d-block mb-2 text-primary"></i>
+                <p class="mb-1 fw-semibold">Drag &amp; drop files here, or click to browse</p>
+                <small class="text-secondary">Images &nbsp;·&nbsp; Videos (MP4/WebM/OGG) &nbsp;·&nbsp; PDFs &nbsp;·&nbsp; Documents &nbsp;·&nbsp; Multiple files supported</small>
+              </div>
+              <input type="file" id="evMultiFileInput" multiple accept="image/*,video/mp4,video/webm,video/ogg,audio/*,application/pdf,.doc,.docx,.txt" class="d-none">
+              <!-- Staged file list (shown after selection) -->
+              <div id="evFileList" class="d-none">
+                <p class="small text-secondary mb-2">Give each file a title/tag before uploading:</p>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle mb-2" id="evFileTable">
+                    <thead class="table-dark">
+                      <tr>
+                        <th style="width:30%">File</th>
+                        <th style="width:30%">Title / Tag</th>
+                        <th style="width:18%">Type</th>
+                        <th style="width:22%">Progress</th>
+                      </tr>
+                    </thead>
+                    <tbody id="evFileListBody"></tbody>
+                  </table>
                 </div>
-              </form>
+              </div>
+              <div id="evUploadAllWrap" class="d-none text-end">
+                <button type="button" class="btn btn-primary" id="evUploadAllBtn">
+                  <i class="bi bi-cloud-arrow-up me-1"></i> Upload All
+                </button>
+              </div>
             </div>
             <?php if (is_admin()): ?>
             <div class="tab-pane fade" id="ev-note-pane" role="tabpanel">
@@ -4623,7 +4733,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline-light" data-bs-dismiss="modal">Close</button>
-          <button class="btn btn-primary" type="submit" form="evUploadForm"><i class="bi bi-cloud-arrow-up me-1"></i> Save Upload</button>
+          <button class="btn btn-primary d-none" id="evModalUploadBtn" type="button" onclick="document.getElementById('evUploadAllBtn').click()"><i class="bi bi-cloud-arrow-up me-1"></i> Upload All</button>
           <?php if (is_admin()): ?>
           <button class="btn btn-success" type="submit" form="evNoteForm"><i class="bi bi-journal-plus me-1"></i> Save Note</button>
           <?php endif; ?>
@@ -5052,36 +5162,36 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
           <!-- Uploads/Evidence -->
           <div class="tab-pane fade" id="uploads-pane" role="tabpanel">
-            <form class="mb-3" method="post" action="" enctype="multipart/form-data">
-              <input type="hidden" name="action" value="upload_evidence">
-              <?php csrf_field(); ?>
-              <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
-              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($adminCaseCode); ?>">
-              <div class="row g-2 align-items-end">
-                <div class="col-md-4">
-                  <label class="form-label">Title</label>
-                  <input type="text" name="title" class="form-control" placeholder="Optional title">
-                </div>
-                <div class="col-md-3">
-                  <label class="form-label">Type</label>
-                  <select name="type" class="form-select">
-                    <option value="image">Image</option>
-                    <option value="video">Video</option>
-                    <option value="audio">Audio</option>
-                    <option value="pdf">PDF</option>
-                    <option value="doc">Document</option>
-                    <option value="url">URL (no file)</option>
-                    <option value="other" selected>Other</option>
-                  </select>
-                </div>
-                <div class="col-md-5">
-                  <label class="form-label">File</label>
-                  <input type="file" name="evidence_file" class="form-control" accept="image/*,video/mp4,video/webm,video/ogg,audio/*,application/pdf,.doc,.docx,.txt" required>
-                  <div class="form-text">Video uploads: MP4, WebM, OGG/OGV only.</div>
-                </div>
+            <!-- Multi-file uploader (admin panel) -->
+            <input type="hidden" id="adminEvCaseId" value="<?php echo (int)$caseId; ?>">
+            <input type="hidden" id="adminEvCsrf" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
+            <div class="dropzone mb-3 position-relative" id="adminEvDropzone" style="cursor:pointer;" onclick="document.getElementById('adminEvFileInput').click()">
+              <i class="bi bi-cloud-upload d-block mb-1 text-primary" style="font-size:2rem;"></i>
+              <p class="mb-1 fw-semibold">Drag &amp; drop files here, or click to browse</p>
+              <small class="text-secondary">Images · Videos (MP4/WebM/OGG) · PDFs · Docs · Audio &nbsp;·&nbsp; Multiple files supported</small>
+            </div>
+            <input type="file" id="adminEvFileInput" multiple accept="image/*,video/mp4,video/webm,video/ogg,audio/*,application/pdf,.doc,.docx,.txt" class="d-none">
+            <div id="adminEvFileList" class="d-none">
+              <p class="small text-secondary mb-2">Give each file a title/tag before uploading:</p>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle mb-2" id="adminEvFileTable">
+                  <thead class="table-dark">
+                    <tr>
+                      <th style="width:30%">File</th>
+                      <th style="width:30%">Title / Tag</th>
+                      <th style="width:18%">Type</th>
+                      <th style="width:22%">Progress</th>
+                    </tr>
+                  </thead>
+                  <tbody id="adminEvFileListBody"></tbody>
+                </table>
               </div>
-              <div class="text-end mt-2"><button class="btn btn-primary btn-sm" type="submit"><i class="bi bi-cloud-arrow-up me-1"></i> Upload</button></div>
-            </form>
+            </div>
+            <div id="adminEvUploadAllWrap" class="d-none mb-3 text-end">
+              <button type="button" class="btn btn-primary btn-sm" id="adminEvUploadAllBtn">
+                <i class="bi bi-cloud-arrow-up me-1"></i> Upload All
+              </button>
+            </div>
             <form class="mb-3" method="post" action="">
               <input type="hidden" name="action" value="upload_evidence">
               <?php csrf_field(); ?>
@@ -5887,5 +5997,240 @@ document.addEventListener('click', function (ev) {
     </div>
   </div>
 </div>
+<!-- Multi-file Evidence Uploader JS -->
+<script>
+(function () {
+  'use strict';
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  function detectType(file) {
+    var m = file.type || '';
+    var ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (m.startsWith('image/'))  return 'image';
+    if (m.startsWith('video/') || m === 'application/ogg') return 'video';
+    if (m.startsWith('audio/'))  return 'audio';
+    if (m === 'application/pdf' || ext === 'pdf') return 'pdf';
+    if (['doc','docx'].includes(ext)) return 'doc';
+    return 'other';
+  }
+
+  function fmtSize(bytes) {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+  }
+
+  // Build the type <select> for a row
+  function typeSelect(detected, rowId) {
+    var types = ['image','video','audio','pdf','doc','other'];
+    var labels = {image:'Image',video:'Video',audio:'Audio',pdf:'PDF',doc:'Document',other:'Other'};
+    var s = '<select class="form-select form-select-sm" id="evType_'+rowId+'">';
+    types.forEach(function(t){
+      s += '<option value="'+t+'"'+(t===detected?' selected':'')+'>'+labels[t]+'</option>';
+    });
+    s += '</select>';
+    return s;
+  }
+
+  // ── Generic uploader factory ────────────────────────────────────────────────
+  // Wires up a dropzone/fileInput/fileListBody/uploadAllBtn combo.
+  // config: { caseIdEl, csrfEl, dzEl, inputEl, listEl, listBodyEl, uploadAllWrapEl, uploadAllBtnEl,
+  //           onAllDone }
+
+  function initUploader(config) {
+    var files = []; // [{file, rowId}]
+    var rowCounter = 0;
+
+    function populateList(newFiles) {
+      for (var i = 0; i < newFiles.length; i++) {
+        var f = newFiles[i];
+        rowCounter++;
+        var rid = rowCounter;
+        files.push({ file: f, rowId: rid });
+        var detected = detectType(f);
+        var row = document.createElement('tr');
+        row.id = 'evRow_' + rid;
+        row.innerHTML =
+          '<td class="text-truncate" style="max-width:140px;" title="'+escHtml(f.name)+'">'
+            + '<span class="text-white small">'+escHtml(f.name)+'</span>'
+            + '<br><span class="text-secondary" style="font-size:.75rem">'+fmtSize(f.size)+'</span>'
+          + '</td>'
+          + '<td><input type="text" class="form-control form-control-sm" id="evTitle_'+rid+'" placeholder="Title / tag" value="'+escHtml(f.name.replace(/\.[^.]+$/, ''))+'"></td>'
+          + '<td>'+typeSelect(detected, rid)+'</td>'
+          + '<td id="evStatus_'+rid+'">'
+              + '<div class="progress" style="height:6px;"><div class="progress-bar" id="evProg_'+rid+'" style="width:0%"></div></div>'
+              + '<span class="small text-secondary" id="evProgTxt_'+rid+'">Pending</span>'
+          + '</td>';
+        config.listBodyEl.appendChild(row);
+      }
+      config.listEl.classList.remove('d-none');
+      config.uploadAllWrapEl.classList.remove('d-none');
+      // Show footer button if it exists (modal context)
+      var footerBtn = document.getElementById('evModalUploadBtn');
+      if (footerBtn) footerBtn.classList.remove('d-none');
+    }
+
+    function escHtml(s) {
+      return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function uploadFile(item, caseId, csrf, callback) {
+      var rid = item.rowId;
+      var progBar = document.getElementById('evProg_' + rid);
+      var progTxt = document.getElementById('evProgTxt_' + rid);
+      var titleEl = document.getElementById('evTitle_' + rid);
+      var typeEl  = document.getElementById('evType_' + rid);
+
+      progTxt.textContent = 'Uploading…';
+      progTxt.className = 'small text-info';
+
+      var fd = new FormData();
+      fd.append('action', 'upload_evidence_ajax');
+      fd.append('csrf_token', csrf);
+      fd.append('case_id', caseId);
+      fd.append('title', titleEl ? titleEl.value.trim() : '');
+      fd.append('type', typeEl ? typeEl.value : 'other');
+      fd.append('evidence_file', item.file, item.file.name);
+
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '', true);
+
+      xhr.upload.addEventListener('progress', function (e) {
+        if (e.lengthComputable && progBar) {
+          var pct = Math.round((e.loaded / e.total) * 100);
+          progBar.style.width = pct + '%';
+        }
+      });
+
+      xhr.addEventListener('load', function () {
+        var data;
+        try { data = JSON.parse(xhr.responseText); } catch(e) { data = {ok:false,error:'Invalid server response'}; }
+        if (data.ok) {
+          if (progBar) { progBar.style.width = '100%'; progBar.classList.add('bg-success'); }
+          progTxt.textContent = 'Done ✓';
+          progTxt.className = 'small text-success';
+        } else {
+          if (progBar) { progBar.classList.add('bg-danger'); }
+          progTxt.textContent = 'Error: ' + (data.error || 'Unknown');
+          progTxt.className = 'small text-danger';
+        }
+        callback(data.ok);
+      });
+
+      xhr.addEventListener('error', function () {
+        if (progBar) progBar.classList.add('bg-danger');
+        progTxt.textContent = 'Network error';
+        progTxt.className = 'small text-danger';
+        callback(false);
+      });
+
+      xhr.send(fd);
+    }
+
+    function startUploads() {
+      var caseId = config.caseIdEl.value;
+      var csrf   = config.csrfEl.value;
+      config.uploadAllBtnEl.disabled = true;
+      config.uploadAllBtnEl.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Uploading…';
+
+      var idx = 0;
+      var successCount = 0;
+
+      function next() {
+        if (idx >= files.length) {
+          config.uploadAllBtnEl.innerHTML = '<i class="bi bi-check-circle me-1"></i>Done ('+successCount+'/'+files.length+' uploaded)';
+          config.uploadAllBtnEl.classList.remove('btn-primary');
+          config.uploadAllBtnEl.classList.add('btn-success');
+          if (config.onAllDone) config.onAllDone(successCount, files.length);
+          return;
+        }
+        uploadFile(files[idx], caseId, csrf, function(ok) {
+          if (ok) successCount++;
+          idx++;
+          next();
+        });
+      }
+      next();
+    }
+
+    // Wire up input + drag/drop
+    config.inputEl.addEventListener('change', function () {
+      if (this.files && this.files.length) populateList(Array.from(this.files));
+      this.value = '';
+    });
+
+    config.dzEl.addEventListener('dragover', function (e) { e.preventDefault(); this.classList.add('border-primary'); });
+    config.dzEl.addEventListener('dragleave', function ()  { this.classList.remove('border-primary'); });
+    config.dzEl.addEventListener('drop', function (e) {
+      e.preventDefault();
+      this.classList.remove('border-primary');
+      var dropped = Array.from(e.dataTransfer.files);
+      if (dropped.length) populateList(dropped);
+    });
+
+    config.uploadAllBtnEl.addEventListener('click', startUploads);
+  }
+
+  // ── Wire up modal uploader (case view) ─────────────────────────────────────
+  var evCaseIdEl    = document.getElementById('evMultiCaseId');
+  var evCsrfEl      = document.getElementById('evMultiCsrf');
+  var evDz          = document.getElementById('evDropzone');
+  var evInput       = document.getElementById('evMultiFileInput');
+  var evList        = document.getElementById('evFileList');
+  var evListBody    = document.getElementById('evFileListBody');
+  var evUploadWrap  = document.getElementById('evUploadAllWrap');
+  var evUploadBtn   = document.getElementById('evUploadAllBtn');
+
+  if (evDz && evInput && evListBody && evUploadBtn) {
+    initUploader({
+      caseIdEl:        evCaseIdEl,
+      csrfEl:          evCsrfEl,
+      dzEl:            evDz,
+      inputEl:         evInput,
+      listEl:          evList,
+      listBodyEl:      evListBody,
+      uploadAllWrapEl: evUploadWrap,
+      uploadAllBtnEl:  evUploadBtn,
+      onAllDone: function(success, total) {
+        // Reload the page after a short pause so the evidence list updates
+        if (success > 0) {
+          setTimeout(function () { window.location.reload(); }, 1200);
+        }
+      }
+    });
+  }
+
+  // ── Wire up admin panel uploader ────────────────────────────────────────────
+  var adminCaseIdEl    = document.getElementById('adminEvCaseId');
+  var adminCsrfEl      = document.getElementById('adminEvCsrf');
+  var adminDz          = document.getElementById('adminEvDropzone');
+  var adminInput       = document.getElementById('adminEvFileInput');
+  var adminList        = document.getElementById('adminEvFileList');
+  var adminListBody    = document.getElementById('adminEvFileListBody');
+  var adminUploadWrap  = document.getElementById('adminEvUploadAllWrap');
+  var adminUploadBtn   = document.getElementById('adminEvUploadAllBtn');
+
+  if (adminDz && adminInput && adminListBody && adminUploadBtn) {
+    initUploader({
+      caseIdEl:        adminCaseIdEl,
+      csrfEl:          adminCsrfEl,
+      dzEl:            adminDz,
+      inputEl:         adminInput,
+      listEl:          adminList,
+      listBodyEl:      adminListBody,
+      uploadAllWrapEl: adminUploadWrap,
+      uploadAllBtnEl:  adminUploadBtn,
+      onAllDone: function(success, total) {
+        if (success > 0) {
+          setTimeout(function () { window.location.reload(); }, 1200);
+        }
+      }
+    });
+  }
+
+})();
+</script>
+
   </body>
   </html>
