@@ -126,6 +126,68 @@ function find_person_photo_url(string $caseCode): string {
     return '';
 }
 
+/**
+ * Post a Discord notification when a case is published (status → Verified).
+ * Uses the Discord Webhook Embeds API.
+ */
+function notify_discord_case_verified(string $caseCode, string $caseName, string $personName, string $location, string $summary, string $photoRel): void {
+    $webhookUrl = 'https://discord.com/api/webhooks/1494855223863279689/PUsRIj9R_rUCmLXD86l-Jp9UzWDdorzwIOkaAkORCOB5m3dLJmY3TCmKokn8xSQPIuQn';
+
+    // Build the public case URL
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host   = $_SERVER['HTTP_HOST'] ?? 'tiktokpredators.com';
+    $caseUrl = $scheme . '://' . $host . '/?view=case&code=' . rawurlencode($caseCode);
+
+    // Build absolute photo URL if one exists
+    $imageUrl = '';
+    if ($photoRel !== '') {
+        $imageUrl = $scheme . '://' . $host . '/' . ltrim($photoRel, '/');
+    }
+
+    // Truncate summary for embed description
+    $desc = mb_strlen($summary) > 300 ? mb_substr($summary, 0, 297) . '…' : $summary;
+
+    $embed = [
+        'title'       => '🚨 New Verified Case: ' . $caseName,
+        'url'         => $caseUrl,
+        'color'       => 0xE74C3C, // red
+        'description' => $desc,
+        'fields'      => [
+            ['name' => 'Predator Name', 'value' => ($personName !== '' ? $personName : '—'), 'inline' => true],
+            ['name' => 'Location',      'value' => ($location   !== '' ? $location   : '—'), 'inline' => true],
+        ],
+        'footer' => ['text' => 'TikTok Predators · ' . date('d M Y')],
+    ];
+
+    if ($imageUrl !== '') {
+        $embed['image'] = ['url' => $imageUrl];
+    }
+
+    $payload = json_encode([
+        'username'   => 'TikTok Predators',
+        'avatar_url' => $scheme . '://' . $host . '/assets/favicon/android-chrome-192x192.png',
+        'embeds'     => [$embed],
+    ]);
+
+    $ch = curl_init($webhookUrl);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_POSTFIELDS     => $payload,
+        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT        => 10,
+    ]);
+    $resp = curl_exec($ch);
+    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($httpCode < 200 || $httpCode >= 300) {
+        log_console('WARN', 'Discord webhook returned HTTP ' . $httpCode . ': ' . (string)$resp);
+    } else {
+        log_console('INFO', 'Discord notification sent for case ' . $caseCode);
+    }
+}
+
 // --- Face / Evidence Scanner helpers (GD-based perceptual hashing + histogram) ---
 
 /**
@@ -1296,6 +1358,19 @@ if (($_POST['action'] ?? '') === 'update_case') {
         }
         if ($changes) {
             log_case_event($pdo, $case_id, 'case_updated', $case_name !== '' ? $case_name : $case_code, 'Updated fields: '.implode('; ', $changes));
+        }
+        // Fire Discord notification if status just moved to Verified
+        $prevStatus = $prev['status'] ?? '';
+        if ($status === 'Verified' && $prevStatus !== 'Verified') {
+            $photoRel = find_person_photo_url($case_code);
+            notify_discord_case_verified(
+                $case_code,
+                $case_name,
+                $person_name,
+                $location,
+                $initial_summary,
+                $photoRel
+            );
         }
         flash('success', 'Case updated.');
     } catch (Throwable $e) {
