@@ -251,6 +251,16 @@ function can_manage_pending_case(PDO $pdo, int $caseId): bool {
     return implode(', ', $rendered);
   }
 
+  function render_tiktok_usernames_lines($value, string $emptyHtml = '<span class="text-secondary">&mdash;</span>'): string {
+    $names = tiktok_username_list($value);
+    if (!$names) { return $emptyHtml; }
+    $rendered = [];
+    foreach ($names as $name) {
+      $rendered[] = '@' . htmlspecialchars($name);
+    }
+    return implode('<br>', $rendered);
+  }
+
   function normalize_social_username($input): string {
     $name = trim((string)$input);
     if ($name === '') { return ''; }
@@ -5397,7 +5407,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">TikTok Usernames</div>
-                          <div><?php echo render_tiktok_usernames($viewCase['tiktok_username'] ?? ''); ?></div>
+                          <div><?php echo render_tiktok_usernames_lines($viewCase['tiktok_username'] ?? ''); ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Status</div>
@@ -5738,7 +5748,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="small text-secondary">Snapchat Username</div>
                   <div class="mb-2"><?php echo ($caseRow['snapchat_username'] ?? '') !== '' ? '@'.htmlspecialchars($caseRow['snapchat_username']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
                   <div class="small text-secondary">TikTok Usernames</div>
-                  <div class="mb-2"><?php echo render_tiktok_usernames($caseRow['tiktok_username'] ?? ''); ?></div>
+                  <div class="mb-2"><?php echo render_tiktok_usernames_lines($caseRow['tiktok_username'] ?? ''); ?></div>
                   <div class="small text-secondary">Status</div>
                   <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['status']); ?></span></div>
                   <div class="small text-secondary">Sensitivity</div>
