@@ -416,6 +416,12 @@ try { $pdo = new PDO($dsn, $dbu, $dbp, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTIO
 catch (Throwable $e) {
     // Record DB error for debugging and show a safe message
     $_SESSION['last_db_error'] = $e->getMessage();
+log_console('ERROR', 'DB: ' . $e->getMessage());
+    $_SESSION['sql_error'] = $e->getMessage();
+log_console('ERROR', 'SQL: ' . $e->getMessage());
+    flash('error', 'Database connection failed. Please check configuration.');
+    $_SESSION['auth_tab'] = 'register';
+}
 // --- Project settings table setup ---
 try {
   $pdo->exec("\
@@ -436,12 +442,6 @@ try {
   }
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
-}
-log_console('ERROR', 'DB: ' . $e->getMessage());
-    $_SESSION['sql_error'] = $e->getMessage();
-log_console('ERROR', 'SQL: ' . $e->getMessage());
-    flash('error', 'Database connection failed. Please check configuration.');
-    $_SESSION['auth_tab'] = 'register';
 }
   // --- Cases schema safety: ensure location column exists ---
   try {
