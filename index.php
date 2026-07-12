@@ -424,7 +424,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
 }
 // --- Project settings table setup ---
 try {
-  $pdo->exec("\n    CREATE TABLE IF NOT EXISTS project_settings (\n      setting_key VARCHAR(64) NOT NULL PRIMARY KEY,\n      setting_value LONGTEXT NULL,\n      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP\n    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n  ");
+  $pdo->exec(<<<SQL
+CREATE TABLE IF NOT EXISTS project_settings (
+  setting_key VARCHAR(64) NOT NULL PRIMARY KEY,
+  setting_value LONGTEXT NULL,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+SQL
+  );
   $defaultSettings = [
     'site_title' => 'TikTokPredators',
     'meta_data' => 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.',
