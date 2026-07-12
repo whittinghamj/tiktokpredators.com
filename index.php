@@ -251,6 +251,15 @@ function can_manage_pending_case(PDO $pdo, int $caseId): bool {
     return implode(', ', $rendered);
   }
 
+  function normalize_social_username($input): string {
+    $name = trim((string)$input);
+    if ($name === '') { return ''; }
+    $name = preg_replace('~^https?://(?:www\.)?(?:snapchat\.com/add/|snapchat\.com/@?)~i', '', $name);
+    $name = ltrim((string)$name, '@');
+    $name = preg_replace('/[?#\/].*$/', '', $name);
+    return trim((string)$name);
+  }
+
   function get_case_tiktok_usernames(PDO $pdo, int $caseId): string {
     if ($caseId <= 0) { return ''; }
     try {
@@ -610,6 +619,14 @@ SQL
     $col = $pdo->query("SHOW COLUMNS FROM cases LIKE 'location'");
     if (!$col || !$col->fetch()) {
       $pdo->exec("ALTER TABLE cases ADD COLUMN location VARCHAR(255) NULL AFTER person_name");
+    }
+    $phoneCol = $pdo->query("SHOW COLUMNS FROM cases LIKE 'phone_number'");
+    if (!$phoneCol || !$phoneCol->fetch()) {
+      $pdo->exec("ALTER TABLE cases ADD COLUMN phone_number VARCHAR(64) NULL AFTER location");
+    }
+    $snapCol = $pdo->query("SHOW COLUMNS FROM cases LIKE 'snapchat_username'");
+    if (!$snapCol || !$snapCol->fetch()) {
+      $pdo->exec("ALTER TABLE cases ADD COLUMN snapchat_username VARCHAR(255) NULL AFTER phone_number");
     }
     $userCol = $pdo->query("SHOW COLUMNS FROM cases LIKE 'tiktok_username'");
     $userInfo = $userCol ? $userCol->fetch() : null;
@@ -1506,6 +1523,8 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
     $location = trim($_POST['location'] ?? '');
+    $phone_number = trim($_POST['phone_number'] ?? '');
+    $snapchat_username = normalize_social_username($_POST['snapchat_username'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $initial_summary = trim($_POST['initial_summary'] ?? '');
 
@@ -1518,12 +1537,14 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
 
     try {
         $case_code = generate_case_code($pdo);
-        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
         $stmt->execute([
             $case_code,
             $case_name,
             ($person_name !== '' ? $person_name : null),
           ($location !== '' ? $location : null),
+            ($phone_number !== '' ? $phone_number : null),
+            ($snapchat_username !== '' ? $snapchat_username : null),
             ($tiktok_username !== '' ? $tiktok_username : null),
             $initial_summary,
             'Standard',
@@ -1576,9 +1597,10 @@ if (($_POST['action'] ?? '') === 'create_case') {
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
     $location = trim($_POST['location'] ?? '');
+    $phone_number = trim($_POST['phone_number'] ?? '');
+    $snapchat_username = normalize_social_username($_POST['snapchat_username'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $initial_summary = trim($_POST['initial_summary'] ?? '');
-    $remove_person_photo = !empty($_POST['remove_person_photo']);
     $sensitivity = $_POST['sensitivity'] ?? '';
     $status = $_POST['status'] ?? '';
 
@@ -1606,12 +1628,14 @@ if (($_POST['action'] ?? '') === 'create_case') {
 
     try {
         $case_code = generate_case_code($pdo);
-        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
         $stmt->execute([
             $case_code,
             $case_name,
             ($person_name !== '' ? $person_name : null),
           ($location !== '' ? $location : null),
+            ($phone_number !== '' ? $phone_number : null),
+            ($snapchat_username !== '' ? $snapchat_username : null),
             ($tiktok_username !== '' ? $tiktok_username : null),
             $initial_summary,
             $sensitivity,
@@ -1674,8 +1698,11 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
     $location = trim($_POST['location'] ?? '');
+    $phone_number = trim($_POST['phone_number'] ?? '');
+    $snapchat_username = normalize_social_username($_POST['snapchat_username'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $initial_summary = trim($_POST['initial_summary'] ?? '');
+    $remove_person_photo = !empty($_POST['remove_person_photo']);
     $sensitivity = $_POST['sensitivity'] ?? '';
     $status = $_POST['status'] ?? '';
 
@@ -1695,7 +1722,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
 
     // Fetch current values to compute diffs
     $prev = [];
-    try { $ps = $pdo->prepare('SELECT case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); } catch (Throwable $e) {}
+    try { $ps = $pdo->prepare('SELECT case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); } catch (Throwable $e) {}
 
     if ($remove_person_photo) {
       remove_person_photo($case_code);
@@ -1724,11 +1751,13 @@ if (($_POST['action'] ?? '') === 'update_case') {
     }
 
     try {
-        $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, location = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
+        $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, location = ?, phone_number = ?, snapchat_username = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
         $u->execute([
             $case_name,
             ($person_name !== '' ? $person_name : null),
           ($location !== '' ? $location : null),
+            ($phone_number !== '' ? $phone_number : null),
+            ($snapchat_username !== '' ? $snapchat_username : null),
             ($tiktok_username !== '' ? $tiktok_username : null),
             $initial_summary,
             $sensitivity,
@@ -1738,11 +1767,13 @@ if (($_POST['action'] ?? '') === 'update_case') {
         $tiktok_username = save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         // Build diff summary
         $changes = [];
-        $fields = ['case_name','person_name','location','tiktok_username','initial_summary','sensitivity','status'];
+        $fields = ['case_name','person_name','location','phone_number','snapchat_username','tiktok_username','initial_summary','sensitivity','status'];
         $newVals = [
             'case_name' => $case_name,
             'person_name' => ($person_name !== '' ? $person_name : null),
           'location' => ($location !== '' ? $location : null),
+            'phone_number' => ($phone_number !== '' ? $phone_number : null),
+            'snapchat_username' => ($snapchat_username !== '' ? $snapchat_username : null),
             'tiktok_username' => ($tiktok_username !== '' ? $tiktok_username : null),
             'initial_summary' => $initial_summary,
             'sensitivity' => $sensitivity,
@@ -2615,7 +2646,7 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                         ? "WHERE c.status = 'Verified'"
                         : "WHERE c.status = 'Verified' AND c.sensitivity != 'Sealed'";
                     $pq = $pdo->query(
-                        "SELECT c.case_code, c.case_name, c.person_name, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.status, c.sensitivity, c.location
+                        "SELECT c.case_code, c.case_name, c.person_name, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.status, c.sensitivity, c.location, c.phone_number, c.snapchat_username
                          FROM cases c
                          LEFT JOIN (
                            SELECT case_id, GROUP_CONCAT(username ORDER BY sort_order ASC, id ASC SEPARATOR ', ') AS usernames
@@ -3417,7 +3448,7 @@ if (count($tpDiscordWebhooks) === 0) {
       $case_code_param = trim($_GET['code'] ?? '');
       if ($case_code_param !== '') {
           try {
-              $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE case_code = ? LIMIT 1');
+              $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE case_code = ? LIMIT 1');
               $stmt->execute([$case_code_param]);
               $caseRow = $stmt->fetch();
                 if ($caseRow) { $caseRow['tiktok_username'] = get_case_tiktok_usernames($pdo, (int)$caseRow['id']) ?: ($caseRow['tiktok_username'] ?? ''); }
@@ -3465,8 +3496,19 @@ if (count($tpDiscordWebhooks) === 0) {
                                 <label class="form-label">Location</label>
                                 <input type="text" name="location" class="form-control" value="<?php echo htmlspecialchars($caseRow['location'] ?? ''); ?>" placeholder="City, region, or country">
                               </div>
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">Phone Number</label>
+                                <input type="text" name="phone_number" class="form-control" value="<?php echo htmlspecialchars($caseRow['phone_number'] ?? ''); ?>" inputmode="tel">
+                              </div>
                             </div>
                             <div class="row">
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">Snapchat Username</label>
+                                <div class="input-group">
+                                  <span class="input-group-text">@</span>
+                                  <input type="text" name="snapchat_username" class="form-control" value="<?php echo htmlspecialchars($caseRow['snapchat_username'] ?? ''); ?>" placeholder="username">
+                                </div>
+                              </div>
                               <div class="col-md-6 mb-3">
                                 <label class="form-label">TikTok Usernames</label>
                                 <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars(normalize_tiktok_usernames($caseRow['tiktok_username'] ?? '')); ?>" placeholder="username1, username2">
@@ -3680,7 +3722,7 @@ try {
   if ($search !== '') {
     $like = '%' . $search . '%';
     $stmt = $pdo->prepare("
-          SELECT c.id, c.case_code, c.case_name, c.person_name, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+          SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
              COALESCE(ev.cnt, 0) AS evidence_count,
              COALESCE(cv.cnt, 0) AS case_view_count,
              COALESCE(ev.last_added, c.opened_at) AS last_activity
@@ -3701,14 +3743,14 @@ try {
         GROUP BY case_id
       ) tu ON tu.case_id = c.id
       WHERE c.status <> 'Pending'
-        AND (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ? OR EXISTS (SELECT 1 FROM case_tiktok_usernames ctu WHERE ctu.case_id = c.id AND ctu.username LIKE ?))
+        AND (c.case_name LIKE ? OR c.person_name LIKE ? OR c.phone_number LIKE ? OR c.snapchat_username LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ? OR EXISTS (SELECT 1 FROM case_tiktok_usernames ctu WHERE ctu.case_id = c.id AND ctu.username LIKE ?))
       ORDER BY last_activity DESC
       LIMIT 1000
     ");
-    $stmt->execute([$like, $like, $like, $like, $like]);
+    $stmt->execute([$like, $like, $like, $like, $like, $like, $like]);
     $rs = $stmt->fetchAll();
   } else {
-    $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+    $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
                    COALESCE(ev.cnt, 0) AS evidence_count,
                    COALESCE(cv.cnt, 0) AS case_view_count,
                    COALESCE(ev.last_added, c.opened_at) AS last_activity
@@ -3866,6 +3908,19 @@ if ($rs && count($rs) > 0):
                     <div class="col-md-6 mb-3">
                       <label class="form-label">Location</label>
                       <input type="text" name="location" class="form-control" placeholder="City, region, or country">
+                    </div>
+                  </div>
+                  <div class="row">
+                    <div class="col-md-6 mb-3">
+                      <label class="form-label">Phone Number</label>
+                      <input type="text" name="phone_number" class="form-control" inputmode="tel">
+                    </div>
+                    <div class="col-md-6 mb-3">
+                      <label class="form-label">Snapchat Username</label>
+                      <div class="input-group">
+                        <span class="input-group-text">@</span>
+                        <input type="text" name="snapchat_username" class="form-control" placeholder="username (optional)">
+                      </div>
                     </div>
                   </div>
                   <div class="row">
@@ -4985,7 +5040,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       $viewCase = null; $viewCaseId = 0; $viewEv = []; $viewTotalViews = 0;
       if ($caseCode !== '') {
         try {
-          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
+          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
           $viewCaseId = (int)($viewCase['id'] ?? 0);
@@ -5333,6 +5388,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                           <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars($viewCase['location']) : '<span class="text-secondary">—</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Phone Number</div>
+                          <div><?php echo ($viewCase['phone_number'] ?? '') !== '' ? htmlspecialchars($viewCase['phone_number']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Snapchat Username</div>
+                          <div><?php echo ($viewCase['snapchat_username'] ?? '') !== '' ? '@'.htmlspecialchars($viewCase['snapchat_username']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">TikTok Usernames</div>
                           <div><?php echo render_tiktok_usernames($viewCase['tiktok_username'] ?? ''); ?></div>
                         </div>
@@ -5529,6 +5592,19 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               </div>
             </div>
             <div class="row g-2 mt-2">
+              <div class="col-md-6">
+                <label class="form-label">Phone Number</label>
+                <input type="text" name="phone_number" class="form-control" value="<?php echo htmlspecialchars($viewCase['phone_number'] ?? ''); ?>" inputmode="tel">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Snapchat Username</label>
+                <div class="input-group">
+                  <span class="input-group-text">@</span>
+                  <input type="text" name="snapchat_username" class="form-control" value="<?php echo htmlspecialchars($viewCase['snapchat_username'] ?? ''); ?>" placeholder="username">
+                </div>
+              </div>
+            </div>
+            <div class="row g-2 mt-2">
               <div class="col-md-3">
                 <label class="form-label">Sensitivity</label>
                 <select name="sensitivity" class="form-select" required>
@@ -5584,7 +5660,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       // Fetch case meta
       $caseRow = null; $caseId = 0; $adminCaseTotalViews = 0;
       try {
-          $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
+          $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
           $s->execute([$adminCaseCode]);
           $caseRow = $s->fetch();
           $caseId = (int)($caseRow['id'] ?? 0);
@@ -5657,6 +5733,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="mb-2"><?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?></div>
                   <div class="small text-secondary">Location</div>
                   <div class="mb-2"><?php echo ($caseRow['location'] ?? '') !== '' ? htmlspecialchars($caseRow['location']) : '<span class="text-secondary">—</span>'; ?></div>
+                  <div class="small text-secondary">Phone Number</div>
+                  <div class="mb-2"><?php echo ($caseRow['phone_number'] ?? '') !== '' ? htmlspecialchars($caseRow['phone_number']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
+                  <div class="small text-secondary">Snapchat Username</div>
+                  <div class="mb-2"><?php echo ($caseRow['snapchat_username'] ?? '') !== '' ? '@'.htmlspecialchars($caseRow['snapchat_username']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
                   <div class="small text-secondary">TikTok Usernames</div>
                   <div class="mb-2"><?php echo render_tiktok_usernames($caseRow['tiktok_username'] ?? ''); ?></div>
                   <div class="small text-secondary">Status</div>
@@ -5925,6 +6005,19 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="col-md-6">
                     <label class="form-label">Location</label>
                     <input type="text" name="location" class="form-control" value="<?php echo htmlspecialchars($caseRow['location'] ?? ''); ?>" placeholder="City, region, or country">
+                  </div>
+                </div>
+                <div class="row g-2 mt-2">
+                  <div class="col-md-6">
+                    <label class="form-label">Phone Number</label>
+                    <input type="text" name="phone_number" class="form-control" value="<?php echo htmlspecialchars($caseRow['phone_number'] ?? ''); ?>" inputmode="tel">
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Snapchat Username</label>
+                    <div class="input-group">
+                      <span class="input-group-text">@</span>
+                      <input type="text" name="snapchat_username" class="form-control" value="<?php echo htmlspecialchars($caseRow['snapchat_username'] ?? ''); ?>" placeholder="username">
+                    </div>
                   </div>
                 </div>
                 <div class="row g-2 mt-2">
@@ -6370,8 +6463,19 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 <label class="form-label">Location</label>
                 <input type="text" name="location" class="form-control" placeholder="City, region, or country">
               </div>
+              <div class="col-md-6">
+                <label class="form-label">Phone Number</label>
+                <input type="text" name="phone_number" class="form-control" inputmode="tel">
+              </div>
             </div>
             <div class="row g-2 mt-2">
+              <div class="col-md-6">
+                <label class="form-label">Snapchat Username</label>
+                <div class="input-group">
+                  <span class="input-group-text">@</span>
+                  <input type="text" name="snapchat_username" class="form-control" placeholder="username (optional)">
+                </div>
+              </div>
               <div class="col-md-6">
                 <label class="form-label">TikTok Usernames</label>
                 <input type="text" name="tiktok_username" class="form-control" placeholder="username1, username2 (no @)">
