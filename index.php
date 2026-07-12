@@ -135,9 +135,20 @@ function tp_discord_webhooks(PDO $pdo): array {
       if (!is_array($item)) { continue; }
       $name = trim((string)($item['name'] ?? ''));
       $url = trim((string)($item['url'] ?? ''));
+      $setAt = trim((string)($item['set_at'] ?? ''));
+      $lastTestedAt = trim((string)($item['last_tested_at'] ?? ''));
+      $lastTestStatus = trim((string)($item['last_test_status'] ?? ''));
+      $lastTestMessage = trim((string)($item['last_test_message'] ?? ''));
       if ($url === '') { continue; }
       if (!filter_var($url, FILTER_VALIDATE_URL)) { continue; }
-      $hooks[] = ['name' => $name, 'url' => $url];
+      $hooks[] = [
+        'name' => $name,
+        'url' => $url,
+        'set_at' => $setAt,
+        'last_tested_at' => $lastTestedAt,
+        'last_test_status' => $lastTestStatus,
+        'last_test_message' => $lastTestMessage,
+      ];
     }
   }
 
@@ -145,10 +156,39 @@ function tp_discord_webhooks(PDO $pdo): array {
   if (count($hooks) === 0) {
     $legacy = trim(tp_project_setting($pdo, 'discord_webhook_key', ''));
     if ($legacy !== '' && filter_var($legacy, FILTER_VALIDATE_URL)) {
-      $hooks[] = ['name' => 'Primary', 'url' => $legacy];
+      $hooks[] = [
+        'name' => 'Primary',
+        'url' => $legacy,
+        'set_at' => '',
+        'last_tested_at' => '',
+        'last_test_status' => '',
+        'last_test_message' => '',
+      ];
     }
   }
   return $hooks;
+}
+
+function tp_post_discord_webhook(string $webhookUrl, array $payload): array {
+  $payloadJson = json_encode($payload);
+  if ($payloadJson === false) {
+    return [false, 0, 'Failed to encode payload'];
+  }
+
+  $ch = curl_init($webhookUrl);
+  curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_POSTFIELDS => $payloadJson,
+    CURLOPT_HTTPHEADER => ['Content-Type: application/json'],
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_TIMEOUT => 10,
+  ]);
+  $resp = curl_exec($ch);
+  $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  curl_close($ch);
+
+  $ok = ($httpCode >= 200 && $httpCode < 300);
+  return [$ok, $httpCode, (string)$resp];
 }
 
 /**
@@ -233,29 +273,19 @@ function notify_discord_case_verified(string $caseCode, string $caseName, string
         $embed['image'] = ['url' => $imageUrl];
     }
 
-    $payload = json_encode([
-        'username'   => 'TikTok Predators',
-        'avatar_url' => $scheme . '://' . $host . '/assets/favicon/android-chrome-192x192.png',
-        'embeds'     => [$embed],
-    ]);
+    $payload = [
+      'username'   => 'TikTok Predators',
+      'avatar_url' => $scheme . '://' . $host . '/assets/favicon/android-chrome-192x192.png',
+      'embeds'     => [$embed],
+    ];
 
     foreach ($webhooks as $hook) {
       $webhookUrl = trim((string)($hook['url'] ?? ''));
       $hookName = trim((string)($hook['name'] ?? ''));
       if ($webhookUrl === '') { continue; }
-      $ch = curl_init($webhookUrl);
-      curl_setopt_array($ch, [
-        CURLOPT_POST           => true,
-        CURLOPT_POSTFIELDS     => $payload,
-        CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 10,
-      ]);
-      $resp = curl_exec($ch);
-      $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-      curl_close($ch);
+      [$ok, $httpCode, $resp] = tp_post_discord_webhook($webhookUrl, $payload);
 
-      if ($httpCode < 200 || $httpCode >= 300) {
+      if (!$ok) {
         log_console('WARN', 'Discord webhook ' . ($hookName !== '' ? '['.$hookName.'] ' : '') . 'returned HTTP ' . $httpCode . ': ' . (string)$resp);
       } else {
         log_console('INFO', 'Discord notification sent for case ' . $caseCode . ($hookName !== '' ? ' via ['.$hookName.']' : ''));
@@ -1195,6 +1225,86 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     header('Location: '. $redir); exit;
 }
 
+// Handle webhook test (main admin only)
+if (($_POST['action'] ?? '') === 'test_discord_webhook') {
+    throttle();
+    $isAjax = (strtolower((string)($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest') || (($_POST['ajax'] ?? '') === '1');
+    $respondJson = function (bool $ok, string $message, array $extra = []) {
+      header('Content-Type: application/json');
+      echo json_encode(array_merge(['ok' => $ok, 'message' => $message], $extra));
+      exit;
+    };
+
+    if (!check_csrf()) {
+      if ($isAjax) { $respondJson(false, 'Security check failed.'); }
+      flash('error', 'Security check failed.');
+      header('Location: '. trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings')); exit;
+    }
+    if (!tp_is_main_admin()) {
+      if ($isAjax) { $respondJson(false, 'Unauthorized. Main admin only.'); }
+      flash('error', 'Unauthorized. Main admin only.');
+      header('Location: '. trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings')); exit;
+    }
+
+    $webhookName = trim((string)($_POST['webhook_name'] ?? ''));
+    $webhookUrl = trim((string)($_POST['webhook_url'] ?? ''));
+    if ($webhookUrl === '' || !filter_var($webhookUrl, FILTER_VALIDATE_URL)) {
+      if ($isAjax) { $respondJson(false, 'Please enter a valid webhook URL.'); }
+      flash('error', 'Please enter a valid webhook URL.');
+      header('Location: '. trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings')); exit;
+    }
+
+    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    $host = $_SERVER['HTTP_HOST'] ?? 'tiktokpredators.com';
+    $payload = [
+      'username' => ($webhookName !== '' ? $webhookName : 'Webhook Test'),
+      'avatar_url' => $scheme . '://' . $host . '/assets/favicon/android-chrome-192x192.png',
+      'content' => 'Webhook test from ' . $host . ' at ' . date('Y-m-d H:i:s'),
+    ];
+    [$ok, $httpCode, $resp] = tp_post_discord_webhook($webhookUrl, $payload);
+    $testedAt = date('c');
+    $status = $ok ? 'success' : 'failed';
+    $message = $ok ? 'Webhook test succeeded.' : ('Webhook test failed (HTTP ' . $httpCode . ').');
+
+    try {
+      $hooks = tp_discord_webhooks($pdo);
+      $updated = false;
+      foreach ($hooks as &$h) {
+        if (trim((string)($h['url'] ?? '')) === $webhookUrl) {
+          $h['last_tested_at'] = $testedAt;
+          $h['last_test_status'] = $status;
+          $h['last_test_message'] = substr((string)$resp, 0, 280);
+          if (trim((string)($h['set_at'] ?? '')) === '') {
+            $h['set_at'] = $testedAt;
+          }
+          $updated = true;
+          break;
+        }
+      }
+      unset($h);
+      if ($updated) {
+        $hooksJson = json_encode($hooks, JSON_UNESCAPED_SLASHES);
+        if ($hooksJson === false) { $hooksJson = '[]'; }
+        $stmt = $pdo->prepare('INSERT INTO project_settings (setting_key, setting_value, updated_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()');
+        $stmt->execute(['discord_webhooks', $hooksJson]);
+      }
+    } catch (Throwable $e) {
+      $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+    }
+
+    if ($isAjax) {
+      $respondJson($ok, $message, [
+        'http_code' => $httpCode,
+        'tested_at' => $testedAt,
+        'status' => $status,
+        'test_message' => substr((string)$resp, 0, 280),
+      ]);
+    }
+
+    flash($ok ? 'success' : 'error', $message);
+    header('Location: '. trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings')); exit;
+}
+
   // Handle project settings save (main admin only)
   if (($_POST['action'] ?? '') === 'save_project_settings') {
     throttle();
@@ -1215,13 +1325,38 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     $discordWebhooks = [];
     if (!is_array($webhookNames)) { $webhookNames = []; }
     if (!is_array($webhookUrls)) { $webhookUrls = []; }
+    $existingByUrl = [];
+    try {
+      foreach (tp_discord_webhooks($pdo) as $existingHook) {
+        $u = trim((string)($existingHook['url'] ?? ''));
+        if ($u === '') { continue; }
+        $existingByUrl[$u] = [
+          'set_at' => trim((string)($existingHook['set_at'] ?? '')),
+          'last_tested_at' => trim((string)($existingHook['last_tested_at'] ?? '')),
+          'last_test_status' => trim((string)($existingHook['last_test_status'] ?? '')),
+          'last_test_message' => trim((string)($existingHook['last_test_message'] ?? '')),
+        ];
+      }
+    } catch (Throwable $e) {
+      // no-op
+    }
     $max = max(count($webhookNames), count($webhookUrls));
     for ($i = 0; $i < $max; $i++) {
       $name = trim((string)($webhookNames[$i] ?? ''));
       $url = trim((string)($webhookUrls[$i] ?? ''));
       if ($url === '') { continue; }
       if (!filter_var($url, FILTER_VALIDATE_URL)) { continue; }
-      $discordWebhooks[] = ['name' => $name, 'url' => $url];
+      $existingMeta = $existingByUrl[$url] ?? [];
+      $setAt = trim((string)($existingMeta['set_at'] ?? ''));
+      if ($setAt === '') { $setAt = date('c'); }
+      $discordWebhooks[] = [
+        'name' => $name,
+        'url' => $url,
+        'set_at' => $setAt,
+        'last_tested_at' => trim((string)($existingMeta['last_tested_at'] ?? '')),
+        'last_test_status' => trim((string)($existingMeta['last_test_status'] ?? '')),
+        'last_test_message' => trim((string)($existingMeta['last_test_message'] ?? '')),
+      ];
     }
     $discordWebhooksJson = json_encode($discordWebhooks, JSON_UNESCAPED_SLASHES);
     if ($discordWebhooksJson === false) { $discordWebhooksJson = '[]'; }
@@ -5774,10 +5909,38 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                             <div class="col-md-4">
                               <input type="text" name="discord_webhook_name[]" class="form-control" placeholder="Webhook name (e.g. Alerts)" value="<?php echo htmlspecialchars((string)($hook['name'] ?? '')); ?>">
                             </div>
-                            <div class="col-md-7">
+                            <div class="col-md-5">
                               <input type="url" name="discord_webhook_url[]" class="form-control" placeholder="https://discord.com/api/webhooks/..." value="<?php echo htmlspecialchars((string)($hook['url'] ?? '')); ?>">
                             </div>
-                            <div class="col-md-1 d-grid">
+                            <?php
+                              $tpSetAtRaw = trim((string)($hook['set_at'] ?? ''));
+                              $tpSetAtTs = $tpSetAtRaw !== '' ? strtotime($tpSetAtRaw) : false;
+                            ?>
+                            <?php $tpSetLabel = $tpSetAtTs ? ('Set: ' . date('Y-m-d H:i', $tpSetAtTs)) : 'Set: New'; ?>
+                            <div class="col-md-2 small text-secondary d-flex align-items-center" title="When this webhook was first set" data-set-label="<?php echo htmlspecialchars($tpSetLabel); ?>">
+                              <?php
+                                $tpLastRaw = trim((string)($hook['last_tested_at'] ?? ''));
+                                $tpLastTs = $tpLastRaw !== '' ? strtotime($tpLastRaw) : false;
+                                $tpLastStatus = trim((string)($hook['last_test_status'] ?? ''));
+                                $tpLastMessage = trim((string)($hook['last_test_message'] ?? ''));
+                                echo htmlspecialchars($tpSetLabel);
+                                echo '<br>';
+                                if ($tpLastTs) {
+                                  $tpBadgeClass = 'text-bg-secondary';
+                                  if ($tpLastStatus === 'success') { $tpBadgeClass = 'text-bg-success'; }
+                                  if ($tpLastStatus === 'failed') { $tpBadgeClass = 'text-bg-danger'; }
+                                  $tpStatusLabel = ($tpLastStatus !== '' ? $tpLastStatus : 'unknown');
+                                  $tpMsgTitle = ($tpLastStatus === 'failed' && $tpLastMessage !== '')
+                                    ? ' data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="' . htmlspecialchars($tpLastMessage) . '"'
+                                    : '';
+                                  echo 'Test: ' . htmlspecialchars(date('Y-m-d H:i', $tpLastTs)) . ' <span class="badge ' . $tpBadgeClass . '"' . $tpMsgTitle . '>' . htmlspecialchars($tpStatusLabel) . '</span>';
+                                } else {
+                                  echo 'Test: Never';
+                                }
+                              ?>
+                            </div>
+                            <div class="col-md-1 d-grid gap-1">
+                              <button type="button" class="btn btn-outline-info test-webhook-row" title="Test"><i class="bi bi-broadcast me-0"></i></button>
                               <button type="button" class="btn btn-outline-danger remove-webhook-row" title="Remove"><i class="bi bi-x-lg"></i></button>
                             </div>
                           </div>
@@ -5813,7 +5976,17 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       (function () {
         var addBtn = document.getElementById('addWebhookRowBtn');
         var rows = document.getElementById('discordWebhookRows');
+        var csrfToken = <?php echo json_encode($_SESSION['csrf_token'] ?? ''); ?>;
         if (!addBtn || !rows) return;
+
+        function initTooltips(scope) {
+          if (typeof bootstrap === 'undefined' || !bootstrap.Tooltip) return;
+          var root = scope || document;
+          root.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(function (el) {
+            if (bootstrap.Tooltip.getInstance(el)) return;
+            new bootstrap.Tooltip(el);
+          });
+        }
 
         function bindRemove(btn) {
           btn.addEventListener('click', function () {
@@ -5830,17 +6003,99 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
         rows.querySelectorAll('.remove-webhook-row').forEach(bindRemove);
 
+        function bindTest(btn) {
+          function escHtml(str) {
+            return String(str)
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/"/g, '&quot;')
+              .replace(/'/g, '&#39;');
+          }
+          function statusBadge(status, msg) {
+            var st = status || 'unknown';
+            var cls = 'text-bg-secondary';
+            if (st === 'success') cls = 'text-bg-success';
+            if (st === 'failed') cls = 'text-bg-danger';
+            var title = (st === 'failed' && msg)
+              ? (' data-bs-toggle="tooltip" data-bs-placement="top" data-bs-title="' + escHtml(msg) + '"')
+              : '';
+            return '<span class="badge ' + cls + '"' + title + '>' + escHtml(st) + '</span>';
+          }
+          btn.addEventListener('click', function () {
+            var row = btn.closest('.webhook-row');
+            if (!row) return;
+            var nameInput = row.querySelector('input[name="discord_webhook_name[]"]');
+            var urlInput = row.querySelector('input[name="discord_webhook_url[]"]');
+            var statusCell = row.querySelector('.col-md-2[data-set-label]');
+            var webhookName = nameInput ? nameInput.value.trim() : '';
+            var webhookUrl = urlInput ? urlInput.value.trim() : '';
+            if (webhookUrl === '') {
+              if (statusCell) {
+                var setLabelMissing = statusCell.getAttribute('data-set-label') || 'Set: New';
+                statusCell.innerHTML = escHtml(setLabelMissing) + '<br>Test: Missing URL';
+              }
+              return;
+            }
+
+            var fd = new FormData();
+            fd.append('action', 'test_discord_webhook');
+            fd.append('csrf_token', csrfToken);
+            fd.append('ajax', '1');
+            fd.append('webhook_name', webhookName);
+            fd.append('webhook_url', webhookUrl);
+            fd.append('redirect_url', '?view=project_settings#project-settings');
+
+            btn.disabled = true;
+            if (statusCell) {
+              var setLabelTesting = statusCell.getAttribute('data-set-label') || 'Set: New';
+              statusCell.innerHTML = escHtml(setLabelTesting) + '<br>Test: Testing...';
+            }
+            fetch(window.location.href, {
+              method: 'POST',
+              headers: { 'X-Requested-With': 'XMLHttpRequest' },
+              body: fd
+            }).then(function (res) {
+              return res.json();
+            }).then(function (data) {
+              var when = data && data.tested_at ? String(data.tested_at).replace('T', ' ').substring(0, 16) : 'Now';
+              var st = data && data.status ? data.status : 'unknown';
+              var testMsg = data && data.test_message ? String(data.test_message) : '';
+              if (statusCell) {
+                var setLabelDone = statusCell.getAttribute('data-set-label') || 'Set: New';
+                statusCell.innerHTML = escHtml(setLabelDone) + '<br>Test: ' + escHtml(when) + ' ' + statusBadge(st, testMsg);
+                initTooltips(statusCell);
+              }
+            }).catch(function () {
+              if (statusCell) {
+                var setLabelFailed = statusCell.getAttribute('data-set-label') || 'Set: New';
+                statusCell.innerHTML = escHtml(setLabelFailed) + '<br>Test: ' + statusBadge('failed', 'Request failed');
+                initTooltips(statusCell);
+              }
+            }).finally(function () {
+              btn.disabled = false;
+            });
+          });
+        }
+
+        rows.querySelectorAll('.test-webhook-row').forEach(bindTest);
+
         addBtn.addEventListener('click', function () {
           var row = document.createElement('div');
           row.className = 'row g-2 webhook-row';
           row.innerHTML = '' +
             '<div class="col-md-4"><input type="text" name="discord_webhook_name[]" class="form-control" placeholder="Webhook name (e.g. Alerts)"></div>' +
-            '<div class="col-md-7"><input type="url" name="discord_webhook_url[]" class="form-control" placeholder="https://discord.com/api/webhooks/..."></div>' +
-            '<div class="col-md-1 d-grid"><button type="button" class="btn btn-outline-danger remove-webhook-row" title="Remove"><i class="bi bi-x-lg"></i></button></div>';
+            '<div class="col-md-5"><input type="url" name="discord_webhook_url[]" class="form-control" placeholder="https://discord.com/api/webhooks/..."></div>' +
+            '<div class="col-md-2 small text-secondary d-flex align-items-center" title="When this webhook was first set" data-set-label="Set: New">Set: New<br>Test: Never</div>' +
+            '<div class="col-md-1 d-grid gap-1"><button type="button" class="btn btn-outline-info test-webhook-row" title="Test"><i class="bi bi-broadcast me-0"></i></button><button type="button" class="btn btn-outline-danger remove-webhook-row" title="Remove"><i class="bi bi-x-lg"></i></button></div>';
           rows.appendChild(row);
           var btn = row.querySelector('.remove-webhook-row');
           if (btn) bindRemove(btn);
+          var testBtn = row.querySelector('.test-webhook-row');
+          if (testBtn) bindTest(testBtn);
         });
+
+        initTooltips(rows);
       })();
       </script>
     <?php endif; ?>
