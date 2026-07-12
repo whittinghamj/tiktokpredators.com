@@ -2683,6 +2683,35 @@ if (count($tpDiscordWebhooks) === 0) {
     .timeline { border-left: 2px solid rgba(255,255,255,.1); padding-left: 1rem; }
     .timeline .item { position: relative; margin-bottom: 1rem; }
     .timeline .item::before { content: ""; position: absolute; left: -1.1rem; top: .25rem; width: .65rem; height: .65rem; background: var(--tp-primary); border-radius: 50%; box-shadow: 0 0 0 3px rgba(124,77,255,.25); }
+    .webhook-row {
+      display: grid;
+      grid-template-columns: minmax(160px, 1fr) minmax(260px, 1.55fr) minmax(190px, auto) auto;
+      gap: .5rem;
+      align-items: center;
+    }
+    .webhook-meta {
+      min-height: 42px;
+      line-height: 1.25;
+      white-space: nowrap;
+    }
+    .webhook-actions {
+      display: flex;
+      gap: .4rem;
+      justify-content: flex-end;
+    }
+    .webhook-actions .btn {
+      width: 42px;
+      height: 42px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+    }
+    @media (max-width: 991.98px) {
+      .webhook-row { grid-template-columns: 1fr; }
+      .webhook-meta { white-space: normal; }
+      .webhook-actions { justify-content: flex-start; }
+    }
     
     /* Evidence modal: full-width media */
     .evidence-modal .modal-dialog { max-width: 95vw; }
@@ -5905,11 +5934,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       </div>
                       <div id="discordWebhookRows" class="vstack gap-2">
                         <?php foreach ($tpDiscordWebhooks as $hook): ?>
-                          <div class="row g-2 webhook-row">
-                            <div class="col-md-4">
+                          <div class="webhook-row">
+                            <div>
                               <input type="text" name="discord_webhook_name[]" class="form-control" placeholder="Webhook name (e.g. Alerts)" value="<?php echo htmlspecialchars((string)($hook['name'] ?? '')); ?>">
                             </div>
-                            <div class="col-md-5">
+                            <div>
                               <input type="url" name="discord_webhook_url[]" class="form-control" placeholder="https://discord.com/api/webhooks/..." value="<?php echo htmlspecialchars((string)($hook['url'] ?? '')); ?>">
                             </div>
                             <?php
@@ -5917,7 +5946,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                               $tpSetAtTs = $tpSetAtRaw !== '' ? strtotime($tpSetAtRaw) : false;
                             ?>
                             <?php $tpSetLabel = $tpSetAtTs ? ('Set: ' . date('Y-m-d H:i', $tpSetAtTs)) : 'Set: New'; ?>
-                            <div class="col-md-2 small text-secondary d-flex align-items-center" title="When this webhook was first set" data-set-label="<?php echo htmlspecialchars($tpSetLabel); ?>">
+                            <div class="webhook-meta small text-secondary" title="When this webhook was first set" data-set-label="<?php echo htmlspecialchars($tpSetLabel); ?>">
                               <?php
                                 $tpLastRaw = trim((string)($hook['last_tested_at'] ?? ''));
                                 $tpLastTs = $tpLastRaw !== '' ? strtotime($tpLastRaw) : false;
@@ -5939,7 +5968,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                 }
                               ?>
                             </div>
-                            <div class="col-md-1 d-grid gap-1">
+                            <div class="webhook-actions">
                               <button type="button" class="btn btn-outline-info test-webhook-row" title="Test"><i class="bi bi-broadcast me-0"></i></button>
                               <button type="button" class="btn btn-outline-danger remove-webhook-row" title="Remove"><i class="bi bi-x-lg"></i></button>
                             </div>
@@ -6027,7 +6056,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             if (!row) return;
             var nameInput = row.querySelector('input[name="discord_webhook_name[]"]');
             var urlInput = row.querySelector('input[name="discord_webhook_url[]"]');
-            var statusCell = row.querySelector('.col-md-2[data-set-label]');
+            var statusCell = row.querySelector('.webhook-meta[data-set-label]');
             var webhookName = nameInput ? nameInput.value.trim() : '';
             var webhookUrl = urlInput ? urlInput.value.trim() : '';
             if (webhookUrl === '') {
@@ -6082,12 +6111,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
         addBtn.addEventListener('click', function () {
           var row = document.createElement('div');
-          row.className = 'row g-2 webhook-row';
+          row.className = 'webhook-row';
           row.innerHTML = '' +
-            '<div class="col-md-4"><input type="text" name="discord_webhook_name[]" class="form-control" placeholder="Webhook name (e.g. Alerts)"></div>' +
-            '<div class="col-md-5"><input type="url" name="discord_webhook_url[]" class="form-control" placeholder="https://discord.com/api/webhooks/..."></div>' +
-            '<div class="col-md-2 small text-secondary d-flex align-items-center" title="When this webhook was first set" data-set-label="Set: New">Set: New<br>Test: Never</div>' +
-            '<div class="col-md-1 d-grid gap-1"><button type="button" class="btn btn-outline-info test-webhook-row" title="Test"><i class="bi bi-broadcast me-0"></i></button><button type="button" class="btn btn-outline-danger remove-webhook-row" title="Remove"><i class="bi bi-x-lg"></i></button></div>';
+            '<div><input type="text" name="discord_webhook_name[]" class="form-control" placeholder="Webhook name (e.g. Alerts)"></div>' +
+            '<div><input type="url" name="discord_webhook_url[]" class="form-control" placeholder="https://discord.com/api/webhooks/..."></div>' +
+            '<div class="webhook-meta small text-secondary" title="When this webhook was first set" data-set-label="Set: New">Set: New<br>Test: Never</div>' +
+            '<div class="webhook-actions"><button type="button" class="btn btn-outline-info test-webhook-row" title="Test"><i class="bi bi-broadcast me-0"></i></button><button type="button" class="btn btn-outline-danger remove-webhook-row" title="Remove"><i class="bi bi-x-lg"></i></button></div>';
           rows.appendChild(row);
           var btn = row.querySelector('.remove-webhook-row');
           if (btn) bindRemove(btn);
