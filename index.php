@@ -209,6 +209,47 @@ function can_manage_pending_case(PDO $pdo, int $caseId): bool {
     }
     return false;
 }
+
+  function normalize_tiktok_usernames($input): string {
+    if (is_array($input)) { $input = implode("\n", $input); }
+    $raw = str_replace(["\r\n", "\r", ";"], "\n", trim((string)$input));
+    if ($raw === '') { return ''; }
+    $parts = preg_split('/[\s,]+/', $raw) ?: [];
+    $names = [];
+    $seen = [];
+    foreach ($parts as $part) {
+      $name = trim((string)$part);
+      if ($name === '') { continue; }
+      $name = preg_replace('~^https?://(?:www\.)?tiktok\.com/@?~i', '', $name);
+      $name = ltrim((string)$name, '@');
+      $name = preg_replace('/[?#\/].*$/', '', $name);
+      $name = trim((string)$name);
+      if ($name === '') { continue; }
+      $key = mb_strtolower($name, 'UTF-8');
+      if (isset($seen[$key])) { continue; }
+      $seen[$key] = true;
+      $names[] = $name;
+    }
+    return implode(', ', $names);
+  }
+
+  function tiktok_username_list($value): array {
+    $normalized = normalize_tiktok_usernames($value);
+    if ($normalized === '') { return []; }
+    return array_values(array_filter(array_map('trim', explode(',', $normalized)), static function($name) {
+      return $name !== '';
+    }));
+  }
+
+  function render_tiktok_usernames($value, string $emptyHtml = '<span class="text-secondary">&mdash;</span>'): string {
+    $names = tiktok_username_list($value);
+    if (!$names) { return $emptyHtml; }
+    $rendered = [];
+    foreach ($names as $name) {
+      $rendered[] = '@' . htmlspecialchars($name);
+    }
+    return implode(', ', $rendered);
+  }
 $view = $_GET['view'] ?? 'cases';
 function throttle(){
     $now = time();
@@ -506,11 +547,17 @@ SQL
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
-  // --- Cases schema safety: ensure location column exists ---
+  // --- Cases schema safety: ensure location column exists and username field can hold multiple values ---
   try {
     $col = $pdo->query("SHOW COLUMNS FROM cases LIKE 'location'");
     if (!$col || !$col->fetch()) {
       $pdo->exec("ALTER TABLE cases ADD COLUMN location VARCHAR(255) NULL AFTER person_name");
+    }
+    $userCol = $pdo->query("SHOW COLUMNS FROM cases LIKE 'tiktok_username'");
+    $userInfo = $userCol ? $userCol->fetch() : null;
+    $userType = strtolower((string)($userInfo['Type'] ?? ''));
+    if ($userInfo && strpos($userType, 'text') === false) {
+      $pdo->exec("ALTER TABLE cases MODIFY COLUMN tiktok_username TEXT NULL");
     }
   } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
@@ -1394,7 +1441,7 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
     $location = trim($_POST['location'] ?? '');
-    $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
+    $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $initial_summary = trim($_POST['initial_summary'] ?? '');
 
     if ($case_name === '' || $initial_summary === '') {
@@ -1463,7 +1510,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
     $location = trim($_POST['location'] ?? '');
-    $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
+    $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $initial_summary = trim($_POST['initial_summary'] ?? '');
     $sensitivity = $_POST['sensitivity'] ?? '';
     $status = $_POST['status'] ?? '';
@@ -1559,7 +1606,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
     $location = trim($_POST['location'] ?? '');
-    $tiktok_username = trim(ltrim($_POST['tiktok_username'] ?? '', '@'));
+    $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $initial_summary = trim($_POST['initial_summary'] ?? '');
     $sensitivity = $_POST['sensitivity'] ?? '';
     $status = $_POST['status'] ?? '';
@@ -3334,11 +3381,8 @@ if (count($tpDiscordWebhooks) === 0) {
                             </div>
                             <div class="row">
                               <div class="col-md-6 mb-3">
-                                <label class="form-label">TikTok Username</label>
-                                <div class="input-group">
-                                  <span class="input-group-text">@</span>
-                                  <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars(ltrim((string)$caseRow['tiktok_username'], '@')); ?>">
-                                </div>
+                                <label class="form-label">TikTok Usernames</label>
+                                <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars(normalize_tiktok_usernames($caseRow['tiktok_username'] ?? '')); ?>" placeholder="username1, username2">
                               </div>
                               <div class="col-md-6 mb-3">
                                 <label class="form-label">Person Photo (optional)</label>
@@ -3597,7 +3641,7 @@ if ($rs && count($rs) > 0):
     $code  = $row['case_code'];
     $name  = $row['case_name'] ?: $row['case_code'];
     $person= $row['person_name'] ?: '';
-    $tuser = $row['tiktok_username'] ? '@'.htmlspecialchars($row['tiktok_username']) : '';
+    $tuser = $row['tiktok_username'] ? render_tiktok_usernames($row['tiktok_username'], '') : '';
     $sum   = trim($row['initial_summary'] ?? '');
     $sum   = $sum !== '' ? mb_strimwidth($sum, 0, 180, '…', 'UTF-8') : 'No summary provided.';
     $evc   = (int)($row['evidence_count'] ?? 0);
@@ -3723,11 +3767,8 @@ if ($rs && count($rs) > 0):
                   </div>
                   <div class="row">
                     <div class="col-md-6 mb-3">
-                      <label class="form-label">TikTok Username</label>
-                      <div class="input-group">
-                        <span class="input-group-text">@</span>
-                        <input type="text" name="tiktok_username" class="form-control" placeholder="username (optional)">
-                      </div>
+                      <label class="form-label">TikTok Usernames</label>
+                      <input type="text" name="tiktok_username" class="form-control" placeholder="username1, username2 (optional)">
                     </div>
                   </div>
                   <div class="mb-3">
@@ -4179,7 +4220,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                         <?php endif; ?>
                         <?php if (!empty($res['tiktok_username'])): ?>
                         <div class="col">
-                          <i class="bi bi-tiktok me-1"></i>@<?php echo htmlspecialchars($res['tiktok_username']); ?>
+                          <i class="bi bi-tiktok me-1"></i><?php echo render_tiktok_usernames($res['tiktok_username'], ''); ?>
                         </div>
                         <?php endif; ?>
                         <?php if (!empty($res['location'])): ?>
@@ -5188,8 +5229,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                           <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars($viewCase['location']) : '<span class="text-secondary">—</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
-                          <div class="small text-secondary">TikTok Username</div>
-                          <div><?php echo $viewCase['tiktok_username'] ? '@'.htmlspecialchars($viewCase['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
+                          <div class="small text-secondary">TikTok Usernames</div>
+                          <div><?php echo render_tiktok_usernames($viewCase['tiktok_username'] ?? ''); ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Status</div>
@@ -5368,11 +5409,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 <input type="text" name="case_name" class="form-control" value="<?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?>" required>
               </div>
               <div class="col-md-6">
-                <label class="form-label">TikTok Username</label>
-                <div class="input-group">
-                  <span class="input-group-text">@</span>
-                  <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars($viewCase['tiktok_username'] ?? ''); ?>">
-                </div>
+                <label class="form-label">TikTok Usernames</label>
+                <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars(normalize_tiktok_usernames($viewCase['tiktok_username'] ?? '')); ?>" placeholder="username1, username2">
               </div>
             </div>
 
@@ -5508,8 +5546,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="mb-2"><?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?></div>
                   <div class="small text-secondary">Location</div>
                   <div class="mb-2"><?php echo ($caseRow['location'] ?? '') !== '' ? htmlspecialchars($caseRow['location']) : '<span class="text-secondary">—</span>'; ?></div>
-                  <div class="small text-secondary">TikTok Username</div>
-                  <div class="mb-2"><?php echo $caseRow['tiktok_username'] ? '@'.htmlspecialchars($caseRow['tiktok_username']) : '<span class="text-secondary">—</span>'; ?></div>
+                  <div class="small text-secondary">TikTok Usernames</div>
+                  <div class="mb-2"><?php echo render_tiktok_usernames($caseRow['tiktok_username'] ?? ''); ?></div>
                   <div class="small text-secondary">Status</div>
                   <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['status']); ?></span></div>
                   <div class="small text-secondary">Sensitivity</div>
@@ -5763,11 +5801,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     <input type="text" name="case_name" class="form-control" value="<?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?>" required>
                   </div>
                   <div class="col-md-6">
-                    <label class="form-label">TikTok Username</label>
-                    <div class="input-group">
-                      <span class="input-group-text">@</span>
-                      <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars($caseRow['tiktok_username'] ?? ''); ?>">
-                    </div>
+                    <label class="form-label">TikTok Usernames</label>
+                    <input type="text" name="tiktok_username" class="form-control" value="<?php echo htmlspecialchars(normalize_tiktok_usernames($caseRow['tiktok_username'] ?? '')); ?>" placeholder="username1, username2">
                   </div>
                 </div>
 
@@ -6221,11 +6256,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             </div>
             <div class="row g-2 mt-2">
               <div class="col-md-6">
-                <label class="form-label">TikTok Username</label>
-                <div class="input-group">
-                  <span class="input-group-text">@</span>
-                  <input type="text" name="tiktok_username" class="form-control" placeholder="username (no @)">
-                </div>
+                <label class="form-label">TikTok Usernames</label>
+                <input type="text" name="tiktok_username" class="form-control" placeholder="username1, username2 (no @)">
               </div>
               <div class="col-md-3">
                 <label class="form-label">Sensitivity</label>
