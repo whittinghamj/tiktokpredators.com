@@ -250,6 +250,52 @@ function can_manage_pending_case(PDO $pdo, int $caseId): bool {
     }
     return implode(', ', $rendered);
   }
+
+  function get_case_tiktok_usernames(PDO $pdo, int $caseId): string {
+    if ($caseId <= 0) { return ''; }
+    try {
+      $stmt = $pdo->prepare('SELECT username FROM case_tiktok_usernames WHERE case_id = ? ORDER BY sort_order ASC, id ASC');
+      $stmt->execute([$caseId]);
+      $names = [];
+      foreach ($stmt->fetchAll() as $row) {
+        $name = trim((string)($row['username'] ?? ''));
+        if ($name !== '') { $names[] = $name; }
+      }
+      return implode(', ', $names);
+    } catch (Throwable $e) {
+      return '';
+    }
+  }
+
+  function save_case_tiktok_usernames(PDO $pdo, int $caseId, $input): string {
+    if ($caseId <= 0) { return ''; }
+    $names = tiktok_username_list($input);
+    $pdo->prepare('DELETE FROM case_tiktok_usernames WHERE case_id = ?')->execute([$caseId]);
+    if ($names) {
+      $stmt = $pdo->prepare('INSERT INTO case_tiktok_usernames (case_id, username, username_key, sort_order) VALUES (?, ?, ?, ?)');
+      foreach ($names as $idx => $name) {
+        $stmt->execute([$caseId, $name, mb_strtolower($name, 'UTF-8'), $idx]);
+      }
+    }
+    return implode(', ', $names);
+  }
+
+  function backfill_case_tiktok_usernames(PDO $pdo): void {
+    try {
+      $rows = $pdo->query("SELECT id, tiktok_username FROM cases WHERE tiktok_username IS NOT NULL AND tiktok_username <> ''")->fetchAll();
+      if (!$rows) { return; }
+      $stmt = $pdo->prepare('INSERT IGNORE INTO case_tiktok_usernames (case_id, username, username_key, sort_order) VALUES (?, ?, ?, ?)');
+      foreach ($rows as $row) {
+        $caseId = (int)($row['id'] ?? 0);
+        if ($caseId <= 0) { continue; }
+        foreach (tiktok_username_list($row['tiktok_username'] ?? '') as $idx => $name) {
+          $stmt->execute([$caseId, $name, mb_strtolower($name, 'UTF-8'), $idx]);
+        }
+      }
+    } catch (Throwable $e) {
+      $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+    }
+  }
 $view = $_GET['view'] ?? 'cases';
 function throttle(){
     $now = time();
@@ -268,6 +314,18 @@ function find_person_photo_url(string $caseCode): string {
         }
     }
     return '';
+}
+
+function remove_person_photo(string $caseCode): bool {
+    $caseCode = trim($caseCode);
+    if ($caseCode === '') { return false; }
+    $peopleDir = __DIR__ . '/uploads/people';
+    $removed = false;
+    foreach (['jpg','jpeg','png','webp'] as $ext) {
+        $path = $peopleDir . '/' . $caseCode . '.' . $ext;
+        if (is_file($path) && @unlink($path)) { $removed = true; }
+    }
+    return $removed;
 }
 
 /**
@@ -562,6 +620,13 @@ SQL
   } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
   }
+// --- Case TikTok usernames relationship setup and legacy backfill ---
+try {
+    $pdo->exec("\n        CREATE TABLE IF NOT EXISTS case_tiktok_usernames (\n            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,\n            case_id BIGINT UNSIGNED NOT NULL,\n            username VARCHAR(255) NOT NULL,\n            username_key VARCHAR(255) NOT NULL,\n            sort_order INT UNSIGNED NOT NULL DEFAULT 0,\n            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n            UNIQUE KEY uq_case_username (case_id, username_key),\n            INDEX idx_case_sort (case_id, sort_order, id),\n            INDEX idx_username_key (username_key)\n        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n    ");
+    backfill_case_tiktok_usernames($pdo);
+} catch (Throwable $e) {
+    $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
 // --- Case events logging setup ---
 try {
     $pdo->exec("
@@ -1466,6 +1531,7 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
             $_SESSION['user']['id'] ?? null
         ]);
         $case_id = (int)$pdo->lastInsertId();
+        save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         log_case_event($pdo, $case_id, 'case_created', $case_name, 'Viewer submitted case. Status set to Pending');
 
         // Optional person photo
@@ -1512,6 +1578,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
     $location = trim($_POST['location'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $initial_summary = trim($_POST['initial_summary'] ?? '');
+    $remove_person_photo = !empty($_POST['remove_person_photo']);
     $sensitivity = $_POST['sensitivity'] ?? '';
     $status = $_POST['status'] ?? '';
 
@@ -1552,6 +1619,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
             $_SESSION['user']['id'] ?? null
         ]);
         $case_id = (int)$pdo->lastInsertId();
+        save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         log_case_event($pdo, $case_id, 'case_created', $case_name, 'Case created with status '.$status.' and sensitivity '.$sensitivity);
         // Optional: handle person photo upload
         if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
@@ -1627,7 +1695,11 @@ if (($_POST['action'] ?? '') === 'update_case') {
 
     // Fetch current values to compute diffs
     $prev = [];
-    try { $ps = $pdo->prepare('SELECT case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; } catch (Throwable $e) {}
+    try { $ps = $pdo->prepare('SELECT case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); } catch (Throwable $e) {}
+
+    if ($remove_person_photo) {
+      remove_person_photo($case_code);
+    }
 
     // Optional: update person photo
     if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
@@ -1663,6 +1735,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
             $status,
             $case_id
         ]);
+        $tiktok_username = save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         // Build diff summary
         $changes = [];
         $fields = ['case_name','person_name','location','tiktok_username','initial_summary','sensitivity','status'];
@@ -2311,8 +2384,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         $d1->execute([$case_id]);
         $d2 = $pdo->prepare('DELETE FROM case_notes WHERE case_id = ?');
         $d2->execute([$case_id]);
-        $d3 = $pdo->prepare('DELETE FROM cases WHERE id = ? LIMIT 1');
+        $d3 = $pdo->prepare('DELETE FROM case_tiktok_usernames WHERE case_id = ?');
         $d3->execute([$case_id]);
+        $d4 = $pdo->prepare('DELETE FROM cases WHERE id = ? LIMIT 1');
+        $d4->execute([$case_id]);
         $pdo->commit();
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) { $pdo->rollBack(); }
@@ -2537,11 +2612,17 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                 // ── 1. Score person profile photos ────────────────────────────
                 try {
                     $sensWhere2 = is_admin()
-                        ? "WHERE status = 'Verified'"
-                        : "WHERE status = 'Verified' AND sensitivity != 'Sealed'";
+                        ? "WHERE c.status = 'Verified'"
+                        : "WHERE c.status = 'Verified' AND c.sensitivity != 'Sealed'";
                     $pq = $pdo->query(
-                        "SELECT case_code, case_name, person_name, tiktok_username, status, sensitivity, location
-                         FROM cases $sensWhere2 ORDER BY id DESC"
+                        "SELECT c.case_code, c.case_name, c.person_name, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.status, c.sensitivity, c.location
+                         FROM cases c
+                         LEFT JOIN (
+                           SELECT case_id, GROUP_CONCAT(username ORDER BY sort_order ASC, id ASC SEPARATOR ', ') AS usernames
+                           FROM case_tiktok_usernames
+                           GROUP BY case_id
+                         ) tu ON tu.case_id = c.id
+                         $sensWhere2 ORDER BY c.id DESC"
                     );
                     foreach ($pq->fetchAll() as $pr) {
                         $photoRel = find_person_photo_url($pr['case_code']);
@@ -2579,10 +2660,15 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                 try {
                     $sq = $pdo->query(
                         "SELECT e.id, e.filepath, e.mime_type, e.title,
-                                c.case_code, c.case_name, c.person_name, c.tiktok_username,
+                                    c.case_code, c.case_name, c.person_name, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username,
                                 c.status, c.sensitivity, c.location
                          FROM evidence e
                          JOIN cases c ON c.id = e.case_id
+                             LEFT JOIN (
+                               SELECT case_id, GROUP_CONCAT(username ORDER BY sort_order ASC, id ASC SEPARATOR ', ') AS usernames
+                               FROM case_tiktok_usernames
+                               GROUP BY case_id
+                             ) tu ON tu.case_id = c.id
                          WHERE e.type = 'image'
                            AND e.mime_type LIKE 'image/%'
                            AND c.status = 'Verified'
@@ -3334,6 +3420,7 @@ if (count($tpDiscordWebhooks) === 0) {
               $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE case_code = ? LIMIT 1');
               $stmt->execute([$case_code_param]);
               $caseRow = $stmt->fetch();
+                if ($caseRow) { $caseRow['tiktok_username'] = get_case_tiktok_usernames($pdo, (int)$caseRow['id']) ?: ($caseRow['tiktok_username'] ?? ''); }
           } catch (Throwable $e) { $caseRow = null; }
           if ($caseRow) {
               $ownerCanInline = can_manage_pending_case($pdo, (int)$caseRow['id']);
@@ -3387,6 +3474,12 @@ if (count($tpDiscordWebhooks) === 0) {
                               <div class="col-md-6 mb-3">
                                 <label class="form-label">Person Photo (optional)</label>
                                 <input type="file" name="person_photo" class="form-control" accept="image/*">
+                                <?php if (find_person_photo_url($caseRow['case_code'] ?? '') !== ''): ?>
+                                  <div class="form-check mt-2">
+                                    <input class="form-check-input" type="checkbox" name="remove_person_photo" value="1" id="ownerRemovePersonPhoto">
+                                    <label class="form-check-label" for="ownerRemovePersonPhoto">Remove current person photo</label>
+                                  </div>
+                                <?php endif; ?>
                               </div>
                             </div>
                             <div class="mb-3">
@@ -3587,7 +3680,7 @@ try {
   if ($search !== '') {
     $like = '%' . $search . '%';
     $stmt = $pdo->prepare("
-      SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+          SELECT c.id, c.case_code, c.case_name, c.person_name, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
              COALESCE(ev.cnt, 0) AS evidence_count,
              COALESCE(cv.cnt, 0) AS case_view_count,
              COALESCE(ev.last_added, c.opened_at) AS last_activity
@@ -3602,15 +3695,20 @@ try {
         FROM case_views
         GROUP BY case_id
       ) cv ON cv.case_id = c.id
+      LEFT JOIN (
+        SELECT case_id, GROUP_CONCAT(username ORDER BY sort_order ASC, id ASC SEPARATOR ', ') AS usernames
+        FROM case_tiktok_usernames
+        GROUP BY case_id
+      ) tu ON tu.case_id = c.id
       WHERE c.status <> 'Pending'
-        AND (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ?)
+        AND (c.case_name LIKE ? OR c.person_name LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ? OR EXISTS (SELECT 1 FROM case_tiktok_usernames ctu WHERE ctu.case_id = c.id AND ctu.username LIKE ?))
       ORDER BY last_activity DESC
       LIMIT 1000
     ");
-    $stmt->execute([$like, $like, $like, $like]);
+    $stmt->execute([$like, $like, $like, $like, $like]);
     $rs = $stmt->fetchAll();
   } else {
-    $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+    $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
                    COALESCE(ev.cnt, 0) AS evidence_count,
                    COALESCE(cv.cnt, 0) AS case_view_count,
                    COALESCE(ev.last_added, c.opened_at) AS last_activity
@@ -3625,6 +3723,11 @@ try {
               FROM case_views
               GROUP BY case_id
             ) cv ON cv.case_id = c.id
+            LEFT JOIN (
+              SELECT case_id, GROUP_CONCAT(username ORDER BY sort_order ASC, id ASC SEPARATOR ', ') AS usernames
+              FROM case_tiktok_usernames
+              GROUP BY case_id
+            ) tu ON tu.case_id = c.id
             WHERE c.status <> 'Pending'
             ORDER BY last_activity DESC
             LIMIT 1000";
@@ -4886,6 +4989,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
           $viewCaseId = (int)($viewCase['id'] ?? 0);
+          if ($viewCaseId > 0) { $viewCase['tiktok_username'] = get_case_tiktok_usernames($pdo, $viewCaseId) ?: ($viewCase['tiktok_username'] ?? ''); }
 
         } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage()); }
@@ -5444,6 +5548,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 <label class="form-label">Update Person Photo</label>
                 <input type="file" name="person_photo" class="form-control" accept="image/*">
                 <small class="text-secondary">Leave blank to keep current</small>
+                <?php if (find_person_photo_url($caseCode) !== ''): ?>
+                  <div class="form-check mt-2">
+                    <input class="form-check-input" type="checkbox" name="remove_person_photo" value="1" id="viewRemovePersonPhoto">
+                    <label class="form-check-label" for="viewRemovePersonPhoto">Remove current person photo</label>
+                  </div>
+                <?php endif; ?>
               </div>
             </div>
 
@@ -5478,6 +5588,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           $s->execute([$adminCaseCode]);
           $caseRow = $s->fetch();
           $caseId = (int)($caseRow['id'] ?? 0);
+            if ($caseId > 0) { $caseRow['tiktok_username'] = get_case_tiktok_usernames($pdo, $caseId) ?: ($caseRow['tiktok_username'] ?? ''); }
       } catch (Throwable $e) {
           $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
@@ -5836,6 +5947,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     <label class="form-label">Update Person Photo</label>
                     <input type="file" name="person_photo" class="form-control" accept="image/*">
                     <small class="text-secondary">Leave blank to keep current</small>
+                    <?php if (find_person_photo_url($caseRow['case_code'] ?? '') !== ''): ?>
+                      <div class="form-check mt-2">
+                        <input class="form-check-input" type="checkbox" name="remove_person_photo" value="1" id="adminRemovePersonPhoto">
+                        <label class="form-check-label" for="adminRemovePersonPhoto">Remove current person photo</label>
+                      </div>
+                    <?php endif; ?>
                   </div>
                 </div>
 
