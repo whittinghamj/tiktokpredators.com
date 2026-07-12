@@ -105,6 +105,7 @@ function tp_project_settings(PDO $pdo): array {
     'site_title' => 'TikTokPredators',
     'meta_data' => 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.',
     'discord_webhook_key' => '',
+    'discord_webhooks' => '[]',
   ];
   try {
     $stmt = $pdo->query('SELECT setting_key, setting_value FROM project_settings');
@@ -123,6 +124,31 @@ function tp_project_settings(PDO $pdo): array {
 function tp_project_setting(PDO $pdo, string $key, string $default = ''): string {
   $settings = tp_project_settings($pdo);
   return (string)($settings[$key] ?? $default);
+}
+
+function tp_discord_webhooks(PDO $pdo): array {
+  $raw = tp_project_setting($pdo, 'discord_webhooks', '[]');
+  $decoded = json_decode($raw, true);
+  $hooks = [];
+  if (is_array($decoded)) {
+    foreach ($decoded as $item) {
+      if (!is_array($item)) { continue; }
+      $name = trim((string)($item['name'] ?? ''));
+      $url = trim((string)($item['url'] ?? ''));
+      if ($url === '') { continue; }
+      if (!filter_var($url, FILTER_VALIDATE_URL)) { continue; }
+      $hooks[] = ['name' => $name, 'url' => $url];
+    }
+  }
+
+  // Backward-compatible fallback for older single-webhook setting.
+  if (count($hooks) === 0) {
+    $legacy = trim(tp_project_setting($pdo, 'discord_webhook_key', ''));
+    if ($legacy !== '' && filter_var($legacy, FILTER_VALIDATE_URL)) {
+      $hooks[] = ['name' => 'Primary', 'url' => $legacy];
+    }
+  }
+  return $hooks;
 }
 
 /**
@@ -169,12 +195,12 @@ function find_person_photo_url(string $caseCode): string {
  */
 function notify_discord_case_verified(string $caseCode, string $caseName, string $personName, string $location, string $summary, string $photoRel): void {
   global $pdo;
-  $webhookUrl = 'https://discord.com/api/webhooks/1494855223863279689/PUsRIj9R_rUCmLXD86l-Jp9UzWDdorzwIOkaAkORCOB5m3dLJmY3TCmKokn8xSQPIuQn';
+  $webhooks = [];
   if (isset($pdo) && $pdo instanceof PDO) {
-    $configuredWebhook = tp_project_setting($pdo, 'discord_webhook_key', '');
-    if ($configuredWebhook !== '') {
-      $webhookUrl = $configuredWebhook;
-    }
+    $webhooks = tp_discord_webhooks($pdo);
+  }
+  if (count($webhooks) === 0) {
+    return;
   }
 
     // Build the public case URL
@@ -213,22 +239,27 @@ function notify_discord_case_verified(string $caseCode, string $caseName, string
         'embeds'     => [$embed],
     ]);
 
-    $ch = curl_init($webhookUrl);
-    curl_setopt_array($ch, [
+    foreach ($webhooks as $hook) {
+      $webhookUrl = trim((string)($hook['url'] ?? ''));
+      $hookName = trim((string)($hook['name'] ?? ''));
+      if ($webhookUrl === '') { continue; }
+      $ch = curl_init($webhookUrl);
+      curl_setopt_array($ch, [
         CURLOPT_POST           => true,
         CURLOPT_POSTFIELDS     => $payload,
         CURLOPT_HTTPHEADER     => ['Content-Type: application/json'],
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_TIMEOUT        => 10,
-    ]);
-    $resp = curl_exec($ch);
-    $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
+      ]);
+      $resp = curl_exec($ch);
+      $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+      curl_close($ch);
 
-    if ($httpCode < 200 || $httpCode >= 300) {
-        log_console('WARN', 'Discord webhook returned HTTP ' . $httpCode . ': ' . (string)$resp);
-    } else {
-        log_console('INFO', 'Discord notification sent for case ' . $caseCode);
+      if ($httpCode < 200 || $httpCode >= 300) {
+        log_console('WARN', 'Discord webhook ' . ($hookName !== '' ? '['.$hookName.'] ' : '') . 'returned HTTP ' . $httpCode . ': ' . (string)$resp);
+      } else {
+        log_console('INFO', 'Discord notification sent for case ' . $caseCode . ($hookName !== '' ? ' via ['.$hookName.']' : ''));
+      }
     }
 }
 
@@ -436,6 +467,7 @@ SQL
     'site_title' => 'TikTokPredators',
     'meta_data' => 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.',
     'discord_webhook_key' => '',
+    'discord_webhooks' => '[]',
   ];
   $seed = $pdo->prepare('INSERT IGNORE INTO project_settings (setting_key, setting_value) VALUES (?, ?)');
   foreach ($defaultSettings as $settingKey => $settingValue) {
@@ -1174,16 +1206,33 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
 
     $siteTitle = trim($_POST['site_title'] ?? '');
     $metaData = trim($_POST['meta_data'] ?? '');
-    $discordWebhookKey = trim($_POST['discord_webhook_key'] ?? '');
+    $webhookNames = $_POST['discord_webhook_name'] ?? [];
+    $webhookUrls = $_POST['discord_webhook_url'] ?? [];
     $redir = trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings');
 
     if ($siteTitle === '') { $siteTitle = 'TikTokPredators'; }
+
+    $discordWebhooks = [];
+    if (!is_array($webhookNames)) { $webhookNames = []; }
+    if (!is_array($webhookUrls)) { $webhookUrls = []; }
+    $max = max(count($webhookNames), count($webhookUrls));
+    for ($i = 0; $i < $max; $i++) {
+      $name = trim((string)($webhookNames[$i] ?? ''));
+      $url = trim((string)($webhookUrls[$i] ?? ''));
+      if ($url === '') { continue; }
+      if (!filter_var($url, FILTER_VALIDATE_URL)) { continue; }
+      $discordWebhooks[] = ['name' => $name, 'url' => $url];
+    }
+    $discordWebhooksJson = json_encode($discordWebhooks, JSON_UNESCAPED_SLASHES);
+    if ($discordWebhooksJson === false) { $discordWebhooksJson = '[]'; }
+    $legacyWebhook = count($discordWebhooks) > 0 ? (string)$discordWebhooks[0]['url'] : '';
 
     try {
       $stmt = $pdo->prepare('INSERT INTO project_settings (setting_key, setting_value, updated_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()');
       $stmt->execute(['site_title', $siteTitle]);
       $stmt->execute(['meta_data', $metaData]);
-      $stmt->execute(['discord_webhook_key', $discordWebhookKey]);
+      $stmt->execute(['discord_webhooks', $discordWebhooksJson]);
+      $stmt->execute(['discord_webhook_key', $legacyWebhook]);
       flash('success', 'Project settings saved.');
     } catch (Throwable $e) {
       $_SESSION['sql_error'] = $e->getMessage();
@@ -2424,11 +2473,16 @@ if (isset($_GET['logout'])) {
 
 $tpSiteTitle = 'TikTokPredators';
 $tpMetaDescription = 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.';
-$tpDiscordWebhookKey = '';
+$tpDiscordWebhooks = [];
+$tpDiscordWebhookCount = 0;
 if (isset($pdo) && $pdo instanceof PDO) {
     $tpSiteTitle = tp_project_setting($pdo, 'site_title', $tpSiteTitle);
     $tpMetaDescription = tp_project_setting($pdo, 'meta_data', $tpMetaDescription);
-    $tpDiscordWebhookKey = tp_project_setting($pdo, 'discord_webhook_key', '');
+  $tpDiscordWebhooks = tp_discord_webhooks($pdo);
+}
+$tpDiscordWebhookCount = count($tpDiscordWebhooks);
+if (count($tpDiscordWebhooks) === 0) {
+  $tpDiscordWebhooks[] = ['name' => '', 'url' => ''];
 }
 ?>
 <!DOCTYPE html>
@@ -5710,9 +5764,26 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     </div>
 
                     <div>
-                      <label class="form-label">Discord Notification Webhook Key</label>
-                      <input type="password" name="discord_webhook_key" class="form-control" value="<?php echo htmlspecialchars($tpDiscordWebhookKey); ?>" placeholder="https://discord.com/api/webhooks/...">
-                      <div class="form-text text-secondary">Paste the full Discord webhook URL. It is stored for case verification notifications.</div>
+                      <div class="d-flex align-items-center justify-content-between mb-2">
+                        <label class="form-label mb-0">Discord Webhooks</label>
+                        <button type="button" class="btn btn-outline-light btn-sm" id="addWebhookRowBtn"><i class="bi bi-plus-lg me-1"></i>Add Webhook</button>
+                      </div>
+                      <div id="discordWebhookRows" class="vstack gap-2">
+                        <?php foreach ($tpDiscordWebhooks as $hook): ?>
+                          <div class="row g-2 webhook-row">
+                            <div class="col-md-4">
+                              <input type="text" name="discord_webhook_name[]" class="form-control" placeholder="Webhook name (e.g. Alerts)" value="<?php echo htmlspecialchars((string)($hook['name'] ?? '')); ?>">
+                            </div>
+                            <div class="col-md-7">
+                              <input type="url" name="discord_webhook_url[]" class="form-control" placeholder="https://discord.com/api/webhooks/..." value="<?php echo htmlspecialchars((string)($hook['url'] ?? '')); ?>">
+                            </div>
+                            <div class="col-md-1 d-grid">
+                              <button type="button" class="btn btn-outline-danger remove-webhook-row" title="Remove"><i class="bi bi-x-lg"></i></button>
+                            </div>
+                          </div>
+                        <?php endforeach; ?>
+                      </div>
+                      <div class="form-text text-secondary">Add one or more named Discord webhook URLs. Notifications are sent to all configured webhooks.</div>
                     </div>
 
                     <div class="d-flex justify-content-end gap-2">
@@ -5730,14 +5801,48 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="fw-semibold mb-3"><?php echo htmlspecialchars($tpSiteTitle); ?></div>
                   <div class="small text-secondary mb-2">Current meta description</div>
                   <div class="small mb-3"><?php echo htmlspecialchars($tpMetaDescription); ?></div>
-                  <div class="small text-secondary mb-2">Discord webhook configured</div>
-                  <div class="fw-semibold"><?php echo $tpDiscordWebhookKey !== '' ? 'Yes' : 'No'; ?></div>
+                  <div class="small text-secondary mb-2">Discord webhooks configured</div>
+                  <div class="fw-semibold"><?php echo (int)$tpDiscordWebhookCount; ?></div>
                 </div>
               </div>
             </div>
           </div>
         </div>
       </section>
+      <script>
+      (function () {
+        var addBtn = document.getElementById('addWebhookRowBtn');
+        var rows = document.getElementById('discordWebhookRows');
+        if (!addBtn || !rows) return;
+
+        function bindRemove(btn) {
+          btn.addEventListener('click', function () {
+            var row = btn.closest('.webhook-row');
+            if (!row) return;
+            if (rows.querySelectorAll('.webhook-row').length <= 1) {
+              row.querySelector('input[name="discord_webhook_name[]"]').value = '';
+              row.querySelector('input[name="discord_webhook_url[]"]').value = '';
+              return;
+            }
+            row.remove();
+          });
+        }
+
+        rows.querySelectorAll('.remove-webhook-row').forEach(bindRemove);
+
+        addBtn.addEventListener('click', function () {
+          var row = document.createElement('div');
+          row.className = 'row g-2 webhook-row';
+          row.innerHTML = '' +
+            '<div class="col-md-4"><input type="text" name="discord_webhook_name[]" class="form-control" placeholder="Webhook name (e.g. Alerts)"></div>' +
+            '<div class="col-md-7"><input type="url" name="discord_webhook_url[]" class="form-control" placeholder="https://discord.com/api/webhooks/..."></div>' +
+            '<div class="col-md-1 d-grid"><button type="button" class="btn btn-outline-danger remove-webhook-row" title="Remove"><i class="bi bi-x-lg"></i></button></div>';
+          rows.appendChild(row);
+          var btn = row.querySelector('.remove-webhook-row');
+          if (btn) bindRemove(btn);
+        });
+      })();
+      </script>
     <?php endif; ?>
   <?php endif; ?>
 
