@@ -86,7 +86,44 @@ $_SESSION['auth_attempts'] = $_SESSION['auth_attempts'] ?? 0;
 $_SESSION['auth_last'] = $_SESSION['auth_last'] ?? 0;
 function current_user_role(){ return $_SESSION['user']['role'] ?? 'guest'; }
 function is_admin(){ return (current_user_role()==='admin'); }
+function tp_is_main_admin(): bool {
+  if (!is_admin()) { return false; }
+  $userId = (int)($_SESSION['user']['id'] ?? 0);
+  $userEmail = strtolower(trim((string)($_SESSION['user']['email'] ?? '')));
+  $mainAdminId = (int)(getenv('MAIN_ADMIN_USER_ID') ?: 0);
+  $mainAdminEmail = strtolower(trim((string)(getenv('MAIN_ADMIN_EMAIL') ?: '')));
+  if ($mainAdminId > 0 && $userId === $mainAdminId) { return true; }
+  if ($mainAdminEmail !== '' && $userEmail === $mainAdminEmail) { return true; }
+  return $userId === 1;
+}
 function is_logged_in(){ return !empty($_SESSION['user']); }
+
+function tp_project_settings(PDO $pdo): array {
+  static $cache = null;
+  if ($cache !== null) { return $cache; }
+  $cache = [
+    'site_title' => 'TikTokPredators',
+    'meta_data' => 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.',
+    'discord_webhook_key' => '',
+  ];
+  try {
+    $stmt = $pdo->query('SELECT setting_key, setting_value FROM project_settings');
+    foreach ($stmt->fetchAll() as $row) {
+      $key = (string)($row['setting_key'] ?? '');
+      if ($key !== '') {
+        $cache[$key] = (string)($row['setting_value'] ?? '');
+      }
+    }
+  } catch (Throwable $e) {
+    // fall back to defaults
+  }
+  return $cache;
+}
+
+function tp_project_setting(PDO $pdo, string $key, string $default = ''): string {
+  $settings = tp_project_settings($pdo);
+  return (string)($settings[$key] ?? $default);
+}
 
 /**
  * Allow the viewer who opened a case to manage it while status = Pending.
@@ -131,7 +168,14 @@ function find_person_photo_url(string $caseCode): string {
  * Uses the Discord Webhook Embeds API.
  */
 function notify_discord_case_verified(string $caseCode, string $caseName, string $personName, string $location, string $summary, string $photoRel): void {
-    $webhookUrl = 'https://discord.com/api/webhooks/1494855223863279689/PUsRIj9R_rUCmLXD86l-Jp9UzWDdorzwIOkaAkORCOB5m3dLJmY3TCmKokn8xSQPIuQn';
+  global $pdo;
+  $webhookUrl = 'https://discord.com/api/webhooks/1494855223863279689/PUsRIj9R_rUCmLXD86l-Jp9UzWDdorzwIOkaAkORCOB5m3dLJmY3TCmKokn8xSQPIuQn';
+  if (isset($pdo) && $pdo instanceof PDO) {
+    $configuredWebhook = tp_project_setting($pdo, 'discord_webhook_key', '');
+    if ($configuredWebhook !== '') {
+      $webhookUrl = $configuredWebhook;
+    }
+  }
 
     // Build the public case URL
     $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
@@ -372,6 +416,27 @@ try { $pdo = new PDO($dsn, $dbu, $dbp, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTIO
 catch (Throwable $e) {
     // Record DB error for debugging and show a safe message
     $_SESSION['last_db_error'] = $e->getMessage();
+// --- Project settings table setup ---
+try {
+  $pdo->exec("\
+    CREATE TABLE IF NOT EXISTS project_settings (\
+      setting_key VARCHAR(64) NOT NULL PRIMARY KEY,\
+      setting_value LONGTEXT NULL,\
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP\
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\
+  ");
+  $defaultSettings = [
+    'site_title' => 'TikTokPredators',
+    'meta_data' => 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.',
+    'discord_webhook_key' => '',
+  ];
+  $seed = $pdo->prepare('INSERT IGNORE INTO project_settings (setting_key, setting_value) VALUES (?, ?)');
+  foreach ($defaultSettings as $settingKey => $settingValue) {
+    $seed->execute([$settingKey, $settingValue]);
+  }
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
 log_console('ERROR', 'DB: ' . $e->getMessage());
     $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
@@ -1096,6 +1161,36 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     }
     header('Location: '. $redir); exit;
 }
+
+  // Handle project settings save (main admin only)
+  if (($_POST['action'] ?? '') === 'save_project_settings') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings')); exit; }
+    if (!tp_is_main_admin()) {
+      flash('error', 'Unauthorized. Main admin only.');
+      header('Location: '. trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings')); exit;
+    }
+
+    $siteTitle = trim($_POST['site_title'] ?? '');
+    $metaData = trim($_POST['meta_data'] ?? '');
+    $discordWebhookKey = trim($_POST['discord_webhook_key'] ?? '');
+    $redir = trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings');
+
+    if ($siteTitle === '') { $siteTitle = 'TikTokPredators'; }
+
+    try {
+      $stmt = $pdo->prepare('INSERT INTO project_settings (setting_key, setting_value, updated_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()');
+      $stmt->execute(['site_title', $siteTitle]);
+      $stmt->execute(['meta_data', $metaData]);
+      $stmt->execute(['discord_webhook_key', $discordWebhookKey]);
+      flash('success', 'Project settings saved.');
+    } catch (Throwable $e) {
+      $_SESSION['sql_error'] = $e->getMessage();
+      log_console('ERROR', 'SQL: ' . $e->getMessage());
+      flash('error', 'Unable to save project settings.');
+    }
+    header('Location: '. $redir); exit;
+  }
 
 // Handle viewer submit case (viewer only)
 if (($_POST['action'] ?? '') === 'viewer_submit_case') {
@@ -2325,13 +2420,22 @@ if (isset($_GET['logout'])) {
     session_destroy();
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
+
+$tpSiteTitle = 'TikTokPredators';
+$tpMetaDescription = 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.';
+$tpDiscordWebhookKey = '';
+if (isset($pdo) && $pdo instanceof PDO) {
+    $tpSiteTitle = tp_project_setting($pdo, 'site_title', $tpSiteTitle);
+    $tpMetaDescription = tp_project_setting($pdo, 'meta_data', $tpMetaDescription);
+    $tpDiscordWebhookKey = tp_project_setting($pdo, 'discord_webhook_key', '');
+}
 ?>
 <!DOCTYPE html>
 <html lang="en" data-bs-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>TikTokPredators — Case's & Evidence</title>
+  <title><?php echo htmlspecialchars($tpSiteTitle); ?> — Cases & Evidence</title>
   <link rel="apple-touch-icon" sizes="57x57" href="/assets/favicon/apple-icon-57x57.png">
   <link rel="apple-touch-icon" sizes="60x60" href="/assets/favicon/apple-icon-60x60.png">
   <link rel="apple-touch-icon" sizes="72x72" href="/assets/favicon/apple-icon-72x72.png">
@@ -2349,17 +2453,17 @@ if (isset($_GET['logout'])) {
   <meta name="msapplication-TileColor" content="#ffffff">
   <meta name="msapplication-TileImage" content="/assets/favicon/ms-icon-144x144.png">
   <meta name="theme-color" content="#ffffff">
-  <meta name="description" content="A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability." />
+  <meta name="description" content="<?php echo htmlspecialchars($tpMetaDescription); ?>" />
   <!-- Open Graph / Social sharing -->
-  <meta property="og:title" content="TikTokPredators — Cases & Evidence" />
-  <meta property="og:description" content="A public, auditable repository documenting abusive behaviour by TikTok accounts. We collect case records, evidence, and verifiable proof to expose predators and support accountability on the TikTok platform." />
+  <meta property="og:title" content="<?php echo htmlspecialchars($tpSiteTitle); ?> — Cases & Evidence" />
+  <meta property="og:description" content="<?php echo htmlspecialchars($tpMetaDescription); ?>" />
   <meta property="og:type" content="website" />
   <meta property="og:url" content="https://tiktokpredators.com/" />
-  <meta property="og:site_name" content="TikTokPredators" />
+  <meta property="og:site_name" content="<?php echo htmlspecialchars($tpSiteTitle); ?>" />
   <meta property="og:image" content="https://tiktokpredators.com/assets/og-image.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="TikTokPredators — Cases & Evidence" />
-  <meta name="twitter:description" content="A public, auditable repository documenting abusive behaviour by TikTok accounts. We collect case records, evidence, and verifiable proof to expose predators and support accountability on the TikTok platform." />
+  <meta name="twitter:title" content="<?php echo htmlspecialchars($tpSiteTitle); ?> — Cases & Evidence" />
+  <meta name="twitter:description" content="<?php echo htmlspecialchars($tpMetaDescription); ?>" />
   <meta name="twitter:image" content="https://tiktokpredators.com/assets/og-image.png" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
@@ -2411,7 +2515,7 @@ if (isset($_GET['logout'])) {
 <body>
   <!-- Ownership banner -->
   <div role="banner" style="background:#3a0f4a;color:#ffffff;font-weight:700;text-align:center;padding:10px 12px;">
-    This site is owned and operated by Jamie Whittingham | <a href="https://www.tiktok.com/@jamiewhittinghamofficial" target="_blank" rel="noopener noreferrer" style="color:#ffffff;text-decoration:underline;">Mouldy Sausage</a>
+    <?php echo htmlspecialchars($tpSiteTitle); ?> is owned and operated by Jamie Whittingham | <a href="https://www.tiktok.com/@jamiewhittinghamofficial" target="_blank" rel="noopener noreferrer" style="color:#ffffff;text-decoration:underline;">Mouldy Sausage</a>
   </div>
 
   <?php if ($msg = flash('success')): ?>
@@ -2525,23 +2629,23 @@ if (isset($_GET['logout'])) {
 })();
 </script>
 
-<?php if (!empty($openAuth)): ?>
-<script>
-document.addEventListener('DOMContentLoaded', function(){
-  var modalEl = document.getElementById('authModal');
-  if (!modalEl) return;
-  var modal = new bootstrap.Modal(modalEl);
-  modal.show();
-  <?php if ($openAuth === 'register'): ?>
-    var tabBtn = document.getElementById('tab-register');
-    if (tabBtn) new bootstrap.Tab(tabBtn).show();
-  <?php else: ?>
-    var tabBtn = document.getElementById('tab-login');
-    if (tabBtn) new bootstrap.Tab(tabBtn).show();
+  <?php if (!empty($openAuth)): ?>
+  <script>
+  document.addEventListener('DOMContentLoaded', function(){
+    var modalEl = document.getElementById('authModal');
+    if (!modalEl) return;
+    var modal = new bootstrap.Modal(modalEl);
+    modal.show();
+    <?php if ($openAuth === 'register'): ?>
+      var tabBtn = document.getElementById('tab-register');
+      if (tabBtn) new bootstrap.Tab(tabBtn).show();
+    <?php else: ?>
+      var tabBtn = document.getElementById('tab-login');
+      if (tabBtn) new bootstrap.Tab(tabBtn).show();
+    <?php endif; ?>
+  });
+  </script>
   <?php endif; ?>
-});
-</script>
-<?php endif; ?>
   <?php if ($msg = flash('error')): ?>
     <div class="alert alert-danger border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
   <?php endif; ?>
@@ -2558,7 +2662,7 @@ document.addEventListener('DOMContentLoaded', function(){
   <!-- Top Navbar -->
   <nav class="navbar navbar-expand-lg border-bottom sticky-top bg-body glass">
     <div class="container-xl">
-      <a class="navbar-brand fw-bold" href="#"><i class="bi bi-shield-lock me-2 text-primary"></i> TikTok<span>Predators</span></a>
+      <a class="navbar-brand fw-bold" href="#"><i class="bi bi-shield-lock me-2 text-primary"></i> <?php echo htmlspecialchars($tpSiteTitle); ?></a>
       <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topNav"><span class="navbar-toggler-icon"></span></button>
       <div class="collapse navbar-collapse" id="topNav">
 <ul class="navbar-nav me-auto mb-2 mb-lg-0">
@@ -2572,6 +2676,9 @@ document.addEventListener('DOMContentLoaded', function(){
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='viewer_stats')?'active':''; ?>" href="?view=viewer_stats#viewer-stats">Viewer Stats</a></li>
+  <?php if (tp_is_main_admin()): ?>
+    <li class="nav-item"><a class="nav-link <?php echo ($view==='project_settings')?'active':''; ?>" href="?view=project_settings#project-settings">Project Settings</a></li>
+  <?php endif; ?>
   <li class="nav-item">
     <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#devModal">Dev</a>
   </li>
@@ -4519,6 +4626,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
           $viewCaseId = (int)($viewCase['id'] ?? 0);
+
         } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         if ($viewCaseId > 0) {
@@ -5228,7 +5336,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 <li class="list-group-item bg-transparent text-white">
                   <div class="small text-secondary"><?php echo htmlspecialchars($n['created_at']); ?> • <?php echo htmlspecialchars($n['display_name'] ?? ''); ?></div>
                   <div><?php echo nl2br(htmlspecialchars($n['note_text'])); ?></div>
-                </li>
+                  </li>
               <?php } } else { ?>
                 <li class="list-group-item bg-transparent text-secondary">No notes yet.</li>
               <?php } ?>
@@ -5560,6 +5668,75 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         </div>
       </section>
     <?php else: ?>
+    <?php endif; ?>
+  <?php endif; ?>
+
+  <?php if ($view === 'project_settings'): ?>
+    <?php if (!tp_is_main_admin()): ?>
+      <section class="py-5 border-top" id="project-settings">
+        <div class="container-xl">
+          <div class="alert alert-danger"><i class="bi bi-shield-lock me-2"></i>Unauthorized. Main admin only.</div>
+        </div>
+      </section>
+    <?php else: ?>
+      <section class="py-5 border-top" id="project-settings">
+        <div class="container-xl">
+          <div class="d-flex align-items-center justify-content-between mb-3">
+            <div>
+              <h2 class="h4 mb-0">Project Settings</h2>
+              <div class="text-secondary small">Visible only to the main admin account.</div>
+            </div>
+            <a class="btn btn-outline-light btn-sm" href="?view=users#users"><i class="bi bi-arrow-left me-1"></i> Back to Users</a>
+          </div>
+
+          <div class="row g-4">
+            <div class="col-lg-8">
+              <div class="card glass">
+                <div class="card-body">
+                  <form method="post" action="" class="vstack gap-3">
+                    <input type="hidden" name="action" value="save_project_settings">
+                    <?php csrf_field(); ?>
+                    <input type="hidden" name="redirect_url" value="?view=project_settings#project-settings">
+
+                    <div>
+                      <label class="form-label">Site Title</label>
+                      <input type="text" name="site_title" class="form-control" value="<?php echo htmlspecialchars($tpSiteTitle); ?>" placeholder="TikTokPredators">
+                    </div>
+
+                    <div>
+                      <label class="form-label">Meta Data</label>
+                      <textarea name="meta_data" class="form-control" rows="5" placeholder="Site description and SEO metadata"><?php echo htmlspecialchars($tpMetaDescription); ?></textarea>
+                    </div>
+
+                    <div>
+                      <label class="form-label">Discord Notification Webhook Key</label>
+                      <input type="password" name="discord_webhook_key" class="form-control" value="<?php echo htmlspecialchars($tpDiscordWebhookKey); ?>" placeholder="https://discord.com/api/webhooks/...">
+                      <div class="form-text text-secondary">Paste the full Discord webhook URL. It is stored for case verification notifications.</div>
+                    </div>
+
+                    <div class="d-flex justify-content-end gap-2">
+                      <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i> Save Settings</button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+            <div class="col-lg-4">
+              <div class="card glass h-100">
+                <div class="card-body">
+                  <h3 class="h6 mb-3">Preview</h3>
+                  <div class="small text-secondary mb-2">Current site title</div>
+                  <div class="fw-semibold mb-3"><?php echo htmlspecialchars($tpSiteTitle); ?></div>
+                  <div class="small text-secondary mb-2">Current meta description</div>
+                  <div class="small mb-3"><?php echo htmlspecialchars($tpMetaDescription); ?></div>
+                  <div class="small text-secondary mb-2">Discord webhook configured</div>
+                  <div class="fw-semibold"><?php echo $tpDiscordWebhookKey !== '' ? 'Yes' : 'No'; ?></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     <?php endif; ?>
   <?php endif; ?>
 
@@ -5980,7 +6157,7 @@ document.addEventListener('click', function (ev) {
 <footer class="border-top glass mt-5 py-3">
   <div class="container-xl d-flex flex-column flex-md-row justify-content-between align-items-center gap-2">
     <div class="small text-secondary">
-      &copy; <?php echo date('Y'); ?> TikTokPredators. All rights reserved.
+      &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($tpSiteTitle); ?>. All rights reserved.
     </div>
     <div class="d-flex gap-3 small">
       <a href="?view=removal#removal" class="link-light text-decoration-none">Removal Requests</a>
