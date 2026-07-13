@@ -891,6 +891,23 @@ try {
       is_mobile TINYINT(1) NULL,
       is_proxy TINYINT(1) NULL,
       is_hosting TINYINT(1) NULL,
+      ip_hash CHAR(64) NULL,
+      referrer_host VARCHAR(255) NULL,
+      is_same_site_referrer TINYINT(1) NULL,
+      request_path VARCHAR(512) NULL,
+      query_string VARCHAR(1024) NULL,
+      language_primary VARCHAR(16) NULL,
+      is_bot TINYINT(1) NOT NULL DEFAULT 0,
+      bot_reason VARCHAR(255) NULL,
+      analytics_score INT NOT NULL DEFAULT 0,
+      alert_flags VARCHAR(512) NULL,
+      screen_width INT UNSIGNED NULL,
+      screen_height INT UNSIGNED NULL,
+      viewport_width INT UNSIGNED NULL,
+      viewport_height INT UNSIGNED NULL,
+      client_timezone VARCHAR(64) NULL,
+      client_timezone_offset INT NULL,
+      client_platform VARCHAR(128) NULL,
       geo_source VARCHAR(64) NULL,
       device_type VARCHAR(32) NULL,
       os_name VARCHAR(64) NULL,
@@ -905,8 +922,10 @@ try {
       INDEX idx_case_id_viewed_at (case_id, viewed_at),
       INDEX idx_viewer_user (viewer_user_id),
       INDEX idx_public_ip (public_ip),
+      INDEX idx_ip_hash (ip_hash),
       INDEX idx_geo_ip (geo_ip),
-      INDEX idx_geo_country (geo_country)
+      INDEX idx_geo_country (geo_country),
+      INDEX idx_score_viewed_at (analytics_score, viewed_at)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   ");
 
@@ -932,6 +951,23 @@ try {
     'is_mobile' => "ALTER TABLE case_views ADD COLUMN is_mobile TINYINT(1) NULL AFTER net_reverse_dns",
     'is_proxy' => "ALTER TABLE case_views ADD COLUMN is_proxy TINYINT(1) NULL AFTER is_mobile",
     'is_hosting' => "ALTER TABLE case_views ADD COLUMN is_hosting TINYINT(1) NULL AFTER is_proxy",
+    'ip_hash' => "ALTER TABLE case_views ADD COLUMN ip_hash CHAR(64) NULL AFTER is_hosting",
+    'referrer_host' => "ALTER TABLE case_views ADD COLUMN referrer_host VARCHAR(255) NULL AFTER ip_hash",
+    'is_same_site_referrer' => "ALTER TABLE case_views ADD COLUMN is_same_site_referrer TINYINT(1) NULL AFTER referrer_host",
+    'request_path' => "ALTER TABLE case_views ADD COLUMN request_path VARCHAR(512) NULL AFTER is_same_site_referrer",
+    'query_string' => "ALTER TABLE case_views ADD COLUMN query_string VARCHAR(1024) NULL AFTER request_path",
+    'language_primary' => "ALTER TABLE case_views ADD COLUMN language_primary VARCHAR(16) NULL AFTER query_string",
+    'is_bot' => "ALTER TABLE case_views ADD COLUMN is_bot TINYINT(1) NOT NULL DEFAULT 0 AFTER language_primary",
+    'bot_reason' => "ALTER TABLE case_views ADD COLUMN bot_reason VARCHAR(255) NULL AFTER is_bot",
+    'analytics_score' => "ALTER TABLE case_views ADD COLUMN analytics_score INT NOT NULL DEFAULT 0 AFTER bot_reason",
+    'alert_flags' => "ALTER TABLE case_views ADD COLUMN alert_flags VARCHAR(512) NULL AFTER analytics_score",
+    'screen_width' => "ALTER TABLE case_views ADD COLUMN screen_width INT UNSIGNED NULL AFTER alert_flags",
+    'screen_height' => "ALTER TABLE case_views ADD COLUMN screen_height INT UNSIGNED NULL AFTER screen_width",
+    'viewport_width' => "ALTER TABLE case_views ADD COLUMN viewport_width INT UNSIGNED NULL AFTER screen_height",
+    'viewport_height' => "ALTER TABLE case_views ADD COLUMN viewport_height INT UNSIGNED NULL AFTER viewport_width",
+    'client_timezone' => "ALTER TABLE case_views ADD COLUMN client_timezone VARCHAR(64) NULL AFTER viewport_height",
+    'client_timezone_offset' => "ALTER TABLE case_views ADD COLUMN client_timezone_offset INT NULL AFTER client_timezone",
+    'client_platform' => "ALTER TABLE case_views ADD COLUMN client_platform VARCHAR(128) NULL AFTER client_timezone_offset",
   ];
 
   foreach ($caseViewColumns as $colName => $alterSql) {
@@ -953,6 +989,48 @@ try {
   } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
   }
+  foreach ([
+    'idx_ip_hash' => 'ALTER TABLE case_views ADD INDEX idx_ip_hash (ip_hash)',
+    'idx_score_viewed_at' => 'ALTER TABLE case_views ADD INDEX idx_score_viewed_at (analytics_score, viewed_at)',
+  ] as $idxName => $idxSql) {
+    try {
+      $idx = $pdo->query("SHOW INDEX FROM case_views WHERE Key_name = " . $pdo->quote($idxName));
+      if (!$idx || !$idx->fetch()) {
+        $pdo->exec($idxSql);
+      }
+    } catch (Throwable $e) {
+      $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+    }
+  }
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+
+// --- Case analytics alerts setup ---
+try {
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS case_analytics_alerts (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      case_id BIGINT UNSIGNED NOT NULL DEFAULT 0,
+      alert_type VARCHAR(64) NOT NULL,
+      severity ENUM('low','medium','high') NOT NULL DEFAULT 'low',
+      title VARCHAR(255) NOT NULL,
+      detail TEXT NULL,
+      unique_key CHAR(64) NOT NULL,
+      metric_value DECIMAL(12,2) NULL,
+      threshold_value DECIMAL(12,2) NULL,
+      first_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      last_seen_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      occurrence_count INT UNSIGNED NOT NULL DEFAULT 1,
+      is_resolved TINYINT(1) NOT NULL DEFAULT 0,
+      resolved_at DATETIME NULL,
+      resolved_by BIGINT UNSIGNED NULL,
+      INDEX idx_case_last_seen (case_id, last_seen_at),
+      INDEX idx_type_severity (alert_type, severity),
+      INDEX idx_unresolved_seen (is_resolved, last_seen_at),
+      UNIQUE KEY uq_case_alert_key (unique_key)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  ");
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
@@ -1143,6 +1221,111 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
       return $cache[$ip];
     }
 
+    function tp_url_host(string $url): string {
+      $url = trim($url);
+      if ($url === '') { return ''; }
+      $host = (string)(parse_url($url, PHP_URL_HOST) ?: '');
+      return strtolower(preg_replace('/^www\./i', '', trim($host)) ?? '');
+    }
+
+    function tp_primary_language(string $acceptLanguage): string {
+      $acceptLanguage = trim($acceptLanguage);
+      if ($acceptLanguage === '') { return ''; }
+      $first = trim(explode(',', $acceptLanguage)[0] ?? '');
+      $first = trim(explode(';', $first)[0] ?? '');
+      return substr($first, 0, 16);
+    }
+
+    function tp_detect_bot(string $ua, string $acceptLanguage): array {
+      $ua = trim($ua);
+      if ($ua === '') { return [1, 'Missing user agent']; }
+      $reasons = [];
+      if (preg_match('/bot|crawl|spider|slurp|scanner|monitor|scrape|curl|wget|python-requests|httpclient|headless|phantom|selenium/i', $ua)) {
+        $reasons[] = 'Automation keyword';
+      }
+      if (trim($acceptLanguage) === '' && !preg_match('/facebookexternalhit|discordbot|twitterbot|slackbot/i', $ua)) {
+        $reasons[] = 'Missing accept-language';
+      }
+      return [count($reasons) > 0 ? 1 : 0, implode(', ', $reasons)];
+    }
+
+    function tp_view_risk_score(array $signals): array {
+      $score = 0;
+      $flags = [];
+
+      if (!empty($signals['is_proxy'])) { $score += 35; $flags[] = 'proxy'; }
+      if (!empty($signals['is_hosting'])) { $score += 25; $flags[] = 'hosting'; }
+      if (!empty($signals['is_bot'])) { $score += 30; $flags[] = 'bot'; }
+      if (!empty($signals['missing_referrer'])) { $score += 5; $flags[] = 'direct'; }
+      if (!empty($signals['repeat_ip_case_views']) && (int)$signals['repeat_ip_case_views'] >= 10) { $score += 20; $flags[] = 'repeat-ip-case'; }
+      if (!empty($signals['ip_distinct_cases']) && (int)$signals['ip_distinct_cases'] >= 5) { $score += 20; $flags[] = 'multi-case-ip'; }
+      if (!empty($signals['case_hour_views']) && (int)$signals['case_hour_views'] >= 25) { $score += 15; $flags[] = 'case-spike'; }
+
+      $score = min(100, $score);
+      return [$score, implode(',', array_values(array_unique($flags)))];
+    }
+
+    function tp_record_case_analytics_alert(PDO $pdo, int $caseId, string $type, string $severity, string $title, string $detail, float $metricValue = 0, float $thresholdValue = 0, string $dedupeSuffix = ''): void {
+      try {
+        $severity = in_array($severity, ['low','medium','high'], true) ? $severity : 'low';
+        $keyParts = [$caseId, $type, $severity, $dedupeSuffix !== '' ? $dedupeSuffix : date('Y-m-d-H')];
+        $uniqueKey = hash('sha256', implode('|', $keyParts));
+        $stmt = $pdo->prepare("INSERT INTO case_analytics_alerts (case_id, alert_type, severity, title, detail, unique_key, metric_value, threshold_value) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE last_seen_at = CURRENT_TIMESTAMP, occurrence_count = occurrence_count + 1, metric_value = VALUES(metric_value), threshold_value = VALUES(threshold_value), detail = VALUES(detail), is_resolved = 0, resolved_at = NULL");
+        $stmt->execute([$caseId, $type, $severity, $title, $detail, $uniqueKey, $metricValue, $thresholdValue]);
+      } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+      }
+    }
+
+    function tp_evaluate_case_view_alerts(PDO $pdo, int $caseId, array $viewSignals): void {
+      if ($caseId <= 0) { return; }
+      $ipHash = (string)($viewSignals['ip_hash'] ?? '');
+      $ipLabel = (string)($viewSignals['public_ip'] ?? 'unknown IP');
+
+      if (!empty($viewSignals['is_proxy'])) {
+        tp_record_case_analytics_alert($pdo, $caseId, 'proxy_view', 'medium', 'Proxy viewer detected', 'A case view came from an IP flagged as proxy/VPN: ' . $ipLabel, 1, 1, 'proxy-' . $ipHash . '-' . date('Y-m-d'));
+      }
+      if (!empty($viewSignals['is_hosting'])) {
+        tp_record_case_analytics_alert($pdo, $caseId, 'hosting_view', 'medium', 'Hosting network viewer detected', 'A case view came from a hosting/datacenter network: ' . $ipLabel, 1, 1, 'hosting-' . $ipHash . '-' . date('Y-m-d'));
+      }
+      if (!empty($viewSignals['is_bot'])) {
+        $reason = trim((string)($viewSignals['bot_reason'] ?? ''));
+        tp_record_case_analytics_alert($pdo, $caseId, 'bot_view', 'low', 'Likely automated viewer', 'A case view looked automated' . ($reason !== '' ? ': ' . $reason : '.') . ' IP: ' . $ipLabel, 1, 1, 'bot-' . $ipHash . '-' . date('Y-m-d'));
+      }
+
+      try {
+        if ($ipHash !== '') {
+          $stmt = $pdo->prepare('SELECT COUNT(*) FROM case_views WHERE case_id = ? AND ip_hash = ? AND viewed_at >= (NOW() - INTERVAL 1 HOUR)');
+          $stmt->execute([$caseId, $ipHash]);
+          $repeatCaseViews = (int)$stmt->fetchColumn();
+          if ($repeatCaseViews >= 10) {
+            tp_record_case_analytics_alert($pdo, $caseId, 'repeat_ip_case_views', 'high', 'Repeated views from one IP', $ipLabel . ' viewed this case ' . $repeatCaseViews . ' times in the last hour.', $repeatCaseViews, 10, 'repeat-ip-' . $ipHash . '-' . date('Y-m-d-H'));
+          }
+
+          $stmt = $pdo->prepare('SELECT COUNT(DISTINCT case_id) FROM case_views WHERE ip_hash = ? AND case_id > 0 AND viewed_at >= (NOW() - INTERVAL 1 HOUR)');
+          $stmt->execute([$ipHash]);
+          $distinctCases = (int)$stmt->fetchColumn();
+          if ($distinctCases >= 5) {
+            tp_record_case_analytics_alert($pdo, $caseId, 'multi_case_ip', 'medium', 'One IP viewing many cases', $ipLabel . ' viewed ' . $distinctCases . ' different cases in the last hour.', $distinctCases, 5, 'multi-case-' . $ipHash . '-' . date('Y-m-d-H'));
+          }
+        }
+
+        $stmt = $pdo->prepare('SELECT COUNT(*) FROM case_views WHERE case_id = ? AND viewed_at >= (NOW() - INTERVAL 1 HOUR)');
+        $stmt->execute([$caseId]);
+        $caseHourViews = (int)$stmt->fetchColumn();
+
+        $stmt = $pdo->prepare('SELECT COUNT(*) / 23 FROM case_views WHERE case_id = ? AND viewed_at >= (NOW() - INTERVAL 24 HOUR) AND viewed_at < (NOW() - INTERVAL 1 HOUR)');
+        $stmt->execute([$caseId]);
+        $previousHourlyAvg = (float)$stmt->fetchColumn();
+        $spikeThreshold = max(25, $previousHourlyAvg * 3);
+        if ($caseHourViews >= $spikeThreshold) {
+          tp_record_case_analytics_alert($pdo, $caseId, 'traffic_spike', 'high', 'Case traffic spike', 'This case received ' . $caseHourViews . ' views in the last hour. Previous 23-hour average: ' . round($previousHourlyAvg, 1) . ' views/hour.', $caseHourViews, $spikeThreshold, 'spike-' . date('Y-m-d-H'));
+        }
+      } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+      }
+    }
+
     function log_case_view(PDO $pdo, int $caseId): void {
       static $loggedCaseIds = [];
       if ($caseId < 0 || isset($loggedCaseIds[$caseId])) { return; }
@@ -1212,8 +1395,47 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
         $viewerRole = trim((string)($_SESSION['user']['role'] ?? 'guest'));
         $isAuthed = !empty($_SESSION['user']) ? 1 : 0;
         $sessionKey = session_id() !== '' ? hash('sha256', session_id()) : null;
+        $ipHash = $publicIp !== '' ? hash('sha256', $publicIp . '|' . (string)(getenv('ANALYTICS_HASH_SALT') ?: '.tiktokpredators.com')) : null;
+        $referer = trim((string)($_SERVER['HTTP_REFERER'] ?? ''));
+        $referrerHost = tp_url_host($referer);
+        $requestHost = tp_url_host(tp_request_scheme() . '://' . tp_request_host());
+        $isSameSiteReferrer = ($referrerHost !== '' && $requestHost !== '' && $referrerHost === $requestHost) ? 1 : 0;
+        $requestUri = trim((string)($_SERVER['REQUEST_URI'] ?? ''));
+        $requestPath = (string)(parse_url($requestUri, PHP_URL_PATH) ?: '');
+        $queryString = trim((string)($_SERVER['QUERY_STRING'] ?? ''));
+        $acceptLanguage = trim((string)($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? ''));
+        $primaryLanguage = tp_primary_language($acceptLanguage);
+        [$isBot, $botReason] = tp_detect_bot($ua, $acceptLanguage);
 
-        $stmt = $pdo->prepare('INSERT INTO case_views (case_id, viewer_user_id, viewer_role, is_authenticated, session_key, public_ip, forwarded_for, geo_ip, geo_continent_name, geo_continent_code, geo_country_name, geo_country, geo_region_code, geo_region, geo_city, geo_district, geo_postcode, geo_lat, geo_lon, geo_timezone, geo_utc_offset, geo_currency, net_isp, net_org, net_as, net_as_name, net_reverse_dns, is_mobile, is_proxy, is_hosting, geo_source, device_type, os_name, browser_name, browser_version, user_agent, accept_language, referer, request_uri, request_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        $preRepeatCaseViews = 0;
+        $preDistinctCases = 0;
+        $preCaseHourViews = 0;
+        try {
+          if ($ipHash !== '') {
+            $pre = $pdo->prepare('SELECT COUNT(*) FROM case_views WHERE case_id = ? AND ip_hash = ? AND viewed_at >= (NOW() - INTERVAL 1 HOUR)');
+            $pre->execute([$caseId, $ipHash]);
+            $preRepeatCaseViews = (int)$pre->fetchColumn();
+
+            $pre = $pdo->prepare('SELECT COUNT(DISTINCT case_id) FROM case_views WHERE ip_hash = ? AND case_id > 0 AND viewed_at >= (NOW() - INTERVAL 1 HOUR)');
+            $pre->execute([$ipHash]);
+            $preDistinctCases = (int)$pre->fetchColumn();
+          }
+          $pre = $pdo->prepare('SELECT COUNT(*) FROM case_views WHERE case_id = ? AND viewed_at >= (NOW() - INTERVAL 1 HOUR)');
+          $pre->execute([$caseId]);
+          $preCaseHourViews = (int)$pre->fetchColumn();
+        } catch (Throwable $e) {}
+
+        [$analyticsScore, $alertFlags] = tp_view_risk_score([
+          'is_proxy' => $isProxy,
+          'is_hosting' => $isHosting,
+          'is_bot' => $isBot,
+          'missing_referrer' => $referer === '',
+          'repeat_ip_case_views' => $preRepeatCaseViews + 1,
+          'ip_distinct_cases' => $preDistinctCases + 1,
+          'case_hour_views' => $preCaseHourViews + 1,
+        ]);
+
+        $stmt = $pdo->prepare('INSERT INTO case_views (case_id, viewer_user_id, viewer_role, is_authenticated, session_key, public_ip, forwarded_for, geo_ip, geo_continent_name, geo_continent_code, geo_country_name, geo_country, geo_region_code, geo_region, geo_city, geo_district, geo_postcode, geo_lat, geo_lon, geo_timezone, geo_utc_offset, geo_currency, net_isp, net_org, net_as, net_as_name, net_reverse_dns, is_mobile, is_proxy, is_hosting, ip_hash, referrer_host, is_same_site_referrer, request_path, query_string, language_primary, is_bot, bot_reason, analytics_score, alert_flags, geo_source, device_type, os_name, browser_name, browser_version, user_agent, accept_language, referer, request_uri, request_method) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
           $caseId,
           $viewerId > 0 ? $viewerId : null,
@@ -1245,16 +1467,36 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
           $isMobile,
           $isProxy,
           $isHosting,
+          $ipHash,
+          $referrerHost !== '' ? substr($referrerHost, 0, 255) : null,
+          $isSameSiteReferrer,
+          $requestPath !== '' ? substr($requestPath, 0, 512) : null,
+          $queryString !== '' ? substr($queryString, 0, 1024) : null,
+          $primaryLanguage !== '' ? substr($primaryLanguage, 0, 16) : null,
+          $isBot,
+          $botReason !== '' ? substr($botReason, 0, 255) : null,
+          $analyticsScore,
+          $alertFlags !== '' ? substr($alertFlags, 0, 512) : null,
           $geoSource !== '' ? substr($geoSource, 0, 64) : null,
           $deviceType,
           $osName,
           $browserName,
           $browserVersion !== '' ? substr($browserVersion, 0, 32) : null,
           $ua !== '' ? substr($ua, 0, 1024) : null,
-          ($al = trim((string)($_SERVER['HTTP_ACCEPT_LANGUAGE'] ?? ''))) !== '' ? substr($al, 0, 255) : null,
-          ($ref = trim((string)($_SERVER['HTTP_REFERER'] ?? ''))) !== '' ? substr($ref, 0, 1024) : null,
-          ($uri = trim((string)($_SERVER['REQUEST_URI'] ?? ''))) !== '' ? substr($uri, 0, 1024) : null,
+          $acceptLanguage !== '' ? substr($acceptLanguage, 0, 255) : null,
+          $referer !== '' ? substr($referer, 0, 1024) : null,
+          $requestUri !== '' ? substr($requestUri, 0, 1024) : null,
           ($method = trim((string)($_SERVER['REQUEST_METHOD'] ?? 'GET'))) !== '' ? substr($method, 0, 16) : 'GET',
+        ]);
+        $_SESSION['last_case_view_id'] = $_SESSION['last_case_view_id'] ?? [];
+        $_SESSION['last_case_view_id'][(string)$caseId] = (int)$pdo->lastInsertId();
+        tp_evaluate_case_view_alerts($pdo, $caseId, [
+          'public_ip' => $publicIp,
+          'ip_hash' => $ipHash,
+          'is_proxy' => $isProxy,
+          'is_hosting' => $isHosting,
+          'is_bot' => $isBot,
+          'bot_reason' => $botReason,
         ]);
       } catch (Throwable $e) {
         $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
@@ -1349,6 +1591,41 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     if ($fp) { fpassthru($fp); fclose($fp); }
     else { readfile($absReal); }
     exit;
+}
+
+if (($_POST['action'] ?? '') === 'update_view_client') {
+  header('Content-Type: application/json; charset=utf-8');
+  if (!check_csrf()) {
+    http_response_code(403);
+    echo json_encode(['success' => false, 'error' => 'Security check failed']);
+    exit;
+  }
+
+  $caseId = (int)($_POST['case_id'] ?? 0);
+  $lastViewId = (int)($_SESSION['last_case_view_id'][(string)$caseId] ?? 0);
+  $sessionKey = session_id() !== '' ? hash('sha256', session_id()) : '';
+  if ($lastViewId <= 0 || $sessionKey === '') {
+    echo json_encode(['success' => false, 'error' => 'No matching view']);
+    exit;
+  }
+
+  $screenWidth = max(0, min(100000, (int)($_POST['screen_width'] ?? 0)));
+  $screenHeight = max(0, min(100000, (int)($_POST['screen_height'] ?? 0)));
+  $viewportWidth = max(0, min(100000, (int)($_POST['viewport_width'] ?? 0)));
+  $viewportHeight = max(0, min(100000, (int)($_POST['viewport_height'] ?? 0)));
+  $timezone = substr(trim((string)($_POST['timezone'] ?? '')), 0, 64);
+  $timezoneOffset = (int)($_POST['timezone_offset'] ?? 0);
+  $platform = substr(trim((string)($_POST['platform'] ?? '')), 0, 128);
+
+  try {
+    $stmt = $pdo->prepare('UPDATE case_views SET screen_width = NULLIF(?, 0), screen_height = NULLIF(?, 0), viewport_width = NULLIF(?, 0), viewport_height = NULLIF(?, 0), client_timezone = NULLIF(?, \'\'), client_timezone_offset = ?, client_platform = NULLIF(?, \'\') WHERE id = ? AND case_id = ? AND session_key = ? AND viewed_at >= (NOW() - INTERVAL 15 MINUTE) LIMIT 1');
+    $stmt->execute([$screenWidth, $screenHeight, $viewportWidth, $viewportHeight, $timezone, $timezoneOffset, $platform, $lastViewId, $caseId, $sessionKey]);
+    echo json_encode(['success' => true, 'updated' => $stmt->rowCount()]);
+  } catch (Throwable $e) {
+    http_response_code(500);
+    echo json_encode(['success' => false, 'error' => 'Update failed']);
+  }
+  exit;
 }
 
 // Handle login POST
@@ -4873,9 +5150,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             'unique_ips' => 0,
             'auth_views' => 0,
             'guest_views' => 0,
+            'high_risk_views' => 0,
           ];
           $mostViewedCases = [];
           $recentViews = [];
+          $recentAlerts = [];
+          $unresolvedAlertCount = 0;
           $topCountries = [];
           $topBrowsers = [];
           $topDevices = [];
@@ -4891,7 +5171,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 COUNT(DISTINCT viewer_user_id) AS unique_users,
                 COUNT(DISTINCT public_ip) AS unique_ips,
                 SUM(CASE WHEN is_authenticated = 1 THEN 1 ELSE 0 END) AS auth_views,
-                SUM(CASE WHEN is_authenticated = 0 THEN 1 ELSE 0 END) AS guest_views
+                SUM(CASE WHEN is_authenticated = 0 THEN 1 ELSE 0 END) AS guest_views,
+                SUM(CASE WHEN analytics_score >= 70 THEN 1 ELSE 0 END) AS high_risk_views
               FROM case_views");
             $r = $q->fetch();
             if ($r) { $stats = array_merge($stats, $r); }
@@ -4948,6 +5229,25 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 cv.geo_region,
                 cv.geo_city,
                 cv.geo_source,
+                cv.net_isp,
+                cv.net_org,
+                cv.is_proxy,
+                cv.is_hosting,
+                cv.is_bot,
+                cv.bot_reason,
+                cv.analytics_score,
+                cv.alert_flags,
+                cv.referrer_host,
+                cv.is_same_site_referrer,
+                cv.request_path,
+                cv.query_string,
+                cv.language_primary,
+                cv.screen_width,
+                cv.screen_height,
+                cv.viewport_width,
+                cv.viewport_height,
+                cv.client_timezone,
+                cv.client_platform,
                 cv.device_type,
                 cv.os_name,
                 cv.browser_name,
@@ -4966,6 +5266,34 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           } catch (Throwable $e) {
             $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
           }
+
+          try {
+            $q = $pdo->query("SELECT COUNT(*) FROM case_analytics_alerts WHERE is_resolved = 0");
+            $unresolvedAlertCount = (int)$q->fetchColumn();
+          } catch (Throwable $e) {}
+
+          try {
+            $q = $pdo->query("SELECT
+                caa.id,
+                caa.case_id,
+                caa.alert_type,
+                caa.severity,
+                caa.title,
+                caa.detail,
+                caa.metric_value,
+                caa.threshold_value,
+                caa.occurrence_count,
+                caa.first_seen_at,
+                caa.last_seen_at,
+                COALESCE(c.case_code, CONCAT('Case #', caa.case_id)) AS case_code,
+                COALESCE(c.case_name, 'Unknown Case') AS case_name
+              FROM case_analytics_alerts caa
+              LEFT JOIN cases c ON c.id = caa.case_id
+              WHERE caa.is_resolved = 0
+              ORDER BY FIELD(caa.severity, 'high', 'medium', 'low'), caa.last_seen_at DESC
+              LIMIT 25");
+            $recentAlerts = $q->fetchAll() ?: [];
+          } catch (Throwable $e) {}
 
           try {
             $q = $pdo->query("SELECT COALESCE(NULLIF(TRIM(geo_country), ''), 'Unknown') AS label, COUNT(*) AS cnt
@@ -5020,6 +5348,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           $guestViews = (int)($stats['guest_views'] ?? 0);
           $authPct = $totalViews > 0 ? round(($authViews / $totalViews) * 100, 1) : 0;
           $guestPct = $totalViews > 0 ? round(($guestViews / $totalViews) * 100, 1) : 0;
+          $highRiskViews = (int)($stats['high_risk_views'] ?? 0);
         ?>
 
         <div class="row g-3 mb-4">
@@ -5072,6 +5401,64 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
               <div class="h4 mb-0"><?php echo number_format($guestViews); ?></div>
               <div class="small text-secondary"><?php echo $guestPct; ?>%</div>
             </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">High-Risk Views</div>
+              <div class="h4 mb-0"><?php echo number_format($highRiskViews); ?></div>
+              <div class="small text-secondary">Score 70+</div>
+            </div></div>
+          </div>
+          <div class="col-6 col-lg-3">
+            <div class="card glass h-100"><div class="card-body">
+              <div class="small text-secondary">Open Analytics Alerts</div>
+              <div class="h4 mb-0"><?php echo number_format($unresolvedAlertCount); ?></div>
+              <div class="small text-secondary">Unresolved</div>
+            </div></div>
+          </div>
+        </div>
+
+        <div class="card glass mb-4">
+          <div class="card-body">
+            <h3 class="h6 mb-3">Case Analytics Alerts</h3>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle mb-0">
+                <thead>
+                  <tr>
+                    <th>Severity</th>
+                    <th>Case</th>
+                    <th>Alert</th>
+                    <th class="text-end">Metric</th>
+                    <th class="text-end">Count</th>
+                    <th>Last Seen</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <?php if (!empty($recentAlerts)): foreach ($recentAlerts as $alert): ?>
+                    <?php
+                      $sev = (string)($alert['severity'] ?? 'low');
+                      $sevClass = $sev === 'high' ? 'danger' : ($sev === 'medium' ? 'warning' : 'secondary');
+                    ?>
+                    <tr>
+                      <td><span class="badge text-bg-<?php echo $sevClass; ?>"><?php echo htmlspecialchars(ucfirst($sev)); ?></span></td>
+                      <td>
+                        <a class="text-decoration-none" href="?view=case&amp;code=<?php echo urlencode($alert['case_code'] ?? ''); ?>#case-view"><?php echo htmlspecialchars($alert['case_code'] ?? ''); ?></a>
+                        <div class="small text-secondary"><?php echo htmlspecialchars($alert['case_name'] ?? ''); ?></div>
+                      </td>
+                      <td>
+                        <div class="fw-semibold"><?php echo htmlspecialchars($alert['title'] ?? ''); ?></div>
+                        <div class="small text-secondary text-break"><?php echo htmlspecialchars($alert['detail'] ?? ''); ?></div>
+                      </td>
+                      <td class="text-end small"><?php echo htmlspecialchars((string)($alert['metric_value'] ?? '')); ?> / <?php echo htmlspecialchars((string)($alert['threshold_value'] ?? '')); ?></td>
+                      <td class="text-end"><?php echo number_format((int)($alert['occurrence_count'] ?? 0)); ?></td>
+                      <td class="small text-secondary"><?php echo htmlspecialchars($alert['last_seen_at'] ?? ''); ?></td>
+                    </tr>
+                  <?php endforeach; else: ?>
+                    <tr><td colspan="6" class="text-secondary">No open analytics alerts yet.</td></tr>
+                  <?php endif; ?>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
 
@@ -5242,6 +5629,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                     <th>Device</th>
                     <th>Browser</th>
                     <th>OS</th>
+                    <th>Risk</th>
+                    <th>Network</th>
+                    <th>Client</th>
                     <th>Referrer</th>
                   </tr>
                 </thead>
@@ -5273,10 +5663,32 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       <td class="small"><?php echo htmlspecialchars($rv['device_type'] ?? 'Unknown'); ?></td>
                       <td class="small"><?php echo htmlspecialchars(trim(($rv['browser_name'] ?? '').' '.($rv['browser_version'] ?? '')) ?: 'Unknown'); ?></td>
                       <td class="small"><?php echo htmlspecialchars($rv['os_name'] ?? 'Unknown'); ?></td>
+                      <td class="small">
+                        <?php
+                          $score = (int)($rv['analytics_score'] ?? 0);
+                          $scoreClass = $score >= 70 ? 'danger' : ($score >= 40 ? 'warning' : 'secondary');
+                        ?>
+                        <span class="badge text-bg-<?php echo $scoreClass; ?>"><?php echo $score; ?></span>
+                        <?php if (!empty($rv['alert_flags'])): ?><div class="text-secondary"><?php echo htmlspecialchars($rv['alert_flags']); ?></div><?php endif; ?>
+                        <?php if (!empty($rv['bot_reason'])): ?><div class="text-secondary"><?php echo htmlspecialchars($rv['bot_reason']); ?></div><?php endif; ?>
+                      </td>
+                      <td class="small">
+                        <?php echo htmlspecialchars(trim(($rv['net_isp'] ?? '').' '.($rv['net_org'] ?? '')) ?: 'Unknown'); ?>
+                        <div class="text-secondary">
+                          <?php if ((int)($rv['is_proxy'] ?? 0) === 1): ?><span class="badge text-bg-warning">Proxy</span><?php endif; ?>
+                          <?php if ((int)($rv['is_hosting'] ?? 0) === 1): ?><span class="badge text-bg-warning">Hosting</span><?php endif; ?>
+                          <?php if ((int)($rv['is_bot'] ?? 0) === 1): ?><span class="badge text-bg-secondary">Bot</span><?php endif; ?>
+                        </div>
+                      </td>
+                      <td class="small">
+                        <?php echo htmlspecialchars(trim(($rv['screen_width'] ?? '').'x'.($rv['screen_height'] ?? ''), 'x') ?: 'Unknown'); ?>
+                        <div class="text-secondary"><?php echo htmlspecialchars(trim(($rv['viewport_width'] ?? '').'x'.($rv['viewport_height'] ?? ''), 'x')); ?></div>
+                        <div class="text-secondary"><?php echo htmlspecialchars($rv['client_timezone'] ?? ''); ?></div>
+                      </td>
                       <td class="small text-break" style="max-width: 260px;"><?php echo htmlspecialchars($rv['referer'] ?? ''); ?></td>
                     </tr>
                   <?php endforeach; else: ?>
-                    <tr><td colspan="11" class="text-secondary">No viewer activity has been recorded yet.</td></tr>
+                    <tr><td colspan="14" class="text-secondary">No viewer activity has been recorded yet.</td></tr>
                   <?php endif; ?>
                 </tbody>
               </table>
@@ -5292,6 +5704,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     <?php
       $caseCode = trim($_GET['code'] ?? '');
       $viewCase = null; $viewCaseId = 0; $viewEv = []; $viewTotalViews = 0; $viewCaseTags = [];
+      $viewAnalyticsSummary = [];
+      $viewAnalyticsAlerts = [];
+      $viewAnalyticsCountries = [];
+      $viewAnalyticsRecentRisk = [];
       if ($caseCode !== '') {
         try {
           $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
@@ -5305,6 +5721,51 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         if ($viewCaseId > 0) {
           log_case_view($pdo, $viewCaseId);
           $viewTotalViews = get_case_view_count($pdo, $viewCaseId);
+          if (is_admin()) {
+            try {
+              $aq = $pdo->prepare("SELECT
+                  COUNT(*) AS total_views,
+                  SUM(CASE WHEN viewed_at >= (NOW() - INTERVAL 24 HOUR) THEN 1 ELSE 0 END) AS views_24h,
+                  COUNT(DISTINCT ip_hash) AS unique_ips,
+                  SUM(CASE WHEN analytics_score >= 70 THEN 1 ELSE 0 END) AS high_risk_views,
+                  SUM(CASE WHEN is_proxy = 1 THEN 1 ELSE 0 END) AS proxy_views,
+                  SUM(CASE WHEN is_hosting = 1 THEN 1 ELSE 0 END) AS hosting_views,
+                  SUM(CASE WHEN is_bot = 1 THEN 1 ELSE 0 END) AS bot_views,
+                  MAX(analytics_score) AS max_score,
+                  MAX(viewed_at) AS last_viewed_at
+                FROM case_views WHERE case_id = ?");
+              $aq->execute([$viewCaseId]);
+              $viewAnalyticsSummary = $aq->fetch() ?: [];
+            } catch (Throwable $e) {}
+            try {
+              $aq = $pdo->prepare("SELECT alert_type, severity, title, detail, metric_value, threshold_value, occurrence_count, first_seen_at, last_seen_at
+                FROM case_analytics_alerts
+                WHERE case_id = ? AND is_resolved = 0
+                ORDER BY FIELD(severity, 'high', 'medium', 'low'), last_seen_at DESC
+                LIMIT 10");
+              $aq->execute([$viewCaseId]);
+              $viewAnalyticsAlerts = $aq->fetchAll() ?: [];
+            } catch (Throwable $e) {}
+            try {
+              $aq = $pdo->prepare("SELECT COALESCE(NULLIF(TRIM(geo_country), ''), 'Unknown') AS label, COUNT(*) AS cnt
+                FROM case_views
+                WHERE case_id = ?
+                GROUP BY label
+                ORDER BY cnt DESC
+                LIMIT 8");
+              $aq->execute([$viewCaseId]);
+              $viewAnalyticsCountries = $aq->fetchAll() ?: [];
+            } catch (Throwable $e) {}
+            try {
+              $aq = $pdo->prepare("SELECT viewed_at, public_ip, geo_country, geo_region, geo_city, net_isp, is_proxy, is_hosting, is_bot, bot_reason, analytics_score, alert_flags, referrer_host, device_type, browser_name, os_name
+                FROM case_views
+                WHERE case_id = ? AND analytics_score >= 40
+                ORDER BY viewed_at DESC
+                LIMIT 10");
+              $aq->execute([$viewCaseId]);
+              $viewAnalyticsRecentRisk = $aq->fetchAll() ?: [];
+            } catch (Throwable $e) {}
+          }
           try {
             $st2 = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC');
             $st2->execute([$viewCaseId]);
@@ -5703,6 +6164,85 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 </div>
               </div>
             </div>
+            <?php if (is_admin()): ?>
+            <div class="col-12">
+              <div class="card glass">
+                <div class="card-body">
+                  <div class="d-flex align-items-center justify-content-between mb-3">
+                    <h3 class="h6 mb-0"><i class="bi bi-activity me-1"></i> Case Analytics</h3>
+                    <a class="btn btn-outline-light btn-sm" href="?view=viewer_stats#viewer-stats"><i class="bi bi-bar-chart me-1"></i> All Viewer Stats</a>
+                  </div>
+                  <div class="row g-3 mb-3">
+                    <div class="col-6 col-lg-2"><div class="border rounded p-2 h-100"><div class="small text-secondary">24h Views</div><div class="h5 mb-0"><?php echo number_format((int)($viewAnalyticsSummary['views_24h'] ?? 0)); ?></div></div></div>
+                    <div class="col-6 col-lg-2"><div class="border rounded p-2 h-100"><div class="small text-secondary">Unique IPs</div><div class="h5 mb-0"><?php echo number_format((int)($viewAnalyticsSummary['unique_ips'] ?? 0)); ?></div></div></div>
+                    <div class="col-6 col-lg-2"><div class="border rounded p-2 h-100"><div class="small text-secondary">High Risk</div><div class="h5 mb-0"><?php echo number_format((int)($viewAnalyticsSummary['high_risk_views'] ?? 0)); ?></div></div></div>
+                    <div class="col-6 col-lg-2"><div class="border rounded p-2 h-100"><div class="small text-secondary">Proxy</div><div class="h5 mb-0"><?php echo number_format((int)($viewAnalyticsSummary['proxy_views'] ?? 0)); ?></div></div></div>
+                    <div class="col-6 col-lg-2"><div class="border rounded p-2 h-100"><div class="small text-secondary">Bot</div><div class="h5 mb-0"><?php echo number_format((int)($viewAnalyticsSummary['bot_views'] ?? 0)); ?></div></div></div>
+                    <div class="col-6 col-lg-2"><div class="border rounded p-2 h-100"><div class="small text-secondary">Max Score</div><div class="h5 mb-0"><?php echo number_format((int)($viewAnalyticsSummary['max_score'] ?? 0)); ?></div></div></div>
+                  </div>
+                  <div class="row g-3">
+                    <div class="col-lg-7">
+                      <h4 class="h6 mb-2">Open Alerts</h4>
+                      <div class="table-responsive">
+                        <table class="table table-sm align-middle mb-0">
+                          <thead><tr><th>Severity</th><th>Alert</th><th class="text-end">Metric</th><th>Last Seen</th></tr></thead>
+                          <tbody>
+                            <?php if (!empty($viewAnalyticsAlerts)): foreach ($viewAnalyticsAlerts as $alert): ?>
+                              <?php $sev = (string)($alert['severity'] ?? 'low'); $sevClass = $sev === 'high' ? 'danger' : ($sev === 'medium' ? 'warning' : 'secondary'); ?>
+                              <tr>
+                                <td><span class="badge text-bg-<?php echo $sevClass; ?>"><?php echo htmlspecialchars(ucfirst($sev)); ?></span></td>
+                                <td><div class="fw-semibold"><?php echo htmlspecialchars($alert['title'] ?? ''); ?></div><div class="small text-secondary text-break"><?php echo htmlspecialchars($alert['detail'] ?? ''); ?></div></td>
+                                <td class="text-end small"><?php echo htmlspecialchars((string)($alert['metric_value'] ?? '')); ?> / <?php echo htmlspecialchars((string)($alert['threshold_value'] ?? '')); ?></td>
+                                <td class="small text-secondary"><?php echo htmlspecialchars($alert['last_seen_at'] ?? ''); ?></td>
+                              </tr>
+                            <?php endforeach; else: ?>
+                              <tr><td colspan="4" class="text-secondary">No open alerts for this case.</td></tr>
+                            <?php endif; ?>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                    <div class="col-lg-5">
+                      <h4 class="h6 mb-2">Top Countries</h4>
+                      <div class="table-responsive mb-3">
+                        <table class="table table-sm align-middle mb-0">
+                          <tbody>
+                            <?php if (!empty($viewAnalyticsCountries)): foreach ($viewAnalyticsCountries as $country): ?>
+                              <tr><td><?php echo htmlspecialchars($country['label'] ?? 'Unknown'); ?></td><td class="text-end fw-semibold"><?php echo number_format((int)($country['cnt'] ?? 0)); ?></td></tr>
+                            <?php endforeach; else: ?>
+                              <tr><td class="text-secondary">No country data yet.</td><td></td></tr>
+                            <?php endif; ?>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </div>
+                  <h4 class="h6 mt-3 mb-2">Recent Risk Signals</h4>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                      <thead><tr><th>Viewed</th><th>IP</th><th>Location</th><th>Network</th><th>Device</th><th class="text-end">Score</th><th>Flags</th></tr></thead>
+                      <tbody>
+                        <?php if (!empty($viewAnalyticsRecentRisk)): foreach ($viewAnalyticsRecentRisk as $risk): ?>
+                          <?php $score = (int)($risk['analytics_score'] ?? 0); $scoreClass = $score >= 70 ? 'danger' : ($score >= 40 ? 'warning' : 'secondary'); ?>
+                          <tr>
+                            <td class="small"><?php echo htmlspecialchars($risk['viewed_at'] ?? ''); ?></td>
+                            <td class="small"><?php echo htmlspecialchars($risk['public_ip'] ?? ''); ?></td>
+                            <td class="small"><?php echo htmlspecialchars(trim(($risk['geo_country'] ?? '').' '.($risk['geo_region'] ?? '').' '.($risk['geo_city'] ?? '')) ?: 'Unknown'); ?></td>
+                            <td class="small"><?php echo htmlspecialchars($risk['net_isp'] ?? 'Unknown'); ?></td>
+                            <td class="small"><?php echo htmlspecialchars(trim(($risk['device_type'] ?? '').' '.($risk['browser_name'] ?? '').' '.($risk['os_name'] ?? '')) ?: 'Unknown'); ?></td>
+                            <td class="text-end"><span class="badge text-bg-<?php echo $scoreClass; ?>"><?php echo $score; ?></span></td>
+                            <td class="small text-secondary"><?php echo htmlspecialchars(trim(($risk['alert_flags'] ?? '') . ' ' . ($risk['bot_reason'] ?? ''))); ?></td>
+                          </tr>
+                        <?php endforeach; else: ?>
+                          <tr><td colspan="7" class="text-secondary">No risk signals above score 40 yet.</td></tr>
+                        <?php endif; ?>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <?php endif; ?>
             <div class="col-12">
               <div class="card glass">
                 <div class="card-body">
@@ -6904,6 +7444,35 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
   <script>
   document.addEventListener('DOMContentLoaded', function () {
+    (function () {
+      var analyticsCaseId = <?php
+        $tpAnalyticsCaseId = -1;
+        if (($view ?? '') === 'cases') { $tpAnalyticsCaseId = 0; }
+        elseif (($view ?? '') === 'case') { $tpAnalyticsCaseId = (int)($viewCaseId ?? 0); }
+        elseif (!empty($adminCaseCode) && isset($caseId)) { $tpAnalyticsCaseId = (int)$caseId; }
+        echo (int)$tpAnalyticsCaseId;
+      ?>;
+      if (analyticsCaseId < 0 || !window.FormData || !window.fetch) return;
+      var fd = new FormData();
+      fd.append('action', 'update_view_client');
+      fd.append('csrf_token', <?php echo json_encode($_SESSION['csrf_token'] ?? ''); ?>);
+      fd.append('case_id', String(analyticsCaseId));
+      fd.append('screen_width', String((window.screen && window.screen.width) || 0));
+      fd.append('screen_height', String((window.screen && window.screen.height) || 0));
+      fd.append('viewport_width', String(window.innerWidth || document.documentElement.clientWidth || 0));
+      fd.append('viewport_height', String(window.innerHeight || document.documentElement.clientHeight || 0));
+      try { fd.append('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone || ''); } catch (e) { fd.append('timezone', ''); }
+      fd.append('timezone_offset', String(new Date().getTimezoneOffset()));
+      fd.append('platform', String((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || ''));
+      fetch(window.location.href, {
+        method: 'POST',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: fd,
+        credentials: 'same-origin',
+        keepalive: true
+      }).catch(function () {});
+    })();
+
     if (window.jQuery && window.jQuery.fn && typeof window.jQuery.fn.DataTable === 'function') {
       var activityTable = window.jQuery('#recentViewerActivityTable');
       if (activityTable.length) {
