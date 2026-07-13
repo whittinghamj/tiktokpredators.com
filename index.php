@@ -256,7 +256,9 @@ function can_manage_pending_case(PDO $pdo, int $caseId): bool {
     if (!$names) { return $emptyHtml; }
     $rendered = [];
     foreach ($names as $name) {
-      $rendered[] = '@' . htmlspecialchars($name);
+      $safeName = htmlspecialchars($name);
+      $profileUrl = 'https://www.tiktok.com/@' . rawurlencode($name);
+      $rendered[] = '<a class="text-decoration-none text-white d-inline-flex align-items-center gap-1" href="' . htmlspecialchars($profileUrl) . '" target="_blank" rel="noopener noreferrer"><i class="bi bi-tiktok small" aria-hidden="true"></i><span>@' . $safeName . '</span></a>';
     }
     return implode('<br>', $rendered);
   }
@@ -4334,7 +4336,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             <div class="col-12">
               <div class="card glass">
                 <div class="card-body">
-                  <div class="row g-3 align-items-center">
+                  <div class="row g-3 align-items-start">
 
                     <!-- Rank badge -->
                     <div class="col-auto d-none d-md-block text-center" style="min-width:48px;">
@@ -5368,23 +5370,23 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       </button>
                     <?php endif; ?>
                   </div>
-                  <div class="row g-3 align-items-center">
+                  <div class="row g-3 align-items-start">
                     <?php
                       $casePhoto = find_person_photo_url($caseCode);
                       if ($casePhoto !== '') {
                     ?>
-                      <div class="col-auto d-flex align-items-center">
+                      <div class="col-auto d-flex align-items-start">
                         <img src="<?php echo htmlspecialchars($casePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
                       </div>
                     <?php } else { ?>
-                      <div class="col-auto d-flex align-items-center">
+                      <div class="col-auto d-flex align-items-start">
                         <div class="rounded bg-secondary text-white d-flex align-items-center justify-content-center" style="width:96px;height:96px;object-fit:cover;">
                           <span class="small">No Image</span>
                         </div>
                       </div>
                     <?php } ?>
                     <div class="col">
-                      <div class="row g-3 align-items-center">
+                      <div class="row g-3 align-items-start">
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Case Name</div>
                           <div><?php echo htmlspecialchars($viewCase['case_name'] ?? ''); ?></div>
