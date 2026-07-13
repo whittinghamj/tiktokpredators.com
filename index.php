@@ -317,6 +317,110 @@ function can_manage_pending_case(PDO $pdo, int $caseId): bool {
       $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
     }
   }
+
+  function tp_case_tag_options(): array {
+    return [
+      'adult-predator' => 'Adult Predator',
+      'child-predator' => 'Child Predator',
+      'domestic-abuse' => 'Domestic Abuse',
+      'scammer' => 'Scammer',
+      'grooming' => 'Grooming',
+      'sextortion' => 'Sextortion',
+      'harassment' => 'Harassment',
+      'stalking' => 'Stalking',
+      'catfishing' => 'Catfishing',
+      'impersonation' => 'Impersonation',
+      'doxxing' => 'Doxxing',
+      'financial-exploitation' => 'Financial Exploitation',
+      'threats' => 'Threats',
+    ];
+  }
+
+  function tp_normalize_case_tags($input): array {
+    $rawTags = is_array($input) ? $input : preg_split('/[,\s]+/', (string)$input);
+    $allowed = tp_case_tag_options();
+    $tags = [];
+    foreach (($rawTags ?: []) as $rawTag) {
+      $slug = strtolower(trim((string)$rawTag));
+      if ($slug === '' || !isset($allowed[$slug]) || isset($tags[$slug])) { continue; }
+      $tags[$slug] = $allowed[$slug];
+    }
+    return $tags;
+  }
+
+  function get_case_tags(PDO $pdo, int $caseId): array {
+    if ($caseId <= 0) { return []; }
+    try {
+      $stmt = $pdo->prepare('SELECT t.slug, t.label FROM case_tag_links ctl JOIN case_tags t ON t.id = ctl.tag_id WHERE ctl.case_id = ? ORDER BY t.label ASC');
+      $stmt->execute([$caseId]);
+      $tags = [];
+      foreach ($stmt->fetchAll() as $row) {
+        $slug = trim((string)($row['slug'] ?? ''));
+        $label = trim((string)($row['label'] ?? ''));
+        if ($slug !== '' && $label !== '') { $tags[$slug] = $label; }
+      }
+      return $tags;
+    } catch (Throwable $e) {
+      return [];
+    }
+  }
+
+  function save_case_tags(PDO $pdo, int $caseId, $input): array {
+    if ($caseId <= 0) { return []; }
+    $tags = tp_normalize_case_tags($input);
+    try {
+      $pdo->prepare('DELETE FROM case_tag_links WHERE case_id = ?')->execute([$caseId]);
+      if ($tags) {
+        $selectTag = $pdo->prepare('SELECT id FROM case_tags WHERE slug = ? LIMIT 1');
+        $insertLink = $pdo->prepare('INSERT IGNORE INTO case_tag_links (case_id, tag_id) VALUES (?, ?)');
+        foreach ($tags as $slug => $label) {
+          $selectTag->execute([$slug]);
+          $tagRow = $selectTag->fetch();
+          $tagId = (int)($tagRow['id'] ?? 0);
+          if ($tagId > 0) { $insertLink->execute([$caseId, $tagId]); }
+        }
+      }
+    } catch (Throwable $e) {
+      $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+    }
+    return $tags;
+  }
+
+  function render_case_tag_badges($tags, string $emptyHtml = ''): string {
+    if (is_string($tags)) { $tags = tp_normalize_case_tags($tags); }
+    if (!is_array($tags) || !$tags) { return $emptyHtml; }
+    $html = [];
+    foreach ($tags as $slug => $label) {
+      $html[] = '<span class="badge text-bg-dark border"><i class="bi bi-tag me-1"></i>' . htmlspecialchars((string)$label) . '</span>';
+    }
+    return implode(' ', $html);
+  }
+
+  function render_case_tag_checkboxes($selected = []): string {
+    static $renderCount = 0;
+    $renderCount++;
+    $selectedTags = tp_normalize_case_tags($selected);
+    $html = '<div class="row g-2">';
+    foreach (tp_case_tag_options() as $slug => $label) {
+      $inputId = 'caseTag_' . $renderCount . '_' . preg_replace('/[^a-z0-9_]+/i', '_', $slug);
+      $checked = isset($selectedTags[$slug]) ? ' checked' : '';
+      $html .= '<div class="col-sm-6 col-lg-4"><div class="form-check">';
+      $html .= '<input class="form-check-input" type="checkbox" name="case_tags[]" value="' . htmlspecialchars($slug) . '" id="' . htmlspecialchars($inputId) . '"' . $checked . '>';
+      $html .= '<label class="form-check-label" for="' . htmlspecialchars($inputId) . '">' . htmlspecialchars($label) . '</label>';
+      $html .= '</div></div>';
+    }
+    $html .= '</div>';
+    return $html;
+  }
+
+  function render_case_tag_filter_options(string $selected = ''): string {
+    $html = '<option value="">All Tags</option>';
+    foreach (tp_case_tag_options() as $slug => $label) {
+      $sel = ($selected === $slug) ? ' selected' : '';
+      $html .= '<option value="' . htmlspecialchars($slug) . '"' . $sel . '>' . htmlspecialchars($label) . '</option>';
+    }
+    return $html;
+  }
 $view = $_GET['view'] ?? 'cases';
 function throttle(){
     $now = time();
@@ -335,6 +439,28 @@ function find_person_photo_url(string $caseCode): string {
         }
     }
     return '';
+}
+
+function tp_request_scheme(): string {
+    return (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+}
+
+function tp_request_host(): string {
+    $host = trim((string)($_SERVER['HTTP_HOST'] ?? 'tiktokpredators.com'));
+    return $host !== '' ? $host : 'tiktokpredators.com';
+}
+
+function tp_absolute_url(string $pathOrUrl): string {
+    $pathOrUrl = trim($pathOrUrl);
+    if ($pathOrUrl === '') { return ''; }
+    if (preg_match('~^https?://~i', $pathOrUrl)) { return $pathOrUrl; }
+    return tp_request_scheme() . '://' . tp_request_host() . '/' . ltrim($pathOrUrl, '/');
+}
+
+function tp_social_summary(string $summary, string $fallback): string {
+    $summary = trim(preg_replace('/\s+/', ' ', $summary) ?? '');
+    if ($summary === '') { $summary = $fallback; }
+    return mb_strimwidth($summary, 0, 300, '...', 'UTF-8');
 }
 
 function remove_person_photo(string $caseCode): bool {
@@ -655,6 +781,39 @@ try {
     backfill_case_tiktok_usernames($pdo);
 } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+// --- Case tags setup ---
+try {
+  $legacyCaseTags = false;
+  try {
+    $legacyCol = $pdo->query("SHOW COLUMNS FROM case_tags LIKE 'slug'");
+    $legacyCaseTags = (!$legacyCol || !$legacyCol->fetch());
+  } catch (Throwable $e) {
+    $legacyCaseTags = false;
+  }
+  if ($legacyCaseTags) {
+    $legacyCount = 0;
+    try { $legacyCount = (int)$pdo->query('SELECT COUNT(*) FROM case_tags')->fetchColumn(); } catch (Throwable $e) {}
+    if ($legacyCount === 0) {
+      $pdo->exec('DROP TABLE case_tags');
+    } else {
+      $pdo->exec('RENAME TABLE case_tags TO case_tags_legacy_' . date('YmdHis'));
+    }
+  }
+  $pdo->exec("\n        CREATE TABLE IF NOT EXISTS case_tags (\n            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,\n            slug VARCHAR(64) NOT NULL,\n            label VARCHAR(128) NOT NULL,\n            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n            UNIQUE KEY uq_case_tag_slug (slug),\n            INDEX idx_case_tag_label (label)\n        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n    ");
+  $pdo->exec("\n        CREATE TABLE IF NOT EXISTS case_tag_links (\n            case_id BIGINT UNSIGNED NOT NULL,\n            tag_id BIGINT UNSIGNED NOT NULL,\n            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n            PRIMARY KEY (case_id, tag_id),\n            INDEX idx_case_tag_links_tag (tag_id)\n        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n    ");
+  try {
+    $createdAtCol = $pdo->query("SHOW COLUMNS FROM case_tag_links LIKE 'created_at'");
+    if (!$createdAtCol || !$createdAtCol->fetch()) {
+      $pdo->exec('ALTER TABLE case_tag_links ADD COLUMN created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP');
+    }
+  } catch (Throwable $e) {}
+  $tagSeed = $pdo->prepare('INSERT INTO case_tags (slug, label) VALUES (?, ?) ON DUPLICATE KEY UPDATE label = VALUES(label)');
+  foreach (tp_case_tag_options() as $tagSlug => $tagLabel) {
+    $tagSeed->execute([$tagSlug, $tagLabel]);
+  }
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
 // --- Case events logging setup ---
 try {
@@ -1538,6 +1697,7 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
     $phone_number = trim($_POST['phone_number'] ?? '');
     $snapchat_username = normalize_social_username($_POST['snapchat_username'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
+    $case_tags = tp_normalize_case_tags($_POST['case_tags'] ?? []);
     $initial_summary = trim($_POST['initial_summary'] ?? '');
 
     if ($case_name === '' || $initial_summary === '') {
@@ -1565,6 +1725,7 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
         ]);
         $case_id = (int)$pdo->lastInsertId();
         save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
+        save_case_tags($pdo, $case_id, array_keys($case_tags));
         log_case_event($pdo, $case_id, 'case_created', $case_name, 'Viewer submitted case. Status set to Pending');
 
         // Optional person photo
@@ -1612,6 +1773,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
     $phone_number = trim($_POST['phone_number'] ?? '');
     $snapchat_username = normalize_social_username($_POST['snapchat_username'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
+    $case_tags = tp_normalize_case_tags($_POST['case_tags'] ?? []);
     $initial_summary = trim($_POST['initial_summary'] ?? '');
     $sensitivity = $_POST['sensitivity'] ?? '';
     $status = $_POST['status'] ?? '';
@@ -1656,6 +1818,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
         ]);
         $case_id = (int)$pdo->lastInsertId();
         save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
+        save_case_tags($pdo, $case_id, array_keys($case_tags));
         log_case_event($pdo, $case_id, 'case_created', $case_name, 'Case created with status '.$status.' and sensitivity '.$sensitivity);
         // Optional: handle person photo upload
         if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
@@ -1713,6 +1876,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $phone_number = trim($_POST['phone_number'] ?? '');
     $snapchat_username = normalize_social_username($_POST['snapchat_username'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
+    $case_tags = tp_normalize_case_tags($_POST['case_tags'] ?? []);
     $initial_summary = trim($_POST['initial_summary'] ?? '');
     $remove_person_photo = !empty($_POST['remove_person_photo']);
     $sensitivity = $_POST['sensitivity'] ?? '';
@@ -1734,7 +1898,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
 
     // Fetch current values to compute diffs
     $prev = [];
-    try { $ps = $pdo->prepare('SELECT case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); } catch (Throwable $e) {}
+    try { $ps = $pdo->prepare('SELECT case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); $prev['case_tags'] = implode(', ', get_case_tags($pdo, $case_id)); } catch (Throwable $e) {}
 
     if ($remove_person_photo) {
       remove_person_photo($case_code);
@@ -1777,9 +1941,10 @@ if (($_POST['action'] ?? '') === 'update_case') {
             $case_id
         ]);
         $tiktok_username = save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
+        $savedCaseTags = save_case_tags($pdo, $case_id, array_keys($case_tags));
         // Build diff summary
         $changes = [];
-        $fields = ['case_name','person_name','location','phone_number','snapchat_username','tiktok_username','initial_summary','sensitivity','status'];
+        $fields = ['case_name','person_name','location','phone_number','snapchat_username','tiktok_username','case_tags','initial_summary','sensitivity','status'];
         $newVals = [
             'case_name' => $case_name,
             'person_name' => ($person_name !== '' ? $person_name : null),
@@ -1787,6 +1952,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
             'phone_number' => ($phone_number !== '' ? $phone_number : null),
             'snapchat_username' => ($snapchat_username !== '' ? $snapchat_username : null),
             'tiktok_username' => ($tiktok_username !== '' ? $tiktok_username : null),
+            'case_tags' => implode(', ', $savedCaseTags),
             'initial_summary' => $initial_summary,
             'sensitivity' => $sensitivity,
             'status' => $status
@@ -2784,12 +2950,49 @@ if (isset($_GET['logout'])) {
 
 $tpSiteTitle = 'TikTokPredators';
 $tpMetaDescription = 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.';
+$tpPageTitle = $tpSiteTitle . ' — Cases & Evidence';
+$tpMetaUrl = tp_absolute_url('/');
+$tpMetaType = 'website';
+$tpMetaImage = tp_absolute_url('/assets/og-image.png');
+$tpMetaImageAlt = $tpPageTitle;
 $tpDiscordWebhooks = [];
 $tpDiscordWebhookCount = 0;
 if (isset($pdo) && $pdo instanceof PDO) {
     $tpSiteTitle = tp_project_setting($pdo, 'site_title', $tpSiteTitle);
     $tpMetaDescription = tp_project_setting($pdo, 'meta_data', $tpMetaDescription);
   $tpDiscordWebhooks = tp_discord_webhooks($pdo);
+}
+$tpPageTitle = $tpSiteTitle . ' — Cases & Evidence';
+$tpMetaImageAlt = $tpPageTitle;
+
+if ($view === 'case' && isset($pdo) && $pdo instanceof PDO) {
+  $metaCaseCode = trim((string)($_GET['code'] ?? ''));
+  if ($metaCaseCode !== '') {
+    try {
+      $metaStmt = $pdo->prepare('SELECT case_code, case_name, person_name, initial_summary FROM cases WHERE case_code = ? LIMIT 1');
+      $metaStmt->execute([$metaCaseCode]);
+      $metaCase = $metaStmt->fetch();
+      if ($metaCase) {
+        $metaCaseCode = (string)($metaCase['case_code'] ?? $metaCaseCode);
+        $metaCaseName = trim((string)($metaCase['case_name'] ?? ''));
+        $metaPersonName = trim((string)($metaCase['person_name'] ?? ''));
+        $tpPageTitle = ($metaCaseName !== '' ? $metaCaseName : 'Case ' . $metaCaseCode) . ' — ' . $tpSiteTitle;
+        $tpMetaDescription = tp_social_summary((string)($metaCase['initial_summary'] ?? ''), $tpMetaDescription);
+        $tpMetaUrl = tp_absolute_url('/?view=case&code=' . rawurlencode($metaCaseCode));
+        $tpMetaType = 'article';
+        $metaPhoto = find_person_photo_url($metaCaseCode);
+        if ($metaPhoto !== '') {
+          $tpMetaImage = tp_absolute_url($metaPhoto);
+        }
+        if ($metaPersonName !== '' && $metaCaseName === '') {
+          $tpPageTitle = $metaPersonName . ' — ' . $tpSiteTitle;
+        }
+        $tpMetaImageAlt = $tpPageTitle;
+      }
+    } catch (Throwable $e) {
+      // Keep the default site metadata if the case lookup fails.
+    }
+  }
 }
 $tpDiscordWebhookCount = count($tpDiscordWebhooks);
 if (count($tpDiscordWebhooks) === 0) {
@@ -2801,7 +3004,7 @@ if (count($tpDiscordWebhooks) === 0) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title><?php echo htmlspecialchars($tpSiteTitle); ?> — Cases & Evidence</title>
+  <title><?php echo htmlspecialchars($tpPageTitle); ?></title>
   <link rel="apple-touch-icon" sizes="57x57" href="/assets/favicon/apple-icon-57x57.png">
   <link rel="apple-touch-icon" sizes="60x60" href="/assets/favicon/apple-icon-60x60.png">
   <link rel="apple-touch-icon" sizes="72x72" href="/assets/favicon/apple-icon-72x72.png">
@@ -2821,16 +3024,20 @@ if (count($tpDiscordWebhooks) === 0) {
   <meta name="theme-color" content="#ffffff">
   <meta name="description" content="<?php echo htmlspecialchars($tpMetaDescription); ?>" />
   <!-- Open Graph / Social sharing -->
-  <meta property="og:title" content="<?php echo htmlspecialchars($tpSiteTitle); ?> — Cases & Evidence" />
+  <meta property="og:title" content="<?php echo htmlspecialchars($tpPageTitle); ?>" />
   <meta property="og:description" content="<?php echo htmlspecialchars($tpMetaDescription); ?>" />
-  <meta property="og:type" content="website" />
-  <meta property="og:url" content="https://tiktokpredators.com/" />
+  <meta property="og:type" content="<?php echo htmlspecialchars($tpMetaType); ?>" />
+  <meta property="og:url" content="<?php echo htmlspecialchars($tpMetaUrl); ?>" />
   <meta property="og:site_name" content="<?php echo htmlspecialchars($tpSiteTitle); ?>" />
-  <meta property="og:image" content="https://tiktokpredators.com/assets/og-image.png" />
+  <meta property="og:image" content="<?php echo htmlspecialchars($tpMetaImage); ?>" />
+  <meta property="og:image:secure_url" content="<?php echo htmlspecialchars($tpMetaImage); ?>" />
+  <meta property="og:image:alt" content="<?php echo htmlspecialchars($tpMetaImageAlt); ?>" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="<?php echo htmlspecialchars($tpSiteTitle); ?> — Cases & Evidence" />
+  <meta name="twitter:url" content="<?php echo htmlspecialchars($tpMetaUrl); ?>" />
+  <meta name="twitter:title" content="<?php echo htmlspecialchars($tpPageTitle); ?>" />
   <meta name="twitter:description" content="<?php echo htmlspecialchars($tpMetaDescription); ?>" />
-  <meta name="twitter:image" content="https://tiktokpredators.com/assets/og-image.png" />
+  <meta name="twitter:image" content="<?php echo htmlspecialchars($tpMetaImage); ?>" />
+  <meta name="twitter:image:alt" content="<?php echo htmlspecialchars($tpMetaImageAlt); ?>" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
   <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet" />
@@ -3540,6 +3747,10 @@ if (count($tpDiscordWebhooks) === 0) {
                               <label class="form-label">Summary</label>
                               <textarea name="initial_summary" class="form-control" rows="4" required><?php echo htmlspecialchars($caseRow['initial_summary'] ?? ''); ?></textarea>
                             </div>
+                            <div class="mb-3">
+                              <label class="form-label">Case Tags</label>
+                              <?php echo render_case_tag_checkboxes(get_case_tags($pdo, (int)$caseRow['id'])); ?>
+                            </div>
                             <div class="row">
                               <div class="col-md-6 mb-3">
                                 <input type="hidden" name="sensitivity" value="Standard">
@@ -3703,12 +3914,20 @@ if (count($tpDiscordWebhooks) === 0) {
     <div class="container-xl">
       <div class="row g-4">
         <div class="col-12 case-grid">
+          <?php
+          $search = trim($_GET['q'] ?? '');
+          $tagFilter = strtolower(trim((string)($_GET['tag'] ?? '')));
+          if (!isset(tp_case_tag_options()[$tagFilter])) { $tagFilter = ''; }
+          ?>
           <div class="d-flex align-items-center justify-content-between mb-2">
             <h2 class="h4 mb-0">Recent Cases</h2>
             <div class="d-flex align-items-center">
               <form class="d-none d-md-flex me-2" method="get" action="" role="search">
                 <input type="hidden" name="view" value="cases">
                 <input type="search" name="q" class="form-control form-control-sm" placeholder="Search names, usernames, summary…" value="<?php echo htmlspecialchars($_GET['q'] ?? ''); ?>" />
+                <select name="tag" class="form-select form-select-sm ms-1" style="min-width: 12rem;">
+                  <?php echo render_case_tag_filter_options($tagFilter); ?>
+                </select>
                 <button type="submit" class="btn btn-outline-light btn-sm ms-1"><i class="bi bi-search"></i></button>
               </form>
               <div class="btn-group">
@@ -3720,73 +3939,60 @@ if (count($tpDiscordWebhooks) === 0) {
               </div>
             </div>
           </div>
-          <?php
-          // --- SEARCH variable for search bar and results hint
-          $search = trim($_GET['q'] ?? '');
-          ?>
-          <?php if (!empty($search)): ?>
-            <div class="text-secondary small mb-2">Showing results for “<?php echo htmlspecialchars($search); ?>”.</div>
+          <form class="d-flex d-md-none gap-1 mb-2" method="get" action="" role="search">
+            <input type="hidden" name="view" value="cases">
+            <input type="search" name="q" class="form-control form-control-sm" placeholder="Search cases…" value="<?php echo htmlspecialchars($search); ?>" />
+            <select name="tag" class="form-select form-select-sm">
+              <?php echo render_case_tag_filter_options($tagFilter); ?>
+            </select>
+            <button type="submit" class="btn btn-outline-light btn-sm"><i class="bi bi-search"></i></button>
+          </form>
+          <?php if ($search !== '' || $tagFilter !== ''): ?>
+            <div class="text-secondary small mb-2">
+              Showing results<?php if ($search !== ''): ?> for “<?php echo htmlspecialchars($search); ?>”<?php endif; ?><?php if ($tagFilter !== ''): ?> tagged <span class="text-white"><?php echo htmlspecialchars(tp_case_tag_options()[$tagFilter]); ?></span><?php endif; ?>.
+              <a class="ms-1" href="?view=cases#cases">Clear filters</a>
+            </div>
           <?php endif; ?>
           <div class="row g-3 row-cols-1 row-cols-md-2">
 <?php
 try {
-  $search = trim($_GET['q'] ?? '');
+  $whereParts = ["c.status <> 'Pending'"];
+  $queryParams = [];
   if ($search !== '') {
     $like = '%' . $search . '%';
-    $stmt = $pdo->prepare("
-          SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
-             COALESCE(ev.cnt, 0) AS evidence_count,
-             COALESCE(cv.cnt, 0) AS case_view_count,
-             COALESCE(ev.last_added, c.opened_at) AS last_activity
-      FROM cases c
-      LEFT JOIN (
-        SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
-        FROM evidence
-        GROUP BY case_id
-      ) ev ON ev.case_id = c.id
-      LEFT JOIN (
-        SELECT case_id, COUNT(*) AS cnt
-        FROM case_views
-        GROUP BY case_id
-      ) cv ON cv.case_id = c.id
-      LEFT JOIN (
-        SELECT case_id, GROUP_CONCAT(username ORDER BY sort_order ASC, id ASC SEPARATOR ', ') AS usernames
-        FROM case_tiktok_usernames
-        GROUP BY case_id
-      ) tu ON tu.case_id = c.id
-      WHERE c.status <> 'Pending'
-        AND (c.case_name LIKE ? OR c.person_name LIKE ? OR c.phone_number LIKE ? OR c.snapchat_username LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ? OR EXISTS (SELECT 1 FROM case_tiktok_usernames ctu WHERE ctu.case_id = c.id AND ctu.username LIKE ?))
-      ORDER BY last_activity DESC
-      LIMIT 1000
-    ");
-    $stmt->execute([$like, $like, $like, $like, $like, $like, $like]);
-    $rs = $stmt->fetchAll();
-  } else {
-    $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
-                   COALESCE(ev.cnt, 0) AS evidence_count,
-                   COALESCE(cv.cnt, 0) AS case_view_count,
-                   COALESCE(ev.last_added, c.opened_at) AS last_activity
-            FROM cases c
-            LEFT JOIN (
-              SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
-              FROM evidence
-              GROUP BY case_id
-            ) ev ON ev.case_id = c.id
-            LEFT JOIN (
-              SELECT case_id, COUNT(*) AS cnt
-              FROM case_views
-              GROUP BY case_id
-            ) cv ON cv.case_id = c.id
-            LEFT JOIN (
-              SELECT case_id, GROUP_CONCAT(username ORDER BY sort_order ASC, id ASC SEPARATOR ', ') AS usernames
-              FROM case_tiktok_usernames
-              GROUP BY case_id
-            ) tu ON tu.case_id = c.id
-            WHERE c.status <> 'Pending'
-            ORDER BY last_activity DESC
-            LIMIT 1000";
-    $rs = $pdo->query($sql)->fetchAll();
+    $whereParts[] = "(c.case_name LIKE ? OR c.person_name LIKE ? OR c.phone_number LIKE ? OR c.snapchat_username LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ? OR EXISTS (SELECT 1 FROM case_tiktok_usernames ctu WHERE ctu.case_id = c.id AND ctu.username LIKE ?) OR EXISTS (SELECT 1 FROM case_tag_links ctl JOIN case_tags ct ON ct.id = ctl.tag_id WHERE ctl.case_id = c.id AND (ct.label LIKE ? OR ct.slug LIKE ?)))";
+    array_push($queryParams, $like, $like, $like, $like, $like, $like, $like, $like, $like);
   }
+  if ($tagFilter !== '') {
+    $whereParts[] = "EXISTS (SELECT 1 FROM case_tag_links ctl_filter JOIN case_tags ct_filter ON ct_filter.id = ctl_filter.tag_id WHERE ctl_filter.case_id = c.id AND ct_filter.slug = ?)";
+    $queryParams[] = $tagFilter;
+  }
+  $sql = "SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, COALESCE(tu.usernames, c.tiktok_username) AS tiktok_username, c.initial_summary, c.status, c.sensitivity, c.opened_at,
+                 COALESCE(ev.cnt, 0) AS evidence_count,
+                 COALESCE(cv.cnt, 0) AS case_view_count,
+                 COALESCE(ev.last_added, c.opened_at) AS last_activity
+          FROM cases c
+          LEFT JOIN (
+            SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
+            FROM evidence
+            GROUP BY case_id
+          ) ev ON ev.case_id = c.id
+          LEFT JOIN (
+            SELECT case_id, COUNT(*) AS cnt
+            FROM case_views
+            GROUP BY case_id
+          ) cv ON cv.case_id = c.id
+          LEFT JOIN (
+            SELECT case_id, GROUP_CONCAT(username ORDER BY sort_order ASC, id ASC SEPARATOR ', ') AS usernames
+            FROM case_tiktok_usernames
+            GROUP BY case_id
+          ) tu ON tu.case_id = c.id
+          WHERE " . implode(' AND ', $whereParts) . "
+          ORDER BY last_activity DESC
+          LIMIT 1000";
+  $stmt = $pdo->prepare($sql);
+  $stmt->execute($queryParams);
+  $rs = $stmt->fetchAll();
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
@@ -3805,6 +4011,7 @@ if ($rs && count($rs) > 0):
     $vwc   = (int)($row['case_view_count'] ?? 0);
     $status= $row['status'] ?? 'Open';
     $sens  = $row['sensitivity'] ?? 'Standard';
+    $caseTags = get_case_tags($pdo, (int)($row['id'] ?? 0));
     $opened= $row['opened_at'] ?? '';
     $last  = $row['last_activity'] ?? $opened;
     $photoUrl = '';
@@ -3856,6 +4063,9 @@ if ($rs && count($rs) > 0):
 
         </div>
         <p class="small mt-3 mb-2 text-secondary"><?php echo htmlspecialchars($sum); ?></p>
+        <?php if ($caseTags): ?>
+          <div class="mb-2 d-flex gap-1 flex-wrap"><?php echo render_case_tag_badges($caseTags); ?></div>
+        <?php endif; ?>
         <div class="mt-2 d-flex gap-2 flex-wrap">
           <span class="badge text-bg-dark border"><i class="bi bi-files me-1"></i><?php echo $evc; ?> evidence</span>
           <span class="badge text-bg-dark border"><i class="bi bi-shield-lock me-1"></i><?php echo htmlspecialchars($sens); ?></span>
@@ -3946,6 +4156,10 @@ if ($rs && count($rs) > 0):
                     <textarea name="initial_summary" class="form-control" rows="4" placeholder="Describe the concern and context." required></textarea>
                   </div>
                   <div class="mb-3">
+                    <label class="form-label">Case Tags</label>
+                    <?php echo render_case_tag_checkboxes(); ?>
+                  </div>
+                  <div class="mb-3">
                     <label class="form-label">Person Photo (optional)</label>
                     <input type="file" name="person_photo" class="form-control" accept="image/*">
                   </div>
@@ -3972,10 +4186,29 @@ if ($rs && count($rs) > 0):
         <div class="col-12">
           <div class="card glass">
             <div class="card-body">
+              <?php
+                $pendingTagFilter = strtolower(trim((string)($_GET['tag'] ?? '')));
+                if (!isset(tp_case_tag_options()[$pendingTagFilter])) { $pendingTagFilter = ''; }
+              ?>
               <div class="d-flex align-items-center justify-content-between mb-3">
                 <h2 class="h5 mb-0"><i class="bi bi-hourglass-split me-2"></i>Pending Cases</h2>
-                <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+                <div class="d-flex align-items-center gap-2">
+                  <form method="get" action="" class="d-flex gap-1">
+                    <input type="hidden" name="view" value="pending">
+                    <select name="tag" class="form-select form-select-sm" style="min-width: 12rem;">
+                      <?php echo render_case_tag_filter_options($pendingTagFilter); ?>
+                    </select>
+                    <button type="submit" class="btn btn-outline-light btn-sm"><i class="bi bi-funnel me-1"></i>Filter</button>
+                  </form>
+                  <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+                </div>
               </div>
+              <?php if ($pendingTagFilter !== ''): ?>
+                <div class="text-secondary small mb-2">
+                  Showing pending cases tagged <span class="text-white"><?php echo htmlspecialchars(tp_case_tag_options()[$pendingTagFilter]); ?></span>.
+                  <a class="ms-1" href="?view=pending#pending">Clear filter</a>
+                </div>
+              <?php endif; ?>
   <?php
     // Build dataset based on role
     $rows = [];
@@ -3994,15 +4227,21 @@ if ($rs && count($rs) > 0):
           LEFT JOIN users u ON u.id = c.created_by
           WHERE c.status = 'Pending'
         ";
+          $pendingParams = [];
+          if ($pendingTagFilter !== '') {
+            $baseSql .= " AND EXISTS (SELECT 1 FROM case_tag_links ctl_filter JOIN case_tags ct_filter ON ct_filter.id = ctl_filter.tag_id WHERE ctl_filter.case_id = c.id AND ct_filter.slug = ?)";
+            $pendingParams[] = $pendingTagFilter;
+          }
         if (is_admin()) {
             $sql = $baseSql . " ORDER BY last_activity DESC";
             $stmt = $pdo->prepare($sql);
-            $stmt->execute();
+            $stmt->execute($pendingParams);
         } else {
             // Viewer: only own pending cases
             $sql = $baseSql . " AND c.created_by = ? ORDER BY last_activity DESC";
             $stmt = $pdo->prepare($sql);
-            $stmt->execute([ $_SESSION['user']['id'] ?? 0 ]);
+            $pendingParams[] = $_SESSION['user']['id'] ?? 0;
+            $stmt->execute($pendingParams);
         }
         $rows = $stmt->fetchAll();
     } catch (Throwable $e) {
@@ -4020,6 +4259,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       <th class="text-nowrap">Case Name</th>
                       <th class="text-nowrap">Submitted By</th>
                       <th style="width: 16rem;" class="text-nowrap">Subject</th>
+                      <th class="text-nowrap">Tags</th>
                       <th style="width: 10rem;" class="text-nowrap">Evidence</th>
                       <th style="width: 14rem;" class="text-nowrap">Last Activity</th>
                       <th style="width: 18rem;" class="text-end text-nowrap">Actions</th>
@@ -4033,12 +4273,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       $evc = (int)($r['evidence_count'] ?? 0);
                       $last = $r['last_activity'] ?? '';
                       $creatorName = trim($r['creator_name'] ?? '');
+                        $pendingCaseTags = get_case_tags($pdo, (int)($r['id'] ?? 0));
                   ?>
                     <tr>
                       <td class="text-nowrap"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($code); ?></span></td>
                       <td class="fw-semibold text-nowrap"><?php echo htmlspecialchars($name); ?></td>
                       <td class="text-nowrap"><?php echo $creatorName !== '' ? htmlspecialchars($creatorName) : '—'; ?></td>
                       <td class="text-nowrap"><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></td>
+                      <td><?php echo render_case_tag_badges($pendingCaseTags, '<span class="text-secondary">&mdash;</span>'); ?></td>
                       <td class="text-nowrap"><?php echo $evc; ?></td>
                       <td class="text-nowrap"><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
                       <td class="text-end text-nowrap">                        
@@ -5049,14 +5291,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
   <?php if ($view === 'case'): ?>
     <?php
       $caseCode = trim($_GET['code'] ?? '');
-      $viewCase = null; $viewCaseId = 0; $viewEv = []; $viewTotalViews = 0;
+      $viewCase = null; $viewCaseId = 0; $viewEv = []; $viewTotalViews = 0; $viewCaseTags = [];
       if ($caseCode !== '') {
         try {
           $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
           $viewCaseId = (int)($viewCase['id'] ?? 0);
-          if ($viewCaseId > 0) { $viewCase['tiktok_username'] = get_case_tiktok_usernames($pdo, $viewCaseId) ?: ($viewCase['tiktok_username'] ?? ''); }
+          if ($viewCaseId > 0) { $viewCase['tiktok_username'] = get_case_tiktok_usernames($pdo, $viewCaseId) ?: ($viewCase['tiktok_username'] ?? ''); $viewCaseTags = get_case_tags($pdo, $viewCaseId); }
 
         } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage()); }
@@ -5446,6 +5688,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                           <div><span class="badge text-bg-dark border"><?php echo htmlspecialchars($viewCase['sensitivity']); ?></span></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Case Tags</div>
+                          <div><?php echo render_case_tag_badges($viewCaseTags, '<span class="text-secondary">&mdash;</span>'); ?></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Opened</div>
                           <div><?php echo htmlspecialchars($viewCase['opened_at']); ?></div>
                         </div>
@@ -5646,6 +5892,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             </div>
 
             <div class="mt-3">
+              <label class="form-label">Case Tags</label>
+              <?php echo render_case_tag_checkboxes(get_case_tags($pdo, $viewCaseId)); ?>
+            </div>
+
+            <div class="mt-3">
               <label class="form-label">Initial Summary</label>
               <textarea name="initial_summary" class="form-control" rows="4" required><?php echo htmlspecialchars($viewCase['initial_summary'] ?? ''); ?></textarea>
             </div>
@@ -5670,13 +5921,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
   $adminCaseCode = $_GET['admin_case'] ?? '';
   if (!empty($adminCaseCode) && !empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')) {
       // Fetch case meta
-      $caseRow = null; $caseId = 0; $adminCaseTotalViews = 0;
+      $caseRow = null; $caseId = 0; $adminCaseTotalViews = 0; $adminCaseTags = [];
       try {
           $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
           $s->execute([$adminCaseCode]);
           $caseRow = $s->fetch();
           $caseId = (int)($caseRow['id'] ?? 0);
-            if ($caseId > 0) { $caseRow['tiktok_username'] = get_case_tiktok_usernames($pdo, $caseId) ?: ($caseRow['tiktok_username'] ?? ''); }
+            if ($caseId > 0) { $caseRow['tiktok_username'] = get_case_tiktok_usernames($pdo, $caseId) ?: ($caseRow['tiktok_username'] ?? ''); $adminCaseTags = get_case_tags($pdo, $caseId); }
       } catch (Throwable $e) {
           $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
@@ -5755,6 +6006,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['status']); ?></span></div>
                   <div class="small text-secondary">Sensitivity</div>
                   <div class="mb-2"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($caseRow['sensitivity']); ?></span></div>
+                  <div class="small text-secondary">Case Tags</div>
+                  <div class="mb-2"><?php echo render_case_tag_badges($adminCaseTags, '<span class="text-secondary">&mdash;</span>'); ?></div>
                   <div class="small text-secondary">Opened</div>
                   <div class="mb-2"><?php echo htmlspecialchars($caseRow['opened_at']); ?></div>
                   <div class="small text-secondary">Initial Summary</div>
@@ -6059,6 +6312,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       </div>
                     <?php endif; ?>
                   </div>
+                </div>
+
+                <div class="mt-3">
+                  <label class="form-label">Case Tags</label>
+                  <?php echo render_case_tag_checkboxes(get_case_tags($pdo, (int)$caseId)); ?>
                 </div>
 
                 <div class="mt-3">
@@ -6517,6 +6775,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 <input type="file" name="person_photo" class="form-control" accept="image/*">
                 <small class="text-secondary">JPEG, PNG, or WEBP</small>
               </div>
+            </div>
+            <div class="mt-3">
+              <label class="form-label">Case Tags</label>
+              <?php echo render_case_tag_checkboxes(); ?>
             </div>
             <div class="mt-3">
               <label class="form-label">Initial Summary</label>
