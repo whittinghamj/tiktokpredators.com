@@ -86,6 +86,37 @@ $_SESSION['auth_attempts'] = $_SESSION['auth_attempts'] ?? 0;
 $_SESSION['auth_last'] = $_SESSION['auth_last'] ?? 0;
 function current_user_role(){ return $_SESSION['user']['role'] ?? 'guest'; }
 function is_admin(){ return (current_user_role()==='admin'); }
+function tp_mask_case_phone_number(?string $phoneNumber): string {
+  $masked = trim((string)$phoneNumber);
+  $digitsMasked = 0;
+  for ($i = strlen($masked) - 1; $i >= 0 && $digitsMasked < 3; $i--) {
+    if ($masked[$i] >= '0' && $masked[$i] <= '9') {
+      $masked[$i] = '*';
+      $digitsMasked++;
+    }
+  }
+  return $masked;
+}
+function tp_case_phone_number_for_viewer(?string $phoneNumber): string {
+  $phoneNumber = trim((string)$phoneNumber);
+  return is_admin() ? $phoneNumber : tp_mask_case_phone_number($phoneNumber);
+}
+function tp_case_event_detail_for_viewer(string $detail): string {
+  if (is_admin() || stripos($detail, 'phone_number:') === false) { return $detail; }
+
+  return (string)preg_replace_callback(
+    '/(phone_number:\s*)(.*?)(?=;\s*[a-z_]+:|$)/iu',
+    static function (array $match): string {
+      $values = preg_split('/(\s*→\s*)/u', $match[2], -1, PREG_SPLIT_DELIM_CAPTURE);
+      if (!is_array($values)) { return $match[1] . tp_mask_case_phone_number($match[2]); }
+      foreach ($values as $index => $value) {
+        if ($index % 2 === 0) { $values[$index] = tp_mask_case_phone_number($value); }
+      }
+      return $match[1] . implode('', $values);
+    },
+    $detail
+  );
+}
 function tp_is_main_admin(): bool {
   if (!is_admin()) { return false; }
   $userId = (int)($_SESSION['user']['id'] ?? 0);
@@ -2177,6 +2208,15 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $prev = [];
     try { $ps = $pdo->prepare('SELECT case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); $prev['case_tags'] = implode(', ', get_case_tags($pdo, $case_id)); } catch (Throwable $e) {}
 
+    // Non-admin case owners only receive the masked value. Keep the original
+    // number when they save other changes without replacing that masked value.
+    if (!is_admin()) {
+        $previousPhone = trim((string)($prev['phone_number'] ?? ''));
+        if ($phone_number === tp_mask_case_phone_number($previousPhone)) {
+            $phone_number = $previousPhone;
+        }
+    }
+
     if ($remove_person_photo) {
       remove_person_photo($case_code);
     }
@@ -3994,7 +4034,7 @@ if (count($tpDiscordWebhooks) === 0) {
                               </div>
                               <div class="col-md-6 mb-3">
                                 <label class="form-label">Phone Number</label>
-                                <input type="text" name="phone_number" class="form-control" value="<?php echo htmlspecialchars($caseRow['phone_number'] ?? ''); ?>" inputmode="tel">
+                                <input type="text" name="phone_number" class="form-control" value="<?php echo htmlspecialchars(tp_case_phone_number_for_viewer($caseRow['phone_number'] ?? '')); ?>" inputmode="tel">
                               </div>
                             </div>
                             <div class="row">
@@ -5909,7 +5949,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                             'ts' => $ceRow['created_at'],
                             'type' => $ceRow['event_type'],
                             'label' => $lbl,
-                            'detail' => mb_strimwidth(trim(($ceRow['subject'] ? $ceRow['subject'].': ' : '').($ceRow['detail'] ?? '')), 0, 180, '…', 'UTF-8'),
+                            'detail' => mb_strimwidth(tp_case_event_detail_for_viewer(trim(($ceRow['subject'] ? $ceRow['subject'].': ' : '').($ceRow['detail'] ?? ''))), 0, 180, '…', 'UTF-8'),
                             'meta' => '',
                             'evidence_id' => (int)($ceRow['ref_evidence_id'] ?? 0)
                         ];
@@ -6104,7 +6144,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Phone Number</div>
-                          <div><?php echo ($viewCase['phone_number'] ?? '') !== '' ? htmlspecialchars($viewCase['phone_number']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
+                          <div><?php echo ($viewCase['phone_number'] ?? '') !== '' ? htmlspecialchars(tp_case_phone_number_for_viewer($viewCase['phone_number'])) : '<span class="text-secondary">&mdash;</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Snapchat Username</div>
