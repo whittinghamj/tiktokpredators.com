@@ -101,21 +101,44 @@ function tp_case_phone_number_for_viewer(?string $phoneNumber): string {
   $phoneNumber = trim((string)$phoneNumber);
   return is_admin() ? $phoneNumber : tp_mask_case_phone_number($phoneNumber);
 }
-function tp_case_event_detail_for_viewer(string $detail): string {
-  if (is_admin() || stripos($detail, 'phone_number:') === false) { return $detail; }
-
+function tp_mask_case_location_house_number(?string $location): string {
+  $location = trim((string)$location);
   return (string)preg_replace_callback(
-    '/(phone_number:\s*)(.*?)(?=;\s*[a-z_]+:|$)/iu',
+    '/^(\d+[A-Za-z]?(?:\s*[-–—\/]\s*\d+[A-Za-z]?)*)(?=\s|,|$)/u',
     static function (array $match): string {
+      return (string)preg_replace('/\d/', '*', $match[1]);
+    },
+    $location,
+    1
+  );
+}
+function tp_case_location_for_viewer(?string $location): string {
+  $location = trim((string)$location);
+  return is_admin() ? $location : tp_mask_case_location_house_number($location);
+}
+function tp_mask_case_event_field_values(string $detail, string $fieldName, callable $maskValue): string {
+  return (string)preg_replace_callback(
+    '/(' . preg_quote($fieldName, '/') . ':\s*)(.*?)(?=;\s*[a-z_]+:|$)/iu',
+    static function (array $match) use ($maskValue): string {
       $values = preg_split('/(\s*→\s*)/u', $match[2], -1, PREG_SPLIT_DELIM_CAPTURE);
-      if (!is_array($values)) { return $match[1] . tp_mask_case_phone_number($match[2]); }
+      if (!is_array($values)) { return $match[1] . $maskValue($match[2]); }
       foreach ($values as $index => $value) {
-        if ($index % 2 === 0) { $values[$index] = tp_mask_case_phone_number($value); }
+        if ($index % 2 === 0) { $values[$index] = $maskValue($value); }
       }
       return $match[1] . implode('', $values);
     },
     $detail
   );
+}
+function tp_case_event_detail_for_viewer(string $detail): string {
+  if (is_admin()) { return $detail; }
+  if (stripos($detail, 'phone_number:') !== false) {
+    $detail = tp_mask_case_event_field_values($detail, 'phone_number', 'tp_mask_case_phone_number');
+  }
+  if (stripos($detail, 'location:') !== false) {
+    $detail = tp_mask_case_event_field_values($detail, 'location', 'tp_mask_case_location_house_number');
+  }
+  return $detail;
 }
 function tp_is_main_admin(): bool {
   if (!is_admin()) { return false; }
@@ -541,7 +564,7 @@ function notify_discord_case_verified(string $caseCode, string $caseName, string
         'description' => $desc,
         'fields'      => [
             ['name' => 'Predator Name', 'value' => ($personName !== '' ? $personName : '—'), 'inline' => true],
-            ['name' => 'Location',      'value' => ($location   !== '' ? $location   : '—'), 'inline' => true],
+            ['name' => 'Location',      'value' => ($location !== '' ? tp_mask_case_location_house_number($location) : '—'), 'inline' => true],
         ],
         'footer' => ['text' => 'TikTok Predators · ' . date('d M Y')],
     ];
@@ -802,6 +825,12 @@ SQL
     $userType = strtolower((string)($userInfo['Type'] ?? ''));
     if ($userInfo && strpos($userType, 'text') === false) {
       $pdo->exec("ALTER TABLE cases MODIFY COLUMN tiktok_username TEXT NULL");
+    }
+    $statusCol = $pdo->query("SHOW COLUMNS FROM cases LIKE 'status'");
+    $statusInfo = $statusCol ? $statusCol->fetch() : null;
+    $statusType = (string)($statusInfo['Type'] ?? '');
+    if ($statusInfo && stripos($statusType, 'enum(') === 0 && stripos($statusType, "'Rejected'") === false) {
+      $pdo->exec("ALTER TABLE cases MODIFY COLUMN status ENUM('Pending','Open','In Review','Verified','Closed','Rejected') NOT NULL DEFAULT 'Pending'");
     }
   } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
@@ -1551,13 +1580,14 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     $eid = (int)($_GET['id'] ?? 0);
     if ($eid <= 0) { http_response_code(400); exit('Bad request'); }
     try {
-        $q = $pdo->prepare('SELECT e.id, e.filepath, e.mime_type, e.type, e.case_id, c.sensitivity FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? LIMIT 1');
+        $q = $pdo->prepare('SELECT e.id, e.filepath, e.mime_type, e.type, e.case_id, c.sensitivity, c.status AS case_status FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? LIMIT 1');
         $q->execute([$eid]);
         $row = $q->fetch();
     } catch (Throwable $e) {
         http_response_code(500); exit('Server error');
     }
     if (!$row) { http_response_code(404); exit('Not found'); }
+    if (($row['case_status'] ?? '') === 'Rejected' && !is_admin()) { http_response_code(404); exit('Not found'); }
     $rel = $row['filepath'] ?? '';
     $mime = $row['mime_type'] ?? 'application/octet-stream';
     $type = $row['type'] ?? 'other';
@@ -2087,7 +2117,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
     $status = $_POST['status'] ?? '';
 
     $allowed_sensitivity = ['Standard','Restricted','Sealed'];
-    $allowed_status = ['Pending','Open','In Review','Verified','Closed'];
+    $allowed_status = ['Pending','Open','In Review','Verified','Closed','Rejected'];
 
     if ($case_name === '' || $initial_summary === '') {
         flash('error', 'Case name and initial summary are required.');
@@ -2165,6 +2195,55 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
 
+// Reject a pending case without deleting its record or evidence (admin only).
+if (($_POST['action'] ?? '') === 'reject_case') {
+    throttle();
+    if (!check_csrf()) {
+        flash('error', 'Security check failed.');
+        header('Location: ?view=pending#pending'); exit;
+    }
+    if (!is_admin()) {
+        flash('error', 'Unauthorized. Admins only.');
+        header('Location: ?view=pending#pending'); exit;
+    }
+
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $case_code = trim((string)($_POST['case_code'] ?? ''));
+    if ($case_id <= 0 || $case_code === '') {
+        flash('error', 'Invalid case reference.');
+        header('Location: ?view=pending#pending'); exit;
+    }
+
+    try {
+        $caseStmt = $pdo->prepare('SELECT case_name, status FROM cases WHERE id = ? AND case_code = ? LIMIT 1');
+        $caseStmt->execute([$case_id, $case_code]);
+        $caseToReject = $caseStmt->fetch();
+        if (!$caseToReject) {
+            flash('error', 'Case not found.');
+        } elseif (($caseToReject['status'] ?? '') === 'Rejected') {
+            flash('success', 'Case is already rejected.');
+        } elseif (($caseToReject['status'] ?? '') !== 'Pending') {
+            flash('error', 'Only pending cases can be rejected.');
+        } else {
+            $rejectStmt = $pdo->prepare("UPDATE cases SET status = 'Rejected' WHERE id = ? AND case_code = ? AND status = 'Pending' LIMIT 1");
+            $rejectStmt->execute([$case_id, $case_code]);
+            if ($rejectStmt->rowCount() === 1) {
+                $caseName = trim((string)($caseToReject['case_name'] ?? ''));
+                log_case_event($pdo, $case_id, 'case_rejected', $caseName !== '' ? $caseName : $case_code, 'Pending case rejected by an administrator');
+                flash('success', 'Case rejected.');
+                log_console('SUCCESS', 'Case rejected: ' . $case_code . ' by admin user_id ' . (int)($_SESSION['user']['id'] ?? 0));
+            } else {
+                flash('error', 'Case status changed before it could be rejected.');
+            }
+        }
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to reject case.');
+    }
+    header('Location: ?view=pending#pending'); exit;
+}
+
 // Handle update case (admin only)
 if (($_POST['action'] ?? '') === 'update_case') {
     throttle();
@@ -2191,7 +2270,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $status = $_POST['status'] ?? '';
 
     $allowed_sensitivity = ['Standard','Restricted','Sealed'];
-    $allowed_status = ['Pending','Open','In Review','Verified','Closed'];
+    $allowed_status = ['Pending','Open','In Review','Verified','Closed','Rejected'];
 
     if ($case_id <= 0 || $case_code === '') {
         flash('error', 'Invalid case reference.');
@@ -2208,10 +2287,14 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $prev = [];
     try { $ps = $pdo->prepare('SELECT case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); $prev['case_tags'] = implode(', ', get_case_tags($pdo, $case_id)); } catch (Throwable $e) {}
 
-    // Non-admin case owners only receive the masked value. Keep the original
-    // number when they save other changes without replacing that masked value.
+    // Non-admin case owners only receive masked private fields. Keep the
+    // originals when they save other changes without replacing those values.
     if (!is_admin()) {
+        $previousLocation = trim((string)($prev['location'] ?? ''));
         $previousPhone = trim((string)($prev['phone_number'] ?? ''));
+        if ($location === tp_mask_case_location_house_number($previousLocation)) {
+            $location = $previousLocation;
+        }
         if ($phone_number === tp_mask_case_phone_number($previousPhone)) {
             $phone_number = $previousPhone;
         }
@@ -3286,10 +3369,10 @@ if ($view === 'case' && isset($pdo) && $pdo instanceof PDO) {
   $metaCaseCode = trim((string)($_GET['code'] ?? ''));
   if ($metaCaseCode !== '') {
     try {
-      $metaStmt = $pdo->prepare('SELECT case_code, case_name, person_name, initial_summary FROM cases WHERE case_code = ? LIMIT 1');
+      $metaStmt = $pdo->prepare('SELECT case_code, case_name, person_name, initial_summary, status FROM cases WHERE case_code = ? LIMIT 1');
       $metaStmt->execute([$metaCaseCode]);
       $metaCase = $metaStmt->fetch();
-      if ($metaCase) {
+      if ($metaCase && (($metaCase['status'] ?? '') !== 'Rejected' || is_admin())) {
         $metaCaseCode = (string)($metaCase['case_code'] ?? $metaCaseCode);
         $metaCaseName = trim((string)($metaCase['case_name'] ?? ''));
         $metaPersonName = trim((string)($metaCase['person_name'] ?? ''));
@@ -4030,7 +4113,7 @@ if (count($tpDiscordWebhooks) === 0) {
                             <div class="row">
                               <div class="col-md-6 mb-3">
                                 <label class="form-label">Location</label>
-                                <input type="text" name="location" class="form-control" value="<?php echo htmlspecialchars($caseRow['location'] ?? ''); ?>" placeholder="City, region, or country">
+                                <input type="text" name="location" class="form-control" value="<?php echo htmlspecialchars(tp_case_location_for_viewer($caseRow['location'] ?? '')); ?>" placeholder="City, region, or country">
                               </div>
                               <div class="col-md-6 mb-3">
                                 <label class="form-label">Phone Number</label>
@@ -4273,7 +4356,7 @@ if (count($tpDiscordWebhooks) === 0) {
           <div class="row g-3 row-cols-1 row-cols-md-2">
 <?php
 try {
-  $whereParts = ["c.status <> 'Pending'"];
+  $whereParts = [is_admin() ? "c.status <> 'Pending'" : "c.status NOT IN ('Pending','Rejected')"];
   $queryParams = [];
   if ($search !== '') {
     $like = '%' . $search . '%';
@@ -4371,6 +4454,9 @@ if ($rs && count($rs) > 0):
                 break;
             case 'Closed':
                 $badgeClass = 'danger'; // red
+                break;
+            case 'Rejected':
+                $badgeClass = 'secondary';
                 break;
         }
         ?>
@@ -4602,6 +4688,15 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       <td class="text-nowrap"><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
                       <td class="text-end text-nowrap">                        
                           <a class="btn btn-primary btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-pencil-square me-1"></i>Edit</a>
+                          <?php if (is_admin()): ?>
+                          <form method="post" action="" class="d-inline" onsubmit="return confirm('Reject this pending case? Its record and evidence will be retained, but it will not be published.');">
+                            <input type="hidden" name="action" value="reject_case">
+                            <?php csrf_field(); ?>
+                            <input type="hidden" name="case_id" value="<?php echo (int)$r['id']; ?>">
+                            <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($code); ?>">
+                            <button type="submit" class="btn btn-danger btn-sm"><i class="bi bi-x-circle me-1"></i>Reject</button>
+                          </form>
+                          <?php endif; ?>
                           <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this case and all evidence? This cannot be undone.');">
                             <input type="hidden" name="action" value="delete_case">
                             <?php csrf_field(); ?>
@@ -4889,6 +4984,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                   'Open'      => 'text-bg-primary',
                   'In Review' => 'text-bg-warning',
                   'Closed'    => 'text-bg-secondary',
+                  'Rejected'  => 'text-bg-danger',
                   default     => 'text-bg-secondary',
               };
             ?>
@@ -4954,7 +5050,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                         <?php endif; ?>
                         <?php if (!empty($res['location'])): ?>
                         <div class="col">
-                          <i class="bi bi-geo-alt me-1"></i><?php echo htmlspecialchars($res['location']); ?>
+                          <i class="bi bi-geo-alt me-1"></i><?php echo htmlspecialchars(tp_case_location_for_viewer($res['location'])); ?>
                         </div>
                         <?php endif; ?>
                         <div class="col">
@@ -5753,6 +5849,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
+          if ($viewCase && ($viewCase['status'] ?? '') === 'Rejected' && !is_admin()) {
+            $viewCase = null;
+          }
           $viewCaseId = (int)($viewCase['id'] ?? 0);
           if ($viewCaseId > 0) { $viewCase['tiktok_username'] = get_case_tiktok_usernames($pdo, $viewCaseId) ?: ($viewCase['tiktok_username'] ?? ''); $viewCaseTags = get_case_tags($pdo, $viewCaseId); }
 
@@ -5840,7 +5939,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           $tp_headerName = trim((string)($viewCase['person_name'] ?? ''));
           if ($tp_headerName === '') { $tp_headerName = trim((string)($viewCase['case_name'] ?? '')); }
           if ($tp_headerName === '') { $tp_headerName = 'Unknown'; }
-          $tp_headerLocation = trim((string)($viewCase['location'] ?? ''));
+          $tp_headerLocation = tp_case_location_for_viewer($viewCase['location'] ?? '');
           if ($tp_headerLocation === '') { $tp_headerLocation = 'Unknown Location'; }
         ?>
         <div class="d-flex align-items-center justify-content-between mb-3">
@@ -5855,6 +5954,15 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence</button>
 <?php endif; ?>
 <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
+            <?php if (($viewCase['status'] ?? '') === 'Pending'): ?>
+            <form method="post" action="" class="d-inline" onsubmit="return confirm('Reject this pending case? Its record and evidence will be retained, but it will not be published.');">
+              <input type="hidden" name="action" value="reject_case">
+              <?php csrf_field(); ?>
+              <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+              <button type="submit" class="btn btn-danger btn-sm"><i class="bi bi-x-circle me-1"></i>Reject Case</button>
+            </form>
+            <?php endif; ?>
             <form method="post" action="" class="d-inline" onsubmit="return confirm('This will permanently delete the entire case and all evidence/notes. This cannot be undone. Continue?');">
               <input type="hidden" name="action" value="delete_case">
               <?php csrf_field(); ?>
@@ -5938,6 +6046,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                             'case_created' => 'Case created',
                             'case_updated' => 'Case updated',
                             'case_deleted' => 'Case deleted',
+                            'case_rejected' => 'Case rejected',
                             'evidence_added' => 'Evidence added',
                             'evidence_updated' => 'Evidence updated',
                             'evidence_deleted' => 'Evidence deleted',
@@ -6140,7 +6249,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Location</div>
-                          <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars($viewCase['location']) : '<span class="text-secondary">—</span>'; ?></div>
+                          <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars(tp_case_location_for_viewer($viewCase['location'])) : '<span class="text-secondary">—</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Phone Number</div>
@@ -6176,6 +6285,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                       break;
                                   case 'Closed':
                                       $badgeClass = 'danger'; // red
+                                      break;
+                                  case 'Rejected':
+                                      $badgeClass = 'secondary';
                                       break;
                               }
                             ?>
@@ -6452,7 +6564,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <div class="col-md-3">
                 <label class="form-label">Status</label>
                 <select name="status" class="form-select" required>
-                  <?php $statOpts = ['Pending','Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($viewCase['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                  <?php $statOpts = ['Pending','Open','In Review','Verified','Closed','Rejected']; foreach ($statOpts as $opt) { $sel = (($viewCase['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                 </select>
               </div>
             </div>
@@ -6875,7 +6987,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="col-md-3">
                     <label class="form-label">Status</label>
                     <select name="status" class="form-select" required>
-                      <?php $statOpts = ['Pending','Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = (($caseRow['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                      <?php $statOpts = ['Pending','Open','In Review','Verified','Closed','Rejected']; foreach ($statOpts as $opt) { $sel = (($caseRow['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                     </select>
                   </div>
                 </div>
@@ -7346,6 +7458,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <option value="In Review">In Review</option>
                   <option value="Verified">Verified</option>
                   <option value="Closed">Closed</option>
+                  <option value="Rejected">Rejected</option>
                 </select>
               </div>
             </div>
