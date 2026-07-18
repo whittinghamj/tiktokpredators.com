@@ -245,23 +245,27 @@ function tp_post_discord_webhook(string $webhookUrl, array $payload): array {
   return [$ok, $httpCode, (string)$resp];
 }
 
-/**
- * Allow the viewer who opened a case to manage it while status = Pending.
- * Returns true only if the current logged-in user created the case AND the case is still Pending.
- */
-function can_manage_pending_case(PDO $pdo, int $caseId): bool {
+/** Allow the original submitter to revise a case while it is under review. */
+function can_manage_case_submission(PDO $pdo, int $caseId): bool {
     if ($caseId <= 0 || empty($_SESSION['user'])) { return false; }
     try {
         $s = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
         $s->execute([$caseId]);
         $r = $s->fetch();
-        if ($r && (int)($r['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && ($r['status'] ?? '') === 'Pending') {
+        $editableStatuses = ['Pending', 'Rejected'];
+        if ($r && (int)($r['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && in_array(($r['status'] ?? ''), $editableStatuses, true)) {
             return true;
         }
     } catch (Throwable $e) {
         // noop
     }
     return false;
+}
+
+function tp_create_user_notification(PDO $pdo, int $userId, string $type, string $title, string $message, ?int $caseId = null): void {
+  if ($userId <= 0) { return; }
+  $stmt = $pdo->prepare('INSERT INTO user_notifications (user_id, notification_type, title, message, case_id) VALUES (?, ?, ?, ?, ?)');
+  $stmt->execute([$userId, substr($type, 0, 64), substr($title, 0, 255), $message, $caseId]);
 }
 
   function normalize_tiktok_usernames($input): string {
@@ -832,6 +836,16 @@ SQL
     if ($statusInfo && stripos($statusType, 'enum(') === 0 && stripos($statusType, "'Rejected'") === false) {
       $pdo->exec("ALTER TABLE cases MODIFY COLUMN status ENUM('Pending','Open','In Review','Verified','Closed','Rejected') NOT NULL DEFAULT 'Pending'");
     }
+    $reviewColumns = [
+      'rejection_reason' => "ALTER TABLE cases ADD COLUMN rejection_reason TEXT NULL AFTER status",
+      'rejected_at' => "ALTER TABLE cases ADD COLUMN rejected_at DATETIME NULL AFTER rejection_reason",
+      'rejected_by' => "ALTER TABLE cases ADD COLUMN rejected_by BIGINT UNSIGNED NULL AFTER rejected_at",
+      'resubmitted_at' => "ALTER TABLE cases ADD COLUMN resubmitted_at DATETIME NULL AFTER rejected_by",
+    ];
+    foreach ($reviewColumns as $columnName => $alterSql) {
+      $reviewCol = $pdo->query("SHOW COLUMNS FROM cases LIKE " . $pdo->quote($columnName));
+      if (!$reviewCol || !$reviewCol->fetch()) { $pdo->exec($alterSql); }
+    }
   } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
   }
@@ -895,6 +909,26 @@ try {
     ");
 } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+// --- Persistent account notifications ---
+try {
+  $pdo->exec("
+    CREATE TABLE IF NOT EXISTS user_notifications (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+      user_id BIGINT UNSIGNED NOT NULL,
+      notification_type VARCHAR(64) NOT NULL,
+      title VARCHAR(255) NOT NULL,
+      message TEXT NOT NULL,
+      case_id BIGINT UNSIGNED NULL,
+      is_read TINYINT(1) NOT NULL DEFAULT 0,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      read_at DATETIME NULL,
+      INDEX idx_user_unread_created (user_id, is_read, created_at),
+      INDEX idx_notification_case (case_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  ");
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
 // --- Removal requests table setup ---
 try {
@@ -1580,14 +1614,16 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     $eid = (int)($_GET['id'] ?? 0);
     if ($eid <= 0) { http_response_code(400); exit('Bad request'); }
     try {
-        $q = $pdo->prepare('SELECT e.id, e.filepath, e.mime_type, e.type, e.case_id, c.sensitivity, c.status AS case_status FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? LIMIT 1');
+        $q = $pdo->prepare('SELECT e.id, e.filepath, e.mime_type, e.type, e.case_id, c.sensitivity, c.status AS case_status, c.created_by AS case_created_by FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? LIMIT 1');
         $q->execute([$eid]);
         $row = $q->fetch();
     } catch (Throwable $e) {
         http_response_code(500); exit('Server error');
     }
     if (!$row) { http_response_code(404); exit('Not found'); }
-    if (($row['case_status'] ?? '') === 'Rejected' && !is_admin()) { http_response_code(404); exit('Not found'); }
+    $isReviewCaseOwner = !empty($_SESSION['user']) && (int)($row['case_created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
+    $isPrivateReviewStatus = in_array(($row['case_status'] ?? ''), ['Pending','Rejected'], true);
+    if ($isPrivateReviewStatus && !is_admin() && !$isReviewCaseOwner) { http_response_code(404); exit('Not found'); }
     $rel = $row['filepath'] ?? '';
     $mime = $row['mime_type'] ?? 'application/octet-stream';
     $type = $row['type'] ?? 'other';
@@ -2117,7 +2153,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
     $status = $_POST['status'] ?? '';
 
     $allowed_sensitivity = ['Standard','Restricted','Sealed'];
-    $allowed_status = ['Pending','Open','In Review','Verified','Closed','Rejected'];
+    $allowed_status = ['Pending','Open','In Review','Verified','Closed'];
 
     if ($case_name === '' || $initial_summary === '') {
         flash('error', 'Case name and initial summary are required.');
@@ -2209,13 +2245,19 @@ if (($_POST['action'] ?? '') === 'reject_case') {
 
     $case_id = (int)($_POST['case_id'] ?? 0);
     $case_code = trim((string)($_POST['case_code'] ?? ''));
+    $rejection_reason = trim((string)($_POST['rejection_reason'] ?? ''));
     if ($case_id <= 0 || $case_code === '') {
         flash('error', 'Invalid case reference.');
         header('Location: ?view=pending#pending'); exit;
     }
+    if ($rejection_reason === '') {
+        flash('error', 'Please provide a reason for rejecting the case.');
+        header('Location: ?view=pending#pending'); exit;
+    }
+    $rejection_reason = mb_substr($rejection_reason, 0, 2000, 'UTF-8');
 
     try {
-        $caseStmt = $pdo->prepare('SELECT case_name, status FROM cases WHERE id = ? AND case_code = ? LIMIT 1');
+        $caseStmt = $pdo->prepare('SELECT case_name, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1');
         $caseStmt->execute([$case_id, $case_code]);
         $caseToReject = $caseStmt->fetch();
         if (!$caseToReject) {
@@ -2225,21 +2267,90 @@ if (($_POST['action'] ?? '') === 'reject_case') {
         } elseif (($caseToReject['status'] ?? '') !== 'Pending') {
             flash('error', 'Only pending cases can be rejected.');
         } else {
-            $rejectStmt = $pdo->prepare("UPDATE cases SET status = 'Rejected' WHERE id = ? AND case_code = ? AND status = 'Pending' LIMIT 1");
-            $rejectStmt->execute([$case_id, $case_code]);
+            $pdo->beginTransaction();
+            $rejectStmt = $pdo->prepare("UPDATE cases SET status = 'Rejected', rejection_reason = ?, rejected_at = NOW(), rejected_by = ?, resubmitted_at = NULL WHERE id = ? AND case_code = ? AND status = 'Pending' LIMIT 1");
+            $rejectStmt->execute([$rejection_reason, (int)($_SESSION['user']['id'] ?? 0), $case_id, $case_code]);
             if ($rejectStmt->rowCount() === 1) {
                 $caseName = trim((string)($caseToReject['case_name'] ?? ''));
-                log_case_event($pdo, $case_id, 'case_rejected', $caseName !== '' ? $caseName : $case_code, 'Pending case rejected by an administrator');
-                flash('success', 'Case rejected.');
+                tp_create_user_notification(
+                    $pdo,
+                    (int)($caseToReject['created_by'] ?? 0),
+                    'case_rejected',
+                    'Case rejected: ' . $case_code,
+                    'Your submitted case was rejected. Reason: ' . $rejection_reason . ' You can correct the case and resubmit it for review.',
+                    $case_id
+                );
+                log_case_event($pdo, $case_id, 'case_rejected', $caseName !== '' ? $caseName : $case_code, 'Reason: ' . $rejection_reason);
+                $pdo->commit();
+                flash('success', 'Case rejected and the submitter has been notified.');
                 log_console('SUCCESS', 'Case rejected: ' . $case_code . ' by admin user_id ' . (int)($_SESSION['user']['id'] ?? 0));
             } else {
+                $pdo->rollBack();
                 flash('error', 'Case status changed before it could be rejected.');
             }
         }
     } catch (Throwable $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
         $_SESSION['sql_error'] = $e->getMessage();
         log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to reject case.');
+    }
+    header('Location: ?view=pending#pending'); exit;
+}
+
+// Return a corrected rejected case to the admin review queue (original submitter only).
+if (($_POST['action'] ?? '') === 'resubmit_case') {
+    throttle();
+    if (!check_csrf()) {
+        flash('error', 'Security check failed.');
+        header('Location: ?view=pending#rejected-cases'); exit;
+    }
+    if (empty($_SESSION['user'])) {
+        flash('error', 'You must be logged in to resubmit a case.');
+        header('Location: ?view=pending#rejected-cases'); exit;
+    }
+
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $case_code = trim((string)($_POST['case_code'] ?? ''));
+    try {
+        $pdo->beginTransaction();
+        $caseStmt = $pdo->prepare('SELECT case_name, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
+        $caseStmt->execute([$case_id, $case_code]);
+        $caseToResubmit = $caseStmt->fetch();
+        if (!$caseToResubmit || (int)($caseToResubmit['created_by'] ?? 0) !== (int)($_SESSION['user']['id'] ?? 0)) {
+            $pdo->rollBack();
+            flash('error', 'Unauthorized. Only the original submitter can resubmit this case.');
+        } elseif (($caseToResubmit['status'] ?? '') !== 'Rejected') {
+            $pdo->rollBack();
+            flash('error', 'Only rejected cases can be resubmitted.');
+        } else {
+            $resubmitStmt = $pdo->prepare("UPDATE cases SET status = 'Pending', resubmitted_at = NOW() WHERE id = ? AND status = 'Rejected' LIMIT 1");
+            $resubmitStmt->execute([$case_id]);
+            $caseName = trim((string)($caseToResubmit['case_name'] ?? ''));
+            log_case_event($pdo, $case_id, 'case_resubmitted', $caseName !== '' ? $caseName : $case_code, 'Corrected case resubmitted for admin review');
+            $pdo->commit();
+            flash('success', 'Case resubmitted for review.');
+            log_console('SUCCESS', 'Case resubmitted: ' . $case_code . ' by user_id ' . (int)($_SESSION['user']['id'] ?? 0));
+        }
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to resubmit case.');
+    }
+    header('Location: ?view=pending#pending'); exit;
+}
+
+if (($_POST['action'] ?? '') === 'mark_notifications_read') {
+    if (!check_csrf() || empty($_SESSION['user'])) {
+        flash('error', 'Unable to update notifications.');
+        header('Location: ?view=pending#pending'); exit;
+    }
+    try {
+        $markRead = $pdo->prepare('UPDATE user_notifications SET is_read = 1, read_at = COALESCE(read_at, NOW()) WHERE user_id = ? AND is_read = 0');
+        $markRead->execute([(int)($_SESSION['user']['id'] ?? 0)]);
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
     }
     header('Location: ?view=pending#pending'); exit;
 }
@@ -2249,9 +2360,9 @@ if (($_POST['action'] ?? '') === 'update_case') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
-    // Allow admins OR the viewer who opened the case while it's Pending
+    // Allow admins or the original submitter while the case is Pending/Rejected.
     $case_id = (int)($_POST['case_id'] ?? 0);
-    $ownerCan = can_manage_pending_case($pdo, $case_id);
+    $ownerCan = can_manage_case_submission($pdo, $case_id);
     if (empty($_SESSION['user']) || (!is_admin() && !$ownerCan)) {
         flash('error', 'Unauthorized.');
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
@@ -2287,9 +2398,17 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $prev = [];
     try { $ps = $pdo->prepare('SELECT case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); $prev['case_tags'] = implode(', ', get_case_tags($pdo, $case_id)); } catch (Throwable $e) {}
 
+    if (is_admin() && $status === 'Rejected' && ($prev['status'] ?? '') !== 'Rejected') {
+        flash('error', 'Use the Reject Case button so a reason is recorded and the submitter is notified.');
+        header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
+    }
+
     // Non-admin case owners only receive masked private fields. Keep the
     // originals when they save other changes without replacing those values.
     if (!is_admin()) {
+        // Status changes must use the dedicated resubmit workflow; never trust
+        // a hidden status value supplied by a case owner.
+        $status = (string)($prev['status'] ?? 'Pending');
         $previousLocation = trim((string)($prev['location'] ?? ''));
         $previousPhone = trim((string)($prev['phone_number'] ?? ''));
         if ($location === tp_mask_case_location_house_number($previousLocation)) {
@@ -2505,7 +2624,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
             $cs = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
             $cs->execute([$case_id_check]);
             $crow = $cs->fetch();
-            if ($crow && (int)($crow['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && ($crow['status'] ?? '') === 'Pending') {
+            if ($crow && (int)($crow['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && in_array(($crow['status'] ?? ''), ['Pending','Rejected'], true)) {
                 $isOwnerViewer = true;
             }
         } catch (Throwable $e) {}
@@ -2749,7 +2868,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
             $cs = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
             $cs->execute([$case_id_check]);
             $crow = $cs->fetch();
-            if ($crow && (int)($crow['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && ($crow['status'] ?? '') === 'Pending') {
+            if ($crow && (int)($crow['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && in_array(($crow['status'] ?? ''), ['Pending','Rejected'], true)) {
                 $isOwnerViewer = true;
             }
         } catch (Throwable $e) {}
@@ -2847,7 +2966,7 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
 
     $evidence_id = (int)($_POST['evidence_id'] ?? 0);
     $case_id = (int)($_POST['case_id'] ?? 0);
-    $ownerCan = can_manage_pending_case($pdo, $case_id);
+    $ownerCan = can_manage_case_submission($pdo, $case_id);
     if (empty($_SESSION['user']) || (!is_admin() && !$ownerCan)) {
         flash('error', 'Unauthorized.');
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
@@ -2923,7 +3042,7 @@ if (($_POST['action'] ?? '') === 'delete_evidence') {
 
     $evidence_id = (int)($_POST['evidence_id'] ?? 0);
     $case_id = (int)($_POST['case_id'] ?? 0);
-    $ownerCan = can_manage_pending_case($pdo, $case_id);
+    $ownerCan = can_manage_case_submission($pdo, $case_id);
     if (empty($_SESSION['user']) || (!is_admin() && !$ownerCan)) {
         flash('error', 'Unauthorized.');
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
@@ -2965,7 +3084,7 @@ if (($_POST['action'] ?? '') === 'delete_case') {
 
     $case_id = (int)($_POST['case_id'] ?? 0);
     $case_code = trim($_POST['case_code'] ?? '');
-    $ownerCan = can_manage_pending_case($pdo, $case_id);
+    $ownerCan = can_manage_case_submission($pdo, $case_id);
     if (empty($_SESSION['user']) || (!is_admin() && !$ownerCan)) {
         flash('error', 'Unauthorized.');
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
@@ -3369,10 +3488,12 @@ if ($view === 'case' && isset($pdo) && $pdo instanceof PDO) {
   $metaCaseCode = trim((string)($_GET['code'] ?? ''));
   if ($metaCaseCode !== '') {
     try {
-      $metaStmt = $pdo->prepare('SELECT case_code, case_name, person_name, initial_summary, status FROM cases WHERE case_code = ? LIMIT 1');
+      $metaStmt = $pdo->prepare('SELECT case_code, case_name, person_name, initial_summary, status, created_by FROM cases WHERE case_code = ? LIMIT 1');
       $metaStmt->execute([$metaCaseCode]);
       $metaCase = $metaStmt->fetch();
-      if ($metaCase && (($metaCase['status'] ?? '') !== 'Rejected' || is_admin())) {
+      $metaReviewOwner = $metaCase && is_logged_in() && (int)($metaCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
+      $metaIsPrivateReview = $metaCase && in_array(($metaCase['status'] ?? ''), ['Pending','Rejected'], true);
+      if ($metaCase && (!$metaIsPrivateReview || is_admin() || $metaReviewOwner)) {
         $metaCaseCode = (string)($metaCase['case_code'] ?? $metaCaseCode);
         $metaCaseName = trim((string)($metaCase['case_name'] ?? ''));
         $metaPersonName = trim((string)($metaCase['person_name'] ?? ''));
@@ -3397,6 +3518,21 @@ if ($view === 'case' && isset($pdo) && $pdo instanceof PDO) {
 $tpDiscordWebhookCount = count($tpDiscordWebhooks);
 if (count($tpDiscordWebhooks) === 0) {
   $tpDiscordWebhooks[] = ['name' => '', 'url' => ''];
+}
+$tpUserNotifications = [];
+$tpUnreadNotificationCount = 0;
+if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
+  try {
+    $notificationUserId = (int)($_SESSION['user']['id'] ?? 0);
+    $notificationCountStmt = $pdo->prepare('SELECT COUNT(*) FROM user_notifications WHERE user_id = ? AND is_read = 0');
+    $notificationCountStmt->execute([$notificationUserId]);
+    $tpUnreadNotificationCount = (int)$notificationCountStmt->fetchColumn();
+    $notificationStmt = $pdo->prepare('SELECT n.id, n.title, n.message, n.is_read, n.created_at, c.case_code FROM user_notifications n LEFT JOIN cases c ON c.id = n.case_id WHERE n.user_id = ? ORDER BY n.created_at DESC LIMIT 8');
+    $notificationStmt->execute([$notificationUserId]);
+    $tpUserNotifications = $notificationStmt->fetchAll() ?: [];
+  } catch (Throwable $e) {
+    $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+  }
 }
 ?>
 <!DOCTYPE html>
@@ -3691,6 +3827,38 @@ if (count($tpDiscordWebhooks) === 0) {
       </ul>
       <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-center">
         <?php if (is_logged_in()): ?>
+          <li class="nav-item dropdown me-2">
+            <a class="nav-link position-relative" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Account notifications">
+              <i class="bi bi-bell"></i>
+              <?php if ($tpUnreadNotificationCount > 0): ?>
+                <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill text-bg-danger"><?php echo min(99, $tpUnreadNotificationCount); ?></span>
+              <?php endif; ?>
+            </a>
+            <ul class="dropdown-menu dropdown-menu-end p-0" style="width:min(92vw, 24rem); max-height:28rem; overflow:auto;">
+              <li class="dropdown-header d-flex justify-content-between align-items-center px-3 py-2">
+                <span>Notifications</span>
+                <?php if ($tpUnreadNotificationCount > 0): ?>
+                  <form method="post" action="" class="ms-2">
+                    <input type="hidden" name="action" value="mark_notifications_read">
+                    <?php csrf_field(); ?>
+                    <button type="submit" class="btn btn-link btn-sm p-0">Mark all read</button>
+                  </form>
+                <?php endif; ?>
+              </li>
+              <?php if ($tpUserNotifications): foreach ($tpUserNotifications as $notification): ?>
+                <li><hr class="dropdown-divider m-0"></li>
+                <li>
+                  <a class="dropdown-item text-wrap px-3 py-2<?php echo empty($notification['is_read']) ? ' bg-primary bg-opacity-10' : ''; ?>" href="<?php echo !empty($notification['case_code']) ? '?view=case&amp;code='.urlencode($notification['case_code']).'#case-view' : '?view=pending#pending'; ?>">
+                    <div class="fw-semibold small"><?php echo htmlspecialchars($notification['title'] ?? 'Notification'); ?></div>
+                    <div class="small text-secondary"><?php echo nl2br(htmlspecialchars($notification['message'] ?? '')); ?></div>
+                    <div class="small text-secondary mt-1"><?php echo htmlspecialchars(date('d M Y H:i', strtotime($notification['created_at'] ?? 'now'))); ?></div>
+                  </a>
+                </li>
+              <?php endforeach; else: ?>
+                <li><span class="dropdown-item-text text-secondary small px-3 py-3">No notifications yet.</span></li>
+              <?php endif; ?>
+            </ul>
+          </li>
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
               <i class="bi bi-person-circle me-2"></i>
@@ -4062,28 +4230,34 @@ if (count($tpDiscordWebhooks) === 0) {
   </script>
 
   <?php
-  // --- Owner Pending Case Edit Controls (viewer can edit like admin while Pending)
+  // --- Owner review controls (editable while Pending or Rejected)
   if ($view === 'case') {
       $case_code_param = trim($_GET['code'] ?? '');
       if ($case_code_param !== '') {
           try {
-              $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE case_code = ? LIMIT 1');
+              $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, rejection_reason, rejected_at FROM cases WHERE case_code = ? LIMIT 1');
               $stmt->execute([$case_code_param]);
               $caseRow = $stmt->fetch();
                 if ($caseRow) { $caseRow['tiktok_username'] = get_case_tiktok_usernames($pdo, (int)$caseRow['id']) ?: ($caseRow['tiktok_username'] ?? ''); }
           } catch (Throwable $e) { $caseRow = null; }
           if ($caseRow) {
-              $ownerCanInline = can_manage_pending_case($pdo, (int)$caseRow['id']);
+              $ownerCanInline = can_manage_case_submission($pdo, (int)$caseRow['id']);
               if ($ownerCanInline) {
-                  // Owner can edit while Pending — show compact edit form
+                  $ownerCaseIsRejected = (($caseRow['status'] ?? '') === 'Rejected');
                   ?>
                   <main class="py-3" id="owner-edit">
                     <div class="container-xl">
-                      <div class="alert alert-info d-flex align-items-start glass">
-                        <i class="bi bi-pencil-square me-2 fs-5"></i>
+                      <div class="alert <?php echo $ownerCaseIsRejected ? 'alert-danger' : 'alert-info'; ?> d-flex align-items-start glass">
+                        <i class="bi <?php echo $ownerCaseIsRejected ? 'bi-exclamation-circle' : 'bi-pencil-square'; ?> me-2 fs-5"></i>
                         <div>
-                          <div class="fw-semibold">You opened this case and it is currently <span class="text-warning">Pending</span>.</div>
-                          <div class="small">You may edit the Case Details and manage evidence until an admin changes the status.</div>
+                          <?php if ($ownerCaseIsRejected): ?>
+                            <div class="fw-semibold">This case was rejected and needs changes before it can be reviewed again.</div>
+                            <div class="mt-2"><strong>Admin reason:</strong> <?php echo nl2br(htmlspecialchars($caseRow['rejection_reason'] ?? 'No reason was recorded.')); ?></div>
+                            <div class="small mt-2">Correct the case details and evidence, save your changes, then resubmit it for review.</div>
+                          <?php else: ?>
+                            <div class="fw-semibold">You opened this case and it is currently <span class="text-warning">Pending</span>.</div>
+                            <div class="small">You may edit the case details and manage evidence while it is under review.</div>
+                          <?php endif; ?>
                         </div>
                       </div>
                       <div class="card glass mb-4">
@@ -4156,7 +4330,7 @@ if (count($tpDiscordWebhooks) === 0) {
                                 <input type="hidden" name="sensitivity" value="Standard">
                               </div>
                               <div class="col-md-6 mb-3">
-                                <input type="hidden" name="status" value="Pending">
+                                <input type="hidden" name="status" value="<?php echo htmlspecialchars($caseRow['status'] ?? 'Pending'); ?>">
                               </div>
                             </div>
                             <div class="d-flex gap-2">
@@ -4164,10 +4338,21 @@ if (count($tpDiscordWebhooks) === 0) {
                               <a href="?view=case&amp;code=<?php echo urlencode($caseRow['case_code']); ?>#case-view" class="btn btn-outline-light">Cancel</a>
                             </div>
                           </form>
+                          <?php if ($ownerCaseIsRejected): ?>
+                            <hr>
+                            <form method="post" action="" onsubmit="return confirm('Have you saved all corrections and are you ready to resubmit this case for admin review?');">
+                              <input type="hidden" name="action" value="resubmit_case">
+                              <?php csrf_field(); ?>
+                              <input type="hidden" name="case_id" value="<?php echo (int)$caseRow['id']; ?>">
+                              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseRow['case_code']); ?>">
+                              <button type="submit" class="btn btn-success"><i class="bi bi-arrow-repeat me-1"></i>Resubmit for Review</button>
+                              <span class="small text-secondary ms-2">Save your corrections before resubmitting.</span>
+                            </form>
+                          <?php endif; ?>
                         </div>
                       </div>
                       <?php
-                      // --- Owner's own evidence list for this Pending case
+                      // --- Owner's own evidence list for this review case
                       try {
                           $myUid = (int)($_SESSION['user']['id'] ?? 0);
                           $evStmt = $pdo->prepare('SELECT id, title, type, filepath, created_at FROM evidence WHERE case_id = ? AND uploaded_by = ? ORDER BY created_at DESC');
@@ -4617,10 +4802,10 @@ if ($rs && count($rs) > 0):
     $rows = [];
     try {
         $baseSql = "
-          SELECT c.id, c.case_code, c.case_name, c.person_name, c.status, c.created_by,
+          SELECT c.id, c.case_code, c.case_name, c.person_name, c.status, c.created_by, c.resubmitted_at,
                  u.display_name AS creator_name,
                  COALESCE(ev.cnt, 0) AS evidence_count,
-                 COALESCE(ev.last_added, c.opened_at) AS last_activity
+                 COALESCE(GREATEST(ev.last_added, c.resubmitted_at), ev.last_added, c.resubmitted_at, c.opened_at) AS last_activity
           FROM cases c
           LEFT JOIN (
             SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
@@ -4680,7 +4865,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                   ?>
                     <tr>
                       <td class="text-nowrap"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($code); ?></span></td>
-                      <td class="fw-semibold text-nowrap"><?php echo htmlspecialchars($name); ?></td>
+                      <td class="fw-semibold text-nowrap"><?php echo htmlspecialchars($name); ?><?php if (!empty($r['resubmitted_at'])): ?><span class="badge text-bg-info ms-1">Resubmitted</span><?php endif; ?></td>
                       <td class="text-nowrap"><?php echo $creatorName !== '' ? htmlspecialchars($creatorName) : '—'; ?></td>
                       <td class="text-nowrap"><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></td>
                       <td><?php echo render_case_tag_badges($pendingCaseTags, '<span class="text-secondary">&mdash;</span>'); ?></td>
@@ -4689,13 +4874,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       <td class="text-end text-nowrap">                        
                           <a class="btn btn-primary btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-pencil-square me-1"></i>Edit</a>
                           <?php if (is_admin()): ?>
-                          <form method="post" action="" class="d-inline" onsubmit="return confirm('Reject this pending case? Its record and evidence will be retained, but it will not be published.');">
-                            <input type="hidden" name="action" value="reject_case">
-                            <?php csrf_field(); ?>
-                            <input type="hidden" name="case_id" value="<?php echo (int)$r['id']; ?>">
-                            <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($code); ?>">
-                            <button type="submit" class="btn btn-danger btn-sm"><i class="bi bi-x-circle me-1"></i>Reject</button>
-                          </form>
+                          <button type="button" class="btn btn-danger btn-sm btn-reject-case" data-bs-toggle="modal" data-bs-target="#rejectCaseModal" data-case-id="<?php echo (int)$r['id']; ?>" data-case-code="<?php echo htmlspecialchars($code); ?>" data-case-name="<?php echo htmlspecialchars($name); ?>"><i class="bi bi-x-circle me-1"></i>Reject</button>
                           <?php endif; ?>
                           <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this case and all evidence? This cannot be undone.');">
                             <input type="hidden" name="action" value="delete_case">
@@ -4714,6 +4893,83 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
   <?php else: ?>
               <div class="alert alert-secondary mb-0">No pending cases to show.</div>
   <?php endif; ?>
+            </div>
+          </div>
+        </div>
+        <div class="col-12" id="rejected-cases">
+          <div class="card glass border-danger">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between mb-3">
+                <h2 class="h5 mb-0"><i class="bi bi-x-circle me-2 text-danger"></i><?php echo is_admin() ? 'Rejected Cases' : 'Cases Requiring Changes'; ?></h2>
+                <span class="badge text-bg-danger">Rejected</span>
+              </div>
+              <p class="small text-secondary"><?php echo is_admin() ? 'Monitor rejected submissions, review the reason, and edit case details where needed.' : 'Correct the issues described by the administrator, save your changes, then resubmit the case for review.'; ?></p>
+              <?php
+                $rejectedRows = [];
+                try {
+                  $rejectedSql = "
+                    SELECT c.id, c.case_code, c.case_name, c.person_name, c.created_by,
+                           c.rejection_reason, c.rejected_at,
+                           u.display_name AS creator_name,
+                           COALESCE(ev.cnt, 0) AS evidence_count,
+                           COALESCE(ev.last_added, c.rejected_at, c.opened_at) AS last_activity
+                    FROM cases c
+                    LEFT JOIN (
+                      SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
+                      FROM evidence GROUP BY case_id
+                    ) ev ON ev.case_id = c.id
+                    LEFT JOIN users u ON u.id = c.created_by
+                    WHERE c.status = 'Rejected'
+                  ";
+                  $rejectedParams = [];
+                  if ($pendingTagFilter !== '') {
+                    $rejectedSql .= " AND EXISTS (SELECT 1 FROM case_tag_links ctl_filter JOIN case_tags ct_filter ON ct_filter.id = ctl_filter.tag_id WHERE ctl_filter.case_id = c.id AND ct_filter.slug = ?)";
+                    $rejectedParams[] = $pendingTagFilter;
+                  }
+                  if (!is_admin()) {
+                    $rejectedSql .= ' AND c.created_by = ?';
+                    $rejectedParams[] = (int)($_SESSION['user']['id'] ?? 0);
+                  }
+                  $rejectedSql .= ' ORDER BY c.rejected_at DESC, last_activity DESC';
+                  $rejectedStmt = $pdo->prepare($rejectedSql);
+                  $rejectedStmt->execute($rejectedParams);
+                  $rejectedRows = $rejectedStmt->fetchAll() ?: [];
+                } catch (Throwable $e) {
+                  $_SESSION['sql_error'] = $e->getMessage();
+                }
+              ?>
+              <?php if ($rejectedRows): ?>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Case</th><th>Submitted By</th><th>Rejection Reason</th><th>Rejected</th><th>Evidence</th><th class="text-end">Actions</th></tr></thead>
+                    <tbody>
+                      <?php foreach ($rejectedRows as $rejectedCase): ?>
+                        <tr>
+                          <td><div class="fw-semibold"><?php echo htmlspecialchars($rejectedCase['case_name'] ?: $rejectedCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($rejectedCase['case_code']); ?></div></td>
+                          <td><?php echo htmlspecialchars(trim((string)($rejectedCase['creator_name'] ?? '')) ?: '—'); ?></td>
+                          <td style="min-width:18rem; max-width:32rem;"><div class="text-wrap"><?php echo nl2br(htmlspecialchars($rejectedCase['rejection_reason'] ?? 'No reason recorded.')); ?></div></td>
+                          <td class="text-nowrap"><?php echo !empty($rejectedCase['rejected_at']) ? htmlspecialchars(date('d M Y H:i', strtotime($rejectedCase['rejected_at']))) : '—'; ?></td>
+                          <td><?php echo (int)($rejectedCase['evidence_count'] ?? 0); ?></td>
+                          <td class="text-end text-nowrap">
+                            <a class="btn btn-primary btn-sm" href="?view=case&amp;code=<?php echo urlencode($rejectedCase['case_code']); ?><?php echo is_admin() ? '#case-view' : '#owner-edit'; ?>"><i class="bi bi-pencil-square me-1"></i><?php echo is_admin() ? 'Review / Edit' : 'Fix Case'; ?></a>
+                            <?php if (!is_admin()): ?>
+                              <form method="post" action="" class="d-inline" onsubmit="return confirm('Have you saved all corrections and are you ready to resubmit this case?');">
+                                <input type="hidden" name="action" value="resubmit_case">
+                                <?php csrf_field(); ?>
+                                <input type="hidden" name="case_id" value="<?php echo (int)$rejectedCase['id']; ?>">
+                                <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($rejectedCase['case_code']); ?>">
+                                <button type="submit" class="btn btn-success btn-sm"><i class="bi bi-arrow-repeat me-1"></i>Resubmit</button>
+                              </form>
+                            <?php endif; ?>
+                          </td>
+                        </tr>
+                      <?php endforeach; ?>
+                    </tbody>
+                  </table>
+                </div>
+              <?php else: ?>
+                <div class="alert alert-secondary mb-0">No rejected cases to show.</div>
+              <?php endif; ?>
             </div>
           </div>
         </div>
@@ -5846,10 +6102,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       $viewAnalyticsRecentRisk = [];
       if ($caseCode !== '') {
         try {
-          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
+          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, rejection_reason, rejected_at, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
-          if ($viewCase && ($viewCase['status'] ?? '') === 'Rejected' && !is_admin()) {
+          $viewReviewOwner = $viewCase && is_logged_in() && (int)($viewCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
+          $viewIsPrivateReview = $viewCase && in_array(($viewCase['status'] ?? ''), ['Pending','Rejected'], true);
+          if ($viewCase && $viewIsPrivateReview && !is_admin() && !$viewReviewOwner) {
             $viewCase = null;
           }
           $viewCaseId = (int)($viewCase['id'] ?? 0);
@@ -5927,7 +6185,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       if (!empty($_SESSION['user'])) {
           if (($_SESSION['user']['role'] ?? '') === 'admin') {
               $tp_canAddEvidence = true;
-          } elseif (!empty($viewCase) && (($viewCase['status'] ?? '') === 'Pending')) {
+          } elseif (!empty($viewCase) && in_array(($viewCase['status'] ?? ''), ['Pending','Rejected'], true)) {
               $ownerId = (int)($viewCase['created_by'] ?? 0);
               $tp_canAddEvidence = ($ownerId > 0) && ($ownerId === (int)($_SESSION['user']['id'] ?? 0));
           }
@@ -5955,13 +6213,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 <?php endif; ?>
 <?php if (!empty($_SESSION['user']) && (($_SESSION['user']['role'] ?? '') === 'admin')): ?>
             <?php if (($viewCase['status'] ?? '') === 'Pending'): ?>
-            <form method="post" action="" class="d-inline" onsubmit="return confirm('Reject this pending case? Its record and evidence will be retained, but it will not be published.');">
-              <input type="hidden" name="action" value="reject_case">
-              <?php csrf_field(); ?>
-              <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
-              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
-              <button type="submit" class="btn btn-danger btn-sm"><i class="bi bi-x-circle me-1"></i>Reject Case</button>
-            </form>
+            <button type="button" class="btn btn-danger btn-sm btn-reject-case" data-bs-toggle="modal" data-bs-target="#rejectCaseModal" data-case-id="<?php echo (int)$viewCaseId; ?>" data-case-code="<?php echo htmlspecialchars($caseCode); ?>" data-case-name="<?php echo htmlspecialchars($viewCase['case_name'] ?? $caseCode); ?>"><i class="bi bi-x-circle me-1"></i>Reject Case</button>
             <?php endif; ?>
             <form method="post" action="" class="d-inline" onsubmit="return confirm('This will permanently delete the entire case and all evidence/notes. This cannot be undone. Continue?');">
               <input type="hidden" name="action" value="delete_case">
@@ -6042,11 +6294,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     $ce->execute([$viewCaseId]);
                     $rowsCE = $ce->fetchAll();
                     foreach ($rowsCE as $ceRow) {
+                        $canViewReviewFeedback = is_admin() || (is_logged_in() && (int)($viewCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0));
                         $labelMap = [
                             'case_created' => 'Case created',
                             'case_updated' => 'Case updated',
                             'case_deleted' => 'Case deleted',
                             'case_rejected' => 'Case rejected',
+                            'case_resubmitted' => 'Case resubmitted',
                             'evidence_added' => 'Evidence added',
                             'evidence_updated' => 'Evidence updated',
                             'evidence_deleted' => 'Evidence deleted',
@@ -6054,11 +6308,15 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                             'redactions_saved' => 'Redactions saved'
                         ];
                         $lbl = $labelMap[$ceRow['event_type']] ?? ucfirst(str_replace('_',' ', $ceRow['event_type']));
+                        $caseEventDetail = trim(($ceRow['subject'] ? $ceRow['subject'].': ' : '').($ceRow['detail'] ?? ''));
+                        if (($ceRow['event_type'] ?? '') === 'case_rejected' && !$canViewReviewFeedback) {
+                            $caseEventDetail = trim((string)($ceRow['subject'] ?? ''));
+                        }
                         $timelineEvents[] = [
                             'ts' => $ceRow['created_at'],
                             'type' => $ceRow['event_type'],
                             'label' => $lbl,
-                            'detail' => mb_strimwidth(tp_case_event_detail_for_viewer(trim(($ceRow['subject'] ? $ceRow['subject'].': ' : '').($ceRow['detail'] ?? ''))), 0, 180, '…', 'UTF-8'),
+                            'detail' => mb_strimwidth(tp_case_event_detail_for_viewer($caseEventDetail), 0, 180, '…', 'UTF-8'),
                             'meta' => '',
                             'evidence_id' => (int)($ceRow['ref_evidence_id'] ?? 0)
                         ];
@@ -6564,7 +6822,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <div class="col-md-3">
                 <label class="form-label">Status</label>
                 <select name="status" class="form-select" required>
-                  <?php $statOpts = ['Pending','Open','In Review','Verified','Closed','Rejected']; foreach ($statOpts as $opt) { $sel = (($viewCase['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                  <?php $statOpts = ['Pending','Open','In Review','Verified','Closed']; if (($viewCase['status'] ?? '') === 'Rejected') { $statOpts[] = 'Rejected'; } foreach ($statOpts as $opt) { $sel = (($viewCase['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                 </select>
               </div>
             </div>
@@ -6987,7 +7245,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="col-md-3">
                     <label class="form-label">Status</label>
                     <select name="status" class="form-select" required>
-                      <?php $statOpts = ['Pending','Open','In Review','Verified','Closed','Rejected']; foreach ($statOpts as $opt) { $sel = (($caseRow['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                      <?php $statOpts = ['Pending','Open','In Review','Verified','Closed']; if (($caseRow['status'] ?? '') === 'Rejected') { $statOpts[] = 'Rejected'; } foreach ($statOpts as $opt) { $sel = (($caseRow['status'] ?? '') === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
                     </select>
                   </div>
                 </div>
@@ -7458,7 +7716,6 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <option value="In Review">In Review</option>
                   <option value="Verified">Verified</option>
                   <option value="Closed">Closed</option>
-                  <option value="Rejected">Rejected</option>
                 </select>
               </div>
             </div>
@@ -8122,6 +8379,49 @@ document.addEventListener('click', function (ev) {
 
 })();
 </script>
+
+<?php if (is_admin()): ?>
+<div class="modal fade" id="rejectCaseModal" tabindex="-1" aria-labelledby="rejectCaseModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="rejectCaseModalLabel"><i class="bi bi-x-circle me-2 text-danger"></i>Reject Case</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="" id="rejectCaseForm">
+        <div class="modal-body">
+          <input type="hidden" name="action" value="reject_case">
+          <?php csrf_field(); ?>
+          <input type="hidden" name="case_id" id="rejectCaseId" value="">
+          <input type="hidden" name="case_code" id="rejectCaseCode" value="">
+          <p class="mb-3">Reject <strong id="rejectCaseName">this case</strong>? The submitter will be notified and can correct and resubmit it.</p>
+          <label class="form-label" for="rejectCaseReason">Reason for rejection <span class="text-danger">*</span></label>
+          <textarea class="form-control" id="rejectCaseReason" name="rejection_reason" rows="5" maxlength="2000" placeholder="Explain clearly what must be corrected before this case can be approved." required></textarea>
+          <div class="form-text">This reason will be shown to the original submitter.</div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-danger"><i class="bi bi-x-circle me-1"></i>Reject and Notify Submitter</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var modal = document.getElementById('rejectCaseModal');
+  if (!modal) return;
+  modal.addEventListener('show.bs.modal', function (event) {
+    var button = event.relatedTarget;
+    if (!button) return;
+    document.getElementById('rejectCaseId').value = button.getAttribute('data-case-id') || '';
+    document.getElementById('rejectCaseCode').value = button.getAttribute('data-case-code') || '';
+    document.getElementById('rejectCaseName').textContent = button.getAttribute('data-case-name') || button.getAttribute('data-case-code') || 'this case';
+    document.getElementById('rejectCaseReason').value = '';
+  });
+});
+</script>
+<?php endif; ?>
 
   </body>
   </html>
