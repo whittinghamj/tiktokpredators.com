@@ -8102,7 +8102,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       <?php endforeach; ?>
                     </select>
                   </div>
-                  <button class="btn btn-outline-warning" type="submit"><i class="bi bi-arrow-left-right me-1"></i> Change Owner</button>
+                  <button class="btn btn-outline-warning" type="submit" aria-label="Change owner" title="Change owner"><i class="bi bi-arrow-left-right" aria-hidden="true"></i></button>
                 </div>
               </form>
             </div>
