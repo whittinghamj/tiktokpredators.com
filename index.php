@@ -9200,6 +9200,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       var searchInput = document.getElementById('caseReviewSearch');
       if (!searchInput) return;
 
+      var pageSize = 10;
       var rows = Array.prototype.slice.call(document.querySelectorAll('[data-case-review-row]'));
       var sections = Array.prototype.slice.call(document.querySelectorAll('[data-case-review-section]'));
       var summary = document.getElementById('caseReviewSearchSummary');
@@ -9211,40 +9212,105 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         row.setAttribute('data-case-review-search', (statusTerms + ' ' + (row.textContent || '')).toLocaleLowerCase());
       });
 
-      function applyCaseReviewSearch() {
+      var sectionStates = sections.map(function (section) {
+        var sectionRows = Array.prototype.slice.call(section.querySelectorAll('[data-case-review-row]'));
+        var tableWrap = section.querySelector('.table-responsive');
+        var pager = null;
+
+        if (tableWrap && sectionRows.length > 0) {
+          pager = document.createElement('div');
+          pager.className = 'case-review-pagination d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-2 mt-3 d-none';
+          pager.innerHTML =
+            '<div class="small text-secondary" data-case-page-summary></div>' +
+            '<div class="d-flex align-items-center gap-2">' +
+              '<div class="small text-secondary text-nowrap" data-case-page-number></div>' +
+              '<div class="btn-group btn-group-sm" role="group" aria-label="Case section pagination">' +
+                '<button type="button" class="btn btn-outline-light" data-case-page-prev><i class="bi bi-chevron-left me-1"></i>Previous</button>' +
+                '<button type="button" class="btn btn-outline-light" data-case-page-next>Next<i class="bi bi-chevron-right ms-1"></i></button>' +
+              '</div>' +
+            '</div>';
+          tableWrap.insertAdjacentElement('afterend', pager);
+        }
+
+        return {
+          section: section,
+          rows: sectionRows,
+          page: 1,
+          pager: pager,
+          pageSummary: pager ? pager.querySelector('[data-case-page-summary]') : null,
+          pageNumber: pager ? pager.querySelector('[data-case-page-number]') : null,
+          previousButton: pager ? pager.querySelector('[data-case-page-prev]') : null,
+          nextButton: pager ? pager.querySelector('[data-case-page-next]') : null
+        };
+      });
+
+      function renderCaseReviewLists(resetPages) {
         var query = searchInput.value.trim().toLocaleLowerCase();
         var terms = query === '' ? [] : query.split(/\s+/).filter(Boolean);
-        var visibleCount = 0;
+        var matchingCount = 0;
 
-        rows.forEach(function (row) {
-          var searchableText = row.getAttribute('data-case-review-search') || '';
-          var isMatch = terms.every(function (term) { return searchableText.indexOf(term) !== -1; });
-          row.classList.toggle('d-none', !isMatch);
-          if (isMatch) visibleCount++;
-        });
+        sectionStates.forEach(function (state) {
+          if (resetPages) state.page = 1;
 
-        sections.forEach(function (section) {
-          if (terms.length === 0) {
-            section.classList.remove('d-none');
-            return;
+          var matchingRows = state.rows.filter(function (row) {
+            var searchableText = row.getAttribute('data-case-review-search') || '';
+            return terms.every(function (term) { return searchableText.indexOf(term) !== -1; });
+          });
+          matchingCount += matchingRows.length;
+
+          var totalPages = Math.max(1, Math.ceil(matchingRows.length / pageSize));
+          state.page = Math.min(Math.max(1, state.page), totalPages);
+          var start = (state.page - 1) * pageSize;
+          var end = Math.min(start + pageSize, matchingRows.length);
+          var pageRows = new Set(matchingRows.slice(start, end));
+
+          state.rows.forEach(function (row) {
+            row.classList.toggle('d-none', !pageRows.has(row));
+          });
+
+          state.section.classList.toggle('d-none', terms.length > 0 && matchingRows.length === 0);
+
+          if (state.pager) {
+            state.pager.classList.toggle('d-none', matchingRows.length <= pageSize);
+            if (state.pageSummary) {
+              state.pageSummary.textContent = matchingRows.length > 0
+                ? 'Showing ' + (start + 1) + '\u2013' + end + ' of ' + matchingRows.length + ' cases'
+                : 'No matching cases';
+            }
+            if (state.pageNumber) state.pageNumber.textContent = 'Page ' + state.page + ' of ' + totalPages;
+            if (state.previousButton) state.previousButton.disabled = state.page <= 1;
+            if (state.nextButton) state.nextButton.disabled = state.page >= totalPages;
           }
-          var sectionHasMatch = Array.prototype.some.call(
-            section.querySelectorAll('[data-case-review-row]'),
-            function (row) { return !row.classList.contains('d-none'); }
-          );
-          section.classList.toggle('d-none', !sectionHasMatch);
         });
 
         if (summary) {
           summary.textContent = terms.length > 0
-            ? 'Showing ' + visibleCount + ' of ' + rows.length + ' cases across all review sections.'
+            ? 'Found ' + matchingCount + ' of ' + rows.length + ' cases across all review sections.'
             : rows.length + (rows.length === 1 ? ' case' : ' cases') + ' across all review sections.';
         }
-        if (noMatches) noMatches.classList.toggle('d-none', terms.length === 0 || visibleCount > 0);
+        if (noMatches) noMatches.classList.toggle('d-none', terms.length === 0 || matchingCount > 0);
       }
 
-      searchInput.addEventListener('input', applyCaseReviewSearch);
-      applyCaseReviewSearch();
+      sectionStates.forEach(function (state) {
+        if (state.previousButton) {
+          state.previousButton.addEventListener('click', function () {
+            if (state.page <= 1) return;
+            state.page--;
+            renderCaseReviewLists(false);
+            state.section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          });
+        }
+        if (state.nextButton) {
+          state.nextButton.addEventListener('click', function () {
+            state.page++;
+            renderCaseReviewLists(false);
+            state.section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          });
+        }
+      });
+
+      searchInput.addEventListener('input', function () { renderCaseReviewLists(true); });
+      renderCaseReviewLists(true);
     })();
 
     (function () {
