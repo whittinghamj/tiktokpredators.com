@@ -4279,10 +4279,26 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                   radial-gradient(800px 400px at 10% -10%, rgba(25,195,125,.15), transparent);
     }
     .glass { backdrop-filter: blur(8px); background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); }
-    #case-view.case-outline-building .card.glass { border-color: rgba(13,110,253,.9); }
-    #case-view.case-outline-pending .card.glass { border-color: rgba(255,193,7,.9); }
-    #case-view.case-outline-published .card.glass { border-color: rgba(25,135,84,.9); }
-    #case-view.case-outline-rejected .card.glass { border-color: rgba(220,53,69,.9); }
+    #case-view.case-outline-building .card.glass,
+    #being-built > .card.glass {
+      border: 2px solid #0d6efd !important;
+      box-shadow: 0 0 0 .1rem rgba(13,110,253,.14);
+    }
+    #case-view.case-outline-pending .card.glass,
+    #pending-review > .card.glass {
+      border: 2px solid #ffc107 !important;
+      box-shadow: 0 0 0 .1rem rgba(255,193,7,.14);
+    }
+    #case-view.case-outline-published .card.glass,
+    #published-cases > .card.glass {
+      border: 2px solid #198754 !important;
+      box-shadow: 0 0 0 .1rem rgba(25,135,84,.14);
+    }
+    #case-view.case-outline-rejected .card.glass,
+    #rejected-cases > .card.glass {
+      border: 2px solid #dc3545 !important;
+      box-shadow: 0 0 0 .1rem rgba(220,53,69,.14);
+    }
     #case-owner-details .select2-container--bootstrap-5 .select2-selection,
     .select2-container--bootstrap-5 .select2-dropdown,
     .select2-container--bootstrap-5 .select2-search__field {
@@ -5572,7 +5588,7 @@ if ($rs && count($rs) > 0):
           }
         ?>
         <div class="col-12" id="being-built" data-case-review-section data-case-review-status="building being built">
-          <div class="card glass border-warning">
+          <div class="card glass border-primary">
             <div class="card-body">
               <div class="d-flex align-items-center justify-content-between mb-3">
                 <div>
@@ -5625,7 +5641,7 @@ if ($rs && count($rs) > 0):
           </div>
         </div>
         <div class="col-12" id="pending-review" data-case-review-section data-case-review-status="pending pending review">
-          <div class="card glass">
+          <div class="card glass border-warning">
             <div class="card-body">
               <div class="d-flex align-items-center justify-content-between mb-3">
                 <h2 class="h5 mb-0"><i class="bi bi-hourglass-split me-2"></i>Pending Review</h2>
