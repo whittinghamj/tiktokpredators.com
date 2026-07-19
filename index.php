@@ -5497,6 +5497,48 @@ if ($rs && count($rs) > 0):
         <?php
           $pendingTagFilter = strtolower(trim((string)($_GET['tag'] ?? '')));
           if (!isset(tp_case_tag_options()[$pendingTagFilter])) { $pendingTagFilter = ''; }
+        ?>
+        <div class="col-12">
+          <div class="card glass">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between gap-3 mb-3">
+                <div>
+                  <h1 class="h5 mb-1"><i class="bi bi-clipboard-check me-2"></i>Case Reviews</h1>
+                  <p class="small text-secondary mb-0">Search Being Built, Pending Review, Approved / Published, and Rejected cases together.</p>
+                </div>
+                <a class="btn btn-outline-light btn-sm flex-shrink-0" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
+              </div>
+              <div class="d-flex flex-column flex-md-row align-items-md-end gap-2">
+                <div class="flex-grow-1">
+                  <label class="form-label small mb-1" for="caseReviewSearch">Search all case reviews</label>
+                  <div class="input-group input-group-sm">
+                    <span class="input-group-text"><i class="bi bi-search"></i></span>
+                    <input type="search" class="form-control" id="caseReviewSearch" placeholder="Search case code, name, owner, subject, tag or rejection reason" autocomplete="off">
+                  </div>
+                </div>
+                <form method="get" action="" class="d-flex align-items-end gap-2 flex-shrink-0">
+                  <input type="hidden" name="view" value="pending">
+                  <div>
+                    <label class="form-label small mb-1" for="caseReviewTagFilter">Filter by tag</label>
+                    <select name="tag" id="caseReviewTagFilter" class="form-select form-select-sm" style="min-width:12rem;">
+                      <?php echo render_case_tag_filter_options($pendingTagFilter); ?>
+                    </select>
+                  </div>
+                  <button type="submit" class="btn btn-outline-light btn-sm"><i class="bi bi-funnel me-1"></i>Filter</button>
+                  <?php if ($pendingTagFilter !== ''): ?>
+                    <a class="btn btn-outline-secondary btn-sm" href="?view=pending#pending" title="Clear tag filter"><i class="bi bi-x-lg"></i><span class="visually-hidden">Clear tag filter</span></a>
+                  <?php endif; ?>
+                </form>
+              </div>
+              <div class="small text-secondary mt-2" id="caseReviewSearchSummary" aria-live="polite"></div>
+              <?php if ($pendingTagFilter !== ''): ?>
+                <div class="small text-secondary mt-1">Filtering all sections by tag: <span class="text-white"><?php echo htmlspecialchars(tp_case_tag_options()[$pendingTagFilter]); ?></span>.</div>
+              <?php endif; ?>
+              <div class="alert alert-secondary mt-3 mb-0 d-none" id="caseReviewNoMatches">No cases match your search.</div>
+            </div>
+          </div>
+        </div>
+        <?php
           $beingBuiltRows = [];
           try {
             $beingBuiltSql = "
@@ -5529,7 +5571,7 @@ if ($rs && count($rs) > 0):
             $_SESSION['sql_error'] = $e->getMessage();
           }
         ?>
-        <div class="col-12" id="being-built">
+        <div class="col-12" id="being-built" data-case-review-section data-case-review-status="building being built">
           <div class="card glass border-warning">
             <div class="card-body">
               <div class="d-flex align-items-center justify-content-between mb-3">
@@ -5547,7 +5589,7 @@ if ($rs && count($rs) > 0):
                       <?php foreach ($beingBuiltRows as $builtCase):
                         $builtTags = get_case_tags($pdo, (int)$builtCase['id']);
                       ?>
-                        <tr>
+                        <tr data-case-review-row>
                           <td><div class="fw-semibold"><?php echo htmlspecialchars($builtCase['case_name'] ?: $builtCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($builtCase['case_code']); ?></div></td>
                           <td><?php echo htmlspecialchars(trim((string)($builtCase['creator_name'] ?? '')) ?: '—'); ?></td>
                           <td><?php echo htmlspecialchars(trim((string)($builtCase['person_name'] ?? '')) ?: '—'); ?></td>
@@ -5582,28 +5624,13 @@ if ($rs && count($rs) > 0):
             </div>
           </div>
         </div>
-        <div class="col-12" id="pending-review">
+        <div class="col-12" id="pending-review" data-case-review-section data-case-review-status="pending pending review">
           <div class="card glass">
             <div class="card-body">
               <div class="d-flex align-items-center justify-content-between mb-3">
                 <h2 class="h5 mb-0"><i class="bi bi-hourglass-split me-2"></i>Pending Review</h2>
-                <div class="d-flex align-items-center gap-2">
-                  <form method="get" action="" class="d-flex gap-1">
-                    <input type="hidden" name="view" value="pending">
-                    <select name="tag" class="form-select form-select-sm" style="min-width: 12rem;">
-                      <?php echo render_case_tag_filter_options($pendingTagFilter); ?>
-                    </select>
-                    <button type="submit" class="btn btn-outline-light btn-sm"><i class="bi bi-funnel me-1"></i>Filter</button>
-                  </form>
-                  <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
-                </div>
+                <span class="badge text-bg-warning">Pending</span>
               </div>
-              <?php if ($pendingTagFilter !== ''): ?>
-                <div class="text-secondary small mb-2">
-                  Showing unpublished cases tagged <span class="text-white"><?php echo htmlspecialchars(tp_case_tag_options()[$pendingTagFilter]); ?></span>.
-                  <a class="ms-1" href="?view=pending#pending">Clear filter</a>
-                </div>
-              <?php endif; ?>
   <?php
     // Build dataset based on role
     $rows = [];
@@ -5649,7 +5676,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
               <div class="table-responsive">
                 <table class="table table-sm align-middle mb-0">
                   <thead>
-                    <tr>
+                    <tr data-case-review-row>
                       <th style="width: 12rem;" class="text-nowrap">Case Code</th>
                       <th class="text-nowrap">Case Name</th>
                       <th class="text-nowrap">Submitted By</th>
@@ -5703,7 +5730,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             </div>
           </div>
         </div>
-        <div class="col-12" id="published-cases">
+        <div class="col-12" id="published-cases" data-case-review-section data-case-review-status="approved verified published">
           <div class="card glass border-success">
             <div class="card-body">
               <div class="d-flex align-items-center justify-content-between mb-3">
@@ -5754,7 +5781,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       <?php foreach ($publishedRows as $publishedCase):
                         $publishedTags = get_case_tags($pdo, (int)$publishedCase['id']);
                       ?>
-                        <tr>
+                        <tr data-case-review-row>
                           <td><div class="fw-semibold"><?php echo htmlspecialchars($publishedCase['case_name'] ?: $publishedCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($publishedCase['case_code']); ?></div></td>
                           <td><?php echo htmlspecialchars(trim((string)($publishedCase['creator_name'] ?? '')) ?: '—'); ?></td>
                           <td><?php echo htmlspecialchars(trim((string)($publishedCase['person_name'] ?? '')) ?: '—'); ?></td>
@@ -5782,7 +5809,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             </div>
           </div>
         </div>
-        <div class="col-12" id="rejected-cases">
+        <div class="col-12" id="rejected-cases" data-case-review-section data-case-review-status="rejected requiring changes">
           <div class="card glass border-danger">
             <div class="card-body">
               <div class="d-flex align-items-center justify-content-between mb-3">
@@ -5830,7 +5857,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                     <thead><tr><th>Case</th><th>Submitted By</th><th>Rejection Reason</th><th>Rejected</th><th>Evidence</th><th class="text-end">Actions</th></tr></thead>
                     <tbody>
                       <?php foreach ($rejectedRows as $rejectedCase): ?>
-                        <tr>
+                        <tr data-case-review-row>
                           <td><div class="fw-semibold"><?php echo htmlspecialchars($rejectedCase['case_name'] ?: $rejectedCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($rejectedCase['case_code']); ?></div></td>
                           <td><?php echo htmlspecialchars(trim((string)($rejectedCase['creator_name'] ?? '')) ?: '—'); ?></td>
                           <td style="min-width:18rem; max-width:32rem;"><div class="text-wrap"><?php echo nl2br(htmlspecialchars($rejectedCase['rejection_reason'] ?? 'No reason recorded.')); ?></div></td>
@@ -9153,6 +9180,57 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
   <script>
   document.addEventListener('DOMContentLoaded', function () {
+    (function () {
+      var searchInput = document.getElementById('caseReviewSearch');
+      if (!searchInput) return;
+
+      var rows = Array.prototype.slice.call(document.querySelectorAll('[data-case-review-row]'));
+      var sections = Array.prototype.slice.call(document.querySelectorAll('[data-case-review-section]'));
+      var summary = document.getElementById('caseReviewSearchSummary');
+      var noMatches = document.getElementById('caseReviewNoMatches');
+
+      rows.forEach(function (row) {
+        var section = row.closest('[data-case-review-section]');
+        var statusTerms = section ? (section.getAttribute('data-case-review-status') || '') : '';
+        row.setAttribute('data-case-review-search', (statusTerms + ' ' + (row.textContent || '')).toLocaleLowerCase());
+      });
+
+      function applyCaseReviewSearch() {
+        var query = searchInput.value.trim().toLocaleLowerCase();
+        var terms = query === '' ? [] : query.split(/\s+/).filter(Boolean);
+        var visibleCount = 0;
+
+        rows.forEach(function (row) {
+          var searchableText = row.getAttribute('data-case-review-search') || '';
+          var isMatch = terms.every(function (term) { return searchableText.indexOf(term) !== -1; });
+          row.classList.toggle('d-none', !isMatch);
+          if (isMatch) visibleCount++;
+        });
+
+        sections.forEach(function (section) {
+          if (terms.length === 0) {
+            section.classList.remove('d-none');
+            return;
+          }
+          var sectionHasMatch = Array.prototype.some.call(
+            section.querySelectorAll('[data-case-review-row]'),
+            function (row) { return !row.classList.contains('d-none'); }
+          );
+          section.classList.toggle('d-none', !sectionHasMatch);
+        });
+
+        if (summary) {
+          summary.textContent = terms.length > 0
+            ? 'Showing ' + visibleCount + ' of ' + rows.length + ' cases across all review sections.'
+            : rows.length + (rows.length === 1 ? ' case' : ' cases') + ' across all review sections.';
+        }
+        if (noMatches) noMatches.classList.toggle('d-none', terms.length === 0 || visibleCount > 0);
+      }
+
+      searchInput.addEventListener('input', applyCaseReviewSearch);
+      applyCaseReviewSearch();
+    })();
+
     (function () {
       var analyticsCaseId = <?php
         $tpAnalyticsCaseId = -1;
