@@ -4217,6 +4217,29 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                   radial-gradient(800px 400px at 10% -10%, rgba(25,195,125,.15), transparent);
     }
     .glass { backdrop-filter: blur(8px); background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); }
+    #case-owner-details .select2-container--bootstrap-5 .select2-selection,
+    .select2-container--bootstrap-5 .select2-dropdown,
+    .select2-container--bootstrap-5 .select2-search__field {
+      background-color: #212529 !important;
+      border-color: #495057 !important;
+      color: #f8f9fa !important;
+    }
+    #case-owner-details .select2-container--bootstrap-5 .select2-selection__rendered,
+    #case-owner-details .select2-container--bootstrap-5 .select2-selection__placeholder,
+    .select2-container--bootstrap-5 .select2-results__option {
+      color: #f8f9fa !important;
+    }
+    .select2-container--bootstrap-5 .select2-results__option--selected {
+      background-color: #343a40 !important;
+    }
+    .select2-container--bootstrap-5 .select2-results__option--highlighted {
+      background-color: #495057 !important;
+      color: #fff !important;
+    }
+    .select2-container--bootstrap-5 .select2-selection__clear,
+    .select2-container--bootstrap-5 .select2-selection__choice__remove {
+      color: #f8f9fa !important;
+    }
     .badge-role { background: rgba(124,77,255,.2); border: 1px solid rgba(124,77,255,.35); }
     .placeholder-tile { aspect-ratio: 16/9; background: repeating-linear-gradient(45deg, #222 0 10px, #1b1b1b 10px 20px); border-radius: .75rem; position: relative; overflow: hidden; }
     .placeholder-tile .text { position: absolute; inset: 0; display: grid; place-items: center; color: #888 }
@@ -7071,7 +7094,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             </div>
 
             <div class="row g-3">
-              <div class="col-xl-6">
+              <div class="col-xl-6 order-2">
                 <div class="border rounded p-3 h-100">
                   <h4 class="h6 mb-3">Current Owner</h4>
                   <?php if ($viewOwner): ?>
@@ -7091,7 +7114,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 </div>
               </div>
 
-              <div class="col-xl-6">
+              <div class="col-xl-6 order-1">
                 <div class="border rounded p-3 h-100">
                   <h4 class="h6 mb-3">Original Submission</h4>
                   <div class="row g-2 small">
@@ -7111,7 +7134,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               </div>
 
               <?php if ($submissionRecorded): ?>
-              <div class="col-12">
+              <div class="col-12 order-3">
                 <div class="border rounded p-3">
                   <h4 class="h6 mb-3">Submission Geo &amp; Network Data</h4>
                   <div class="row g-2 small">
@@ -7133,7 +7156,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <?php endif; ?>
 
               <?php if ($viewOwnershipHistory): ?>
-              <div class="col-12">
+              <div class="col-12 order-4">
                 <details>
                   <summary class="small text-secondary" style="cursor:pointer;">Recent ownership changes</summary>
                   <ul class="small mt-2 mb-0">
