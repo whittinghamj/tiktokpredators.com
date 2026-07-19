@@ -158,6 +158,7 @@ function tp_project_settings(PDO $pdo): array {
   $cache = [
     'site_title' => 'TikTokPredators',
     'meta_data' => 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.',
+    'openai_api_key' => '',
     'discord_webhook_key' => '',
     'discord_webhooks' => '[]',
   ];
@@ -800,6 +801,7 @@ SQL
   $defaultSettings = [
     'site_title' => 'TikTokPredators',
     'meta_data' => 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.',
+    'openai_api_key' => '',
     'discord_webhook_key' => '',
     'discord_webhooks' => '[]',
   ];
@@ -1992,6 +1994,7 @@ if (($_POST['action'] ?? '') === 'test_discord_webhook') {
 
     $siteTitle = trim($_POST['site_title'] ?? '');
     $metaData = trim($_POST['meta_data'] ?? '');
+    $openAiApiKey = trim((string)($_POST['openai_api_key'] ?? ''));
     $webhookNames = $_POST['discord_webhook_name'] ?? [];
     $webhookUrls = $_POST['discord_webhook_url'] ?? [];
     $redir = trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings');
@@ -2042,6 +2045,7 @@ if (($_POST['action'] ?? '') === 'test_discord_webhook') {
       $stmt = $pdo->prepare('INSERT INTO project_settings (setting_key, setting_value, updated_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value), updated_at = NOW()');
       $stmt->execute(['site_title', $siteTitle]);
       $stmt->execute(['meta_data', $metaData]);
+      $stmt->execute(['openai_api_key', $openAiApiKey]);
       $stmt->execute(['discord_webhooks', $discordWebhooksJson]);
       $stmt->execute(['discord_webhook_key', $legacyWebhook]);
       flash('success', 'Project settings saved.');
@@ -3488,9 +3492,11 @@ $tpMetaImage = tp_absolute_url('/assets/og-image.png');
 $tpMetaImageAlt = $tpPageTitle;
 $tpDiscordWebhooks = [];
 $tpDiscordWebhookCount = 0;
+$tpOpenAiApiKey = '';
 if (isset($pdo) && $pdo instanceof PDO) {
     $tpSiteTitle = tp_project_setting($pdo, 'site_title', $tpSiteTitle);
     $tpMetaDescription = tp_project_setting($pdo, 'meta_data', $tpMetaDescription);
+  $tpOpenAiApiKey = tp_project_setting($pdo, 'openai_api_key', '');
   $tpDiscordWebhooks = tp_discord_webhooks($pdo);
 }
 $tpPageTitle = $tpSiteTitle . ' — Cases & Evidence';
@@ -7501,6 +7507,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     <div>
                       <label class="form-label">Meta Data</label>
                       <textarea name="meta_data" class="form-control" rows="5" placeholder="Site description and SEO metadata"><?php echo htmlspecialchars($tpMetaDescription); ?></textarea>
+                    </div>
+
+                    <div>
+                      <label class="form-label" for="openAiApiKey">OpenAI API Key</label>
+                      <input type="text" id="openAiApiKey" name="openai_api_key" class="form-control font-monospace" value="<?php echo htmlspecialchars($tpOpenAiApiKey); ?>" placeholder="sk-..." autocomplete="off" spellcheck="false">
+                      <div class="form-text text-secondary">Stored in Platform Settings and displayed in plain text to the main admin account.</div>
                     </div>
 
                     <div>
