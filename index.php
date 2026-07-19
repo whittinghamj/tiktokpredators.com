@@ -7228,17 +7228,17 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                     <?php endif; ?>
                                   </div>
                                 </div>
-                                <div class="row g-3 mb-3">
+                                <div class="row g-3 mb-4">
                                   <div class="col-md-6">
                                     <div class="small text-secondary mb-1">Before</div>
-                                    <div class="border rounded p-3 h-100 bg-black bg-opacity-25" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:20rem;overflow:auto;"><?php echo $beforeValue !== '' ? htmlspecialchars($beforeValue) : '<span class="text-secondary">Empty</span>'; ?></div>
+                                    <div class="border rounded p-3 bg-black bg-opacity-25" style="white-space:pre-wrap;overflow-wrap:anywhere;min-height:8rem;max-height:20rem;overflow:auto;"><?php echo $beforeValue !== '' ? htmlspecialchars($beforeValue) : '<span class="text-secondary">Empty</span>'; ?></div>
                                   </div>
                                   <div class="col-md-6">
                                     <div class="small text-secondary mb-1">Suggested change</div>
-                                    <div class="border border-info rounded p-3 h-100 bg-info bg-opacity-10" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:20rem;overflow:auto;"><?php echo htmlspecialchars($afterValue); ?></div>
+                                    <div class="border border-info rounded p-3 bg-info bg-opacity-10" style="white-space:pre-wrap;overflow-wrap:anywhere;min-height:8rem;max-height:20rem;overflow:auto;"><?php echo htmlspecialchars($afterValue); ?></div>
                                   </div>
                                 </div>
-                                <div class="small mb-3"><span class="text-secondary">Why:</span> <?php echo nl2br(htmlspecialchars($tpSuggestion['reason'] ?? '')); ?></div>
+                                <div class="small mb-3 pt-1"><span class="text-secondary d-block mb-1">Why:</span><span class="d-block"><?php echo nl2br(htmlspecialchars($tpSuggestion['reason'] ?? '')); ?></span></div>
                                 <?php if ($suggestionDecision === 'Pending'): ?>
                                   <?php if (is_admin()): ?>
                                     <div class="d-flex flex-wrap gap-2">
