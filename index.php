@@ -246,6 +246,39 @@ function tp_post_discord_webhook(string $webhookUrl, array $payload): array {
   return [$ok, $httpCode, (string)$resp];
 }
 
+function tp_test_openai_api_key(string $apiKey): array {
+  $apiKey = trim($apiKey);
+  if ($apiKey === '') { return [false, 0, 'Enter an OpenAI API key first.']; }
+  if (!function_exists('curl_init')) { return [false, 0, 'The server cURL extension is unavailable.']; }
+
+  $ch = curl_init('https://api.openai.com/v1/models');
+  curl_setopt_array($ch, [
+    CURLOPT_HTTPGET => true,
+    CURLOPT_HTTPHEADER => [
+      'Authorization: Bearer ' . $apiKey,
+      'Accept: application/json',
+    ],
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_CONNECTTIMEOUT => 10,
+    CURLOPT_TIMEOUT => 20,
+    CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+  ]);
+  $response = curl_exec($ch);
+  $curlError = curl_error($ch);
+  $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+  if ($response === false) {
+    return [false, $httpCode, 'Unable to connect to OpenAI: ' . ($curlError !== '' ? $curlError : 'network error')];
+  }
+  if ($httpCode >= 200 && $httpCode < 300) {
+    return [true, $httpCode, 'OpenAI connection succeeded. The API key is valid.'];
+  }
+  if ($httpCode === 401) { return [false, $httpCode, 'OpenAI rejected the API key. Check that it is complete and active.']; }
+  if ($httpCode === 403) { return [false, $httpCode, 'The API key was recognised but does not have permission to list models.']; }
+  if ($httpCode === 429) { return [false, $httpCode, 'OpenAI rate-limited the test. Check the project quota and try again.']; }
+  return [false, $httpCode, 'OpenAI test failed with HTTP ' . ($httpCode > 0 ? $httpCode : 'unknown') . '.'];
+}
+
 /** Allow the original submitter to build or revise an unpublished case. */
 function can_manage_case_submission(PDO $pdo, int $caseId): bool {
     if ($caseId <= 0 || empty($_SESSION['user'])) { return false; }
@@ -1901,6 +1934,34 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
         }
     }
     header('Location: '. $redir); exit;
+}
+
+// Test an OpenAI API key without saving or exposing it (main admin only).
+if (($_POST['action'] ?? '') === 'test_openai_api_key') {
+    throttle();
+    $isAjax = (strtolower((string)($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest') || (($_POST['ajax'] ?? '') === '1');
+    $respondJson = function (bool $ok, string $message, int $httpCode = 0): void {
+      header('Content-Type: application/json');
+      echo json_encode(['ok' => $ok, 'message' => $message, 'http_code' => $httpCode]);
+      exit;
+    };
+
+    if (!check_csrf()) {
+      if ($isAjax) { $respondJson(false, 'Security check failed.'); }
+      flash('error', 'Security check failed.');
+      header('Location: ?view=project_settings#project-settings'); exit;
+    }
+    if (!tp_is_main_admin()) {
+      if ($isAjax) { $respondJson(false, 'Unauthorized. Main admin only.'); }
+      flash('error', 'Unauthorized. Main admin only.');
+      header('Location: ?view=project_settings#project-settings'); exit;
+    }
+
+    $openAiApiKey = trim((string)($_POST['openai_api_key'] ?? ''));
+    [$ok, $httpCode, $message] = tp_test_openai_api_key($openAiApiKey);
+    if ($isAjax) { $respondJson($ok, $message, $httpCode); }
+    flash($ok ? 'success' : 'error', $message);
+    header('Location: ?view=project_settings#project-settings'); exit;
 }
 
 // Handle webhook test (main admin only)
@@ -7511,8 +7572,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
                     <div>
                       <label class="form-label" for="openAiApiKey">OpenAI API Key</label>
-                      <input type="text" id="openAiApiKey" name="openai_api_key" class="form-control font-monospace" value="<?php echo htmlspecialchars($tpOpenAiApiKey); ?>" placeholder="sk-..." autocomplete="off" spellcheck="false">
+                      <div class="input-group">
+                        <input type="text" id="openAiApiKey" name="openai_api_key" class="form-control font-monospace" value="<?php echo htmlspecialchars($tpOpenAiApiKey); ?>" placeholder="sk-..." autocomplete="off" spellcheck="false">
+                        <button type="button" class="btn btn-outline-info" id="testOpenAiKeyBtn"><i class="bi bi-broadcast me-1"></i>Test OpenAI</button>
+                      </div>
                       <div class="form-text text-secondary">Stored in Platform Settings and displayed in plain text to the main admin account.</div>
+                      <div class="small text-secondary mt-1" id="openAiTestStatus" role="status" aria-live="polite">Test not run.</div>
                     </div>
 
                     <div>
@@ -7593,7 +7658,48 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       (function () {
         var addBtn = document.getElementById('addWebhookRowBtn');
         var rows = document.getElementById('discordWebhookRows');
+        var openAiTestBtn = document.getElementById('testOpenAiKeyBtn');
+        var openAiKeyInput = document.getElementById('openAiApiKey');
+        var openAiTestStatus = document.getElementById('openAiTestStatus');
         var csrfToken = <?php echo json_encode($_SESSION['csrf_token'] ?? ''); ?>;
+
+        if (openAiTestBtn && openAiKeyInput && openAiTestStatus) {
+          openAiTestBtn.addEventListener('click', function () {
+            var apiKey = openAiKeyInput.value.trim();
+            if (apiKey === '') {
+              openAiTestStatus.className = 'small text-danger mt-1';
+              openAiTestStatus.textContent = 'Enter an OpenAI API key first.';
+              return;
+            }
+
+            var fd = new FormData();
+            fd.append('action', 'test_openai_api_key');
+            fd.append('csrf_token', csrfToken);
+            fd.append('ajax', '1');
+            fd.append('openai_api_key', apiKey);
+
+            openAiTestBtn.disabled = true;
+            openAiTestStatus.className = 'small text-info mt-1';
+            openAiTestStatus.textContent = 'Testing OpenAI connection...';
+            fetch(window.location.href, {
+              method: 'POST',
+              headers: { 'X-Requested-With': 'XMLHttpRequest' },
+              body: fd
+            }).then(function (res) {
+              return res.json();
+            }).then(function (data) {
+              var succeeded = !!(data && data.ok);
+              openAiTestStatus.className = 'small ' + (succeeded ? 'text-success' : 'text-danger') + ' mt-1';
+              openAiTestStatus.textContent = (data && data.message) ? String(data.message) : 'OpenAI returned an unexpected response.';
+            }).catch(function () {
+              openAiTestStatus.className = 'small text-danger mt-1';
+              openAiTestStatus.textContent = 'Unable to complete the OpenAI test request.';
+            }).finally(function () {
+              openAiTestBtn.disabled = false;
+            });
+          });
+        }
+
         if (!addBtn || !rows) return;
 
         function initTooltips(scope) {
