@@ -152,6 +152,13 @@ function tp_is_main_admin(): bool {
 }
 function is_logged_in(){ return !empty($_SESSION['user']); }
 
+function tp_normalize_account_username($input): string {
+  $username = ltrim(trim((string)$input), '@');
+  $username = preg_replace('/[^A-Za-z0-9._-]+/', '_', $username) ?? '';
+  $username = trim($username, '._-');
+  return mb_substr($username, 0, 120, 'UTF-8');
+}
+
 function tp_project_settings(PDO $pdo): array {
   static $cache = null;
   if ($cache !== null) { return $cache; }
@@ -240,8 +247,6 @@ function tp_post_discord_webhook(string $webhookUrl, array $payload): array {
   ]);
   $resp = curl_exec($ch);
   $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-  curl_close($ch);
-
   $ok = ($httpCode >= 200 && $httpCode < 300);
   return [$ok, $httpCode, (string)$resp];
 }
@@ -964,6 +969,37 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     flash('error', 'Database connection failed. Please check configuration.');
     $_SESSION['auth_tab'] = 'register';
 }
+// --- Account usernames used for owner details and searchable ownership assignment ---
+try {
+  $usernameCol = $pdo->query("SHOW COLUMNS FROM users LIKE 'username'");
+  if (!$usernameCol || !$usernameCol->fetch()) {
+    $pdo->exec("ALTER TABLE users ADD COLUMN username VARCHAR(120) NULL AFTER display_name");
+  }
+
+  $usedUsernames = [];
+  $existingUsernames = $pdo->query("SELECT id, username FROM users WHERE username IS NOT NULL AND username <> '' ORDER BY id")->fetchAll();
+  foreach ($existingUsernames as $existingUsername) {
+    $usedUsernames[strtolower((string)$existingUsername['username'])] = (int)$existingUsername['id'];
+  }
+  $missingUsernames = $pdo->query("SELECT id, email FROM users WHERE username IS NULL OR username = '' ORDER BY id")->fetchAll();
+  $setUsername = $pdo->prepare('UPDATE users SET username = ? WHERE id = ? AND (username IS NULL OR username = \'\')');
+  foreach ($missingUsernames as $missingUsername) {
+    $userId = (int)$missingUsername['id'];
+    $emailLocal = explode('@', (string)($missingUsername['email'] ?? ''), 2)[0] ?? '';
+    $base = tp_normalize_account_username($emailLocal);
+    if (mb_strlen($base, 'UTF-8') < 3) { $base = 'user' . $userId; }
+    $candidate = $base;
+    if (isset($usedUsernames[strtolower($candidate)])) { $candidate = mb_substr($base, 0, 105, 'UTF-8') . '-' . $userId; }
+    $usedUsernames[strtolower($candidate)] = $userId;
+    $setUsername->execute([$candidate, $userId]);
+  }
+  $usernameIndex = $pdo->query("SHOW INDEX FROM users WHERE Key_name = 'uq_users_username'");
+  if (!$usernameIndex || !$usernameIndex->fetch()) {
+    $pdo->exec('ALTER TABLE users ADD UNIQUE INDEX uq_users_username (username)');
+  }
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
 // --- Project settings table setup ---
 try {
   $pdo->exec(<<<SQL
@@ -1085,6 +1121,39 @@ try {
             INDEX idx_case_id_created (case_id, created_at),
             INDEX idx_event_type (event_type),
             INDEX idx_ref_evidence (ref_evidence_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+} catch (Throwable $e) {
+    $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+// --- Original case-submission network and geo metadata (admin-only display) ---
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS case_submission_metadata (
+            case_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+            submitted_by BIGINT UNSIGNED NULL,
+            submitted_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            public_ip VARCHAR(45) NULL,
+            forwarded_for VARCHAR(255) NULL,
+            geo_json LONGTEXT NULL,
+            user_agent VARCHAR(1024) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_case_submission_user (submitted_by),
+            INDEX idx_case_submission_ip (public_ip),
+            INDEX idx_case_submission_at (submitted_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS case_ownership_history (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            case_id BIGINT UNSIGNED NOT NULL,
+            previous_owner_id BIGINT UNSIGNED NULL,
+            new_owner_id BIGINT UNSIGNED NOT NULL,
+            changed_by BIGINT UNSIGNED NULL,
+            changed_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_case_ownership_case (case_id, changed_at),
+            INDEX idx_case_ownership_new_owner (new_owner_id),
+            INDEX idx_case_ownership_changed_by (changed_by)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     ");
 } catch (Throwable $e) {
@@ -1489,8 +1558,6 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
       $response = curl_exec($ch);
       $curlErr = curl_error($ch);
       $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
-      curl_close($ch);
-
       if ($response === false || $curlErr !== '' || $httpCode < 200 || $httpCode >= 300) {
         $cache[$ip] = null;
         return null;
@@ -1531,6 +1598,34 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
       ];
 
       return $cache[$ip];
+    }
+
+    function tp_record_case_submission_metadata(PDO $pdo, int $caseId, ?int $submittedBy = null, ?string $submittedAt = null): void {
+      if ($caseId <= 0) { return; }
+      try {
+        [$publicIp, $forwardedFor] = tp_client_ip();
+        [$headerCountry, $headerRegion, $headerCity, $headerSource] = tp_geo_from_headers();
+        $geo = tp_geo_lookup_api($publicIp) ?? [];
+        if (trim((string)($geo['geo_country'] ?? '')) === '') { $geo['geo_country'] = $headerCountry; }
+        if (trim((string)($geo['geo_region'] ?? '')) === '') { $geo['geo_region'] = $headerRegion; }
+        if (trim((string)($geo['geo_city'] ?? '')) === '') { $geo['geo_city'] = $headerCity; }
+        if (trim((string)($geo['geo_source'] ?? '')) === '') { $geo['geo_source'] = $headerSource; }
+        $geoJson = $geo ? json_encode($geo, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) : null;
+        if ($geoJson === false) { $geoJson = null; }
+
+        $stmt = $pdo->prepare('INSERT IGNORE INTO case_submission_metadata (case_id, submitted_by, submitted_at, public_ip, forwarded_for, geo_json, user_agent) VALUES (?, ?, COALESCE(?, NOW()), NULLIF(?, \'\'), NULLIF(?, \'\'), ?, NULLIF(?, \'\'))');
+        $stmt->execute([
+          $caseId,
+          $submittedBy,
+          $submittedAt,
+          $publicIp,
+          $forwardedFor,
+          $geoJson,
+          mb_substr(trim((string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 1024, 'UTF-8'),
+        ]);
+      } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+      }
     }
 
     function tp_url_host(string $url): string {
@@ -1955,7 +2050,7 @@ if (($_POST['action'] ?? '') === 'login') {
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
     try {
-        $stmt = $pdo->prepare('SELECT id, email, display_name, password_hash, role FROM users WHERE email = ? AND is_active = 1');
+        $stmt = $pdo->prepare('SELECT id, email, display_name, username, password_hash, role FROM users WHERE email = ? AND is_active = 1');
         $stmt->execute([$email]);
         $user = $stmt->fetch();
         if ($user && password_verify($password, $user['password_hash'])) {
@@ -1964,8 +2059,11 @@ if (($_POST['action'] ?? '') === 'login') {
               'id' => $user['id'],
               'email' => $user['email'],
               'display_name' => $user['display_name'] ?? '',
+              'username' => $user['username'] ?? '',
               'role' => $user['role']
             ];
+            $loginUpdate = $pdo->prepare('UPDATE users SET last_login_at = NOW() WHERE id = ?');
+            $loginUpdate->execute([(int)$user['id']]);
             $_SESSION['auth_attempts'] = 0; $_SESSION['auth_last'] = time();
             flash('success', 'Welcome back, '. htmlspecialchars($user['email']));
             log_console('INFO', 'Login success for ' . ($user['email'] ?? 'unknown'));
@@ -1990,6 +2088,7 @@ if (($_POST['action'] ?? '') === 'register') {
     if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); $_SESSION['auth_tab'] = 'register'; header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
     $email = trim($_POST['email'] ?? '');
     $displayName = trim($_POST['display_name'] ?? '');
+    $username = tp_normalize_account_username($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
     $confirm = $_POST['password_confirm'] ?? '';
     $agree = isset($_POST['agree']);
@@ -2001,6 +2100,11 @@ if (($_POST['action'] ?? '') === 'register') {
     }
     if ($displayName === '') {
         flash('error', 'Please enter a display name.');
+        $_SESSION['auth_tab'] = 'register';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if (mb_strlen($username, 'UTF-8') < 3) {
+        flash('error', 'Please enter a username of at least 3 letters or numbers.');
         $_SESSION['auth_tab'] = 'register';
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
@@ -2021,16 +2125,16 @@ if (($_POST['action'] ?? '') === 'register') {
     }
 
     try {
-        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
-        $stmt->execute([$email]);
+        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? OR username = ? LIMIT 1');
+        $stmt->execute([$email, $username]);
         if ($stmt->fetch()) {
-            flash('error', 'An account with that email already exists.');
+            flash('error', 'That email address or username is already registered.');
             $_SESSION['auth_tab'] = 'register';
             header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
         }
         $hash = password_hash($password, PASSWORD_DEFAULT);
-        $ins = $pdo->prepare('INSERT INTO users (email, display_name, password_hash, role, is_active) VALUES (?, ?, ?, "viewer", 1)');
-        $ins->execute([$email, $displayName, $hash]);
+        $ins = $pdo->prepare('INSERT INTO users (email, display_name, username, password_hash, role, is_active) VALUES (?, ?, ?, ?, "viewer", 1)');
+        $ins->execute([$email, $displayName, $username, $hash]);
         flash('success', 'Registration successful. You can now log in.');
     } catch (Throwable $e) {
         // Map common PDO errors to user-friendly messages, append safe error code
@@ -2040,7 +2144,7 @@ if (($_POST['action'] ?? '') === 'register') {
         }
         $public = 'Unable to register right now.';
         if ($code === 1062) {
-            $public = 'That email is already registered.';
+            $public = 'That email address or username is already registered.';
         } elseif (stripos($e->getMessage(), 'foreign key') !== false) {
             $public = 'Invalid reference on registration.';
         }
@@ -2066,6 +2170,7 @@ if (($_POST['action'] ?? '') === 'admin_add_user') {
 
     $email = trim($_POST['email'] ?? '');
     $displayName = trim($_POST['display_name'] ?? '');
+    $username = tp_normalize_account_username($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
     $confirm = $_POST['password_confirm'] ?? '';
     $role = trim($_POST['role'] ?? 'viewer');
@@ -2083,6 +2188,10 @@ if (($_POST['action'] ?? '') === 'admin_add_user') {
         flash('error', 'Please enter a display name.');
         header('Location: '. $redir); exit;
     }
+    if (mb_strlen($username, 'UTF-8') < 3) {
+        flash('error', 'Please enter a username of at least 3 letters or numbers.');
+        header('Location: '. $redir); exit;
+    }
     if (strlen($password) < 8) {
         flash('error', 'Password must be at least 8 characters.');
         header('Location: '. $redir); exit;
@@ -2094,22 +2203,22 @@ if (($_POST['action'] ?? '') === 'admin_add_user') {
     if (!in_array($role, $allowedRoles, true)) { $role = 'viewer'; }
 
     try {
-        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? LIMIT 1');
-        $stmt->execute([$email]);
+        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? OR username = ? LIMIT 1');
+        $stmt->execute([$email, $username]);
         if ($stmt->fetch()) {
-            flash('error', 'That email is already registered.');
+            flash('error', 'That email address or username is already registered.');
             header('Location: '. $redir); exit;
         }
         $hash = password_hash($password, PASSWORD_DEFAULT);
-        $ins = $pdo->prepare('INSERT INTO users (email, display_name, password_hash, role, is_active, created_at) VALUES (?, ?, ?, ?, ?, NOW())');
-        $ins->execute([$email, $displayName, $hash, $role, $isActive]);
+        $ins = $pdo->prepare('INSERT INTO users (email, display_name, username, password_hash, role, is_active, created_at) VALUES (?, ?, ?, ?, ?, ?, NOW())');
+        $ins->execute([$email, $displayName, $username, $hash, $role, $isActive]);
         flash('success', 'User added successfully.');
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
         $code = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
         if ($code === 1062) {
-            flash('error', 'That email is already registered.');
+            flash('error', 'That email address or username is already registered.');
         } else {
             flash('error', 'Unable to add user.');
         }
@@ -2298,6 +2407,63 @@ if (($_POST['action'] ?? '') === 'test_discord_webhook') {
     }
     header('Location: '. $redir); exit;
   }
+
+// Admin-only case ownership transfer.
+if (($_POST['action'] ?? '') === 'transfer_case_ownership') {
+    throttle();
+    $caseCode = trim((string)($_POST['case_code'] ?? ''));
+    $redirect = '?view=case&code=' . rawurlencode($caseCode) . '#case-owner-details';
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ' . $redirect); exit; }
+    if (!is_admin()) { flash('error', 'Only a site admin can change case ownership.'); header('Location: ' . $redirect); exit; }
+
+    $caseId = (int)($_POST['case_id'] ?? 0);
+    $newOwnerId = (int)($_POST['new_owner_id'] ?? 0);
+    try {
+      $pdo->beginTransaction();
+      $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, created_by, opened_at FROM cases WHERE id = ? FOR UPDATE');
+      $caseStmt->execute([$caseId]);
+      $case = $caseStmt->fetch();
+      if (!$case) { throw new RuntimeException('Case not found.'); }
+      $caseCode = (string)$case['case_code'];
+      $redirect = '?view=case&code=' . rawurlencode($caseCode) . '#case-owner-details';
+
+      $ownerStmt = $pdo->prepare('SELECT id, display_name, username, email FROM users WHERE id = ? AND is_active = 1 LIMIT 1');
+      $ownerStmt->execute([$newOwnerId]);
+      $newOwner = $ownerStmt->fetch();
+      if (!$newOwner) { throw new RuntimeException('New owner not found or inactive.'); }
+      $previousOwnerId = (int)($case['created_by'] ?? 0);
+      if ($previousOwnerId === $newOwnerId) {
+        $pdo->rollBack();
+        flash('error', 'That user already owns this case.');
+        header('Location: ' . $redirect); exit;
+      }
+
+      // Preserve the original submitter before changing the current owner on historical cases.
+      $submissionStmt = $pdo->prepare('INSERT IGNORE INTO case_submission_metadata (case_id, submitted_by, submitted_at) VALUES (?, ?, COALESCE(?, NOW()))');
+      $submissionStmt->execute([$caseId, $previousOwnerId > 0 ? $previousOwnerId : null, $case['opened_at'] ?? null]);
+
+      $updateCase = $pdo->prepare('UPDATE cases SET created_by = ? WHERE id = ?');
+      $updateCase->execute([$newOwnerId, $caseId]);
+      $historyStmt = $pdo->prepare('INSERT INTO case_ownership_history (case_id, previous_owner_id, new_owner_id, changed_by) VALUES (?, ?, ?, ?)');
+      $historyStmt->execute([$caseId, $previousOwnerId > 0 ? $previousOwnerId : null, $newOwnerId, (int)($_SESSION['user']['id'] ?? 0)]);
+      log_case_event($pdo, $caseId, 'case_ownership_changed', 'Case ownership updated', 'Ownership was changed by a site administrator.');
+      tp_create_user_notification(
+        $pdo,
+        $newOwnerId,
+        'case_ownership_assigned',
+        'A case has been assigned to you',
+        'You are now the owner of ' . ((string)($case['case_name'] ?? '') !== '' ? (string)$case['case_name'] : $caseCode) . ' (' . $caseCode . ').',
+        $caseId
+      );
+      $pdo->commit();
+      flash('success', 'Case ownership transferred to ' . ((string)($newOwner['display_name'] ?? '') !== '' ? $newOwner['display_name'] : $newOwner['email']) . '.');
+    } catch (Throwable $e) {
+      if ($pdo->inTransaction()) { $pdo->rollBack(); }
+      $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+      flash('error', 'Unable to change case ownership.');
+    }
+    header('Location: ' . $redirect); exit;
+}
 
 // Generate reviewable AI suggestions for an owned draft or, for admins, any case.
 if (($_POST['action'] ?? '') === 'generate_ai_case_suggestions') {
@@ -2533,6 +2699,7 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
         $case_id = (int)$pdo->lastInsertId();
         save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         save_case_tags($pdo, $case_id, array_keys($case_tags));
+        tp_record_case_submission_metadata($pdo, $case_id, (int)($_SESSION['user']['id'] ?? 0));
         log_case_event($pdo, $case_id, 'case_created', $case_name, 'Viewer created case. Status set to Being Built');
 
         // Optional person photo
@@ -2619,6 +2786,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
         $case_id = (int)$pdo->lastInsertId();
         save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         save_case_tags($pdo, $case_id, array_keys($case_tags));
+        tp_record_case_submission_metadata($pdo, $case_id, (int)($_SESSION['user']['id'] ?? 0));
         log_case_event($pdo, $case_id, 'case_created', $case_name, 'Case created with status '.$status.' and sensitivity '.$sensitivity);
         // Optional: handle person photo upload
         if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
@@ -4033,6 +4201,8 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" />
   <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet" />
   <link href="https://cdn.datatables.net/1.13.8/css/dataTables.bootstrap5.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css" rel="stylesheet" />
+  <link href="https://cdn.jsdelivr.net/npm/select2-bootstrap-5-theme@1.3.0/dist/select2-bootstrap-5-theme.min.css" rel="stylesheet" />
 
   <!-- Bootstrap JS (required for modal/tabs) -->
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
@@ -4170,6 +4340,10 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
               <div class="mb-3">
                 <label for="reg_display_name" class="form-label">Display Name</label>
                 <input type="text" class="form-control" id="reg_display_name" name="display_name" required>
+              </div>
+              <div class="mb-3">
+                <label for="reg_username" class="form-label">Username</label>
+                <input type="text" class="form-control" id="reg_username" name="username" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" placeholder="your_username" required>
               </div>
               <div class="mb-3">
                 <label for="reg_email" class="form-label">Email</label>
@@ -5951,7 +6125,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             <?php
             $users = [];
             try {
-              $q = $pdo->query('SELECT id, email, display_name, role, is_active, created_at FROM users ORDER BY created_at DESC');
+              $q = $pdo->query('SELECT id, email, display_name, username, role, is_active, created_at FROM users ORDER BY created_at DESC');
               $users = $q->fetchAll();
             } catch (Throwable $e) {
               $_SESSION['sql_error'] = $e->getMessage();
@@ -5965,6 +6139,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                   <tr>
                     <th>ID</th>
                     <th>Display Name</th>
+                    <th>Username</th>
                     <th>Email</th>
                     <th>Role</th>
                     <th>Status</th>
@@ -5977,6 +6152,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                     <tr>
                       <td><?php echo (int)$u['id']; ?></td>
                       <td><?php echo htmlspecialchars($u['display_name'] ?? ''); ?></td>
+                      <td><?php echo ($u['username'] ?? '') !== '' ? '@' . htmlspecialchars($u['username']) : '<span class="text-secondary">Not recorded</span>'; ?></td>
                       <td><?php echo htmlspecialchars($u['email'] ?? ''); ?></td>
                       <td><span class="badge text-bg-dark border"><?php echo htmlspecialchars($u['role'] ?? 'viewer'); ?></span></td>
                       <td><?php echo ((int)($u['is_active'] ?? 0) ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Disabled</span>'); ?></td>
@@ -5996,7 +6172,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       </td>
                     </tr>
                   <?php endforeach; else: ?>
-                    <tr><td colspan="7" class="text-secondary">No users found.</td></tr>
+                    <tr><td colspan="8" class="text-secondary">No users found.</td></tr>
                   <?php endif; ?>
                 </tbody>
               </table>
@@ -6020,6 +6196,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 <div class="mb-2">
                   <label class="form-label">Display Name</label>
                   <input type="text" name="display_name" class="form-control" placeholder="e.g. Jane Doe" required>
+                </div>
+                <div class="mb-2">
+                  <label class="form-label">Username</label>
+                  <input type="text" name="username" class="form-control" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" placeholder="jane_doe" required>
                 </div>
                 <div class="mb-2">
                   <label class="form-label">Email</label>
@@ -6638,6 +6818,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     <?php
       $caseCode = trim($_GET['code'] ?? '');
       $viewCase = null; $viewCaseId = 0; $viewEv = []; $viewTotalViews = 0; $viewCaseTags = [];
+      $viewOwner = []; $viewOriginalSubmitter = []; $viewSubmissionMeta = []; $viewSubmissionGeo = [];
+      $viewOwnerCandidates = []; $viewOwnershipHistory = [];
       $viewAnalyticsSummary = [];
       $viewAnalyticsAlerts = [];
       $viewAnalyticsCountries = [];
@@ -6661,6 +6843,33 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           log_case_view($pdo, $viewCaseId);
           $viewTotalViews = get_case_view_count($pdo, $viewCaseId);
           if (is_admin()) {
+            try {
+              $ownerQuery = $pdo->prepare('SELECT id, email, display_name, username, role, is_active, created_at, last_login_at FROM users WHERE id = ? LIMIT 1');
+              $ownerQuery->execute([(int)($viewCase['created_by'] ?? 0)]);
+              $viewOwner = $ownerQuery->fetch() ?: [];
+
+              $submissionQuery = $pdo->prepare('SELECT case_id, submitted_by, submitted_at, public_ip, forwarded_for, geo_json, user_agent FROM case_submission_metadata WHERE case_id = ? LIMIT 1');
+              $submissionQuery->execute([$viewCaseId]);
+              $viewSubmissionMeta = $submissionQuery->fetch() ?: [];
+              $decodedGeo = json_decode((string)($viewSubmissionMeta['geo_json'] ?? ''), true);
+              $viewSubmissionGeo = is_array($decodedGeo) ? $decodedGeo : [];
+
+              $originalSubmitterId = (int)($viewSubmissionMeta['submitted_by'] ?? 0);
+              if ($originalSubmitterId <= 0) { $originalSubmitterId = (int)($viewCase['created_by'] ?? 0); }
+              if ($originalSubmitterId > 0) {
+                $ownerQuery->execute([$originalSubmitterId]);
+                $viewOriginalSubmitter = $ownerQuery->fetch() ?: [];
+              }
+
+              $candidateQuery = $pdo->query('SELECT id, email, display_name, username, role FROM users WHERE is_active = 1 ORDER BY display_name ASC, username ASC, email ASC');
+              $viewOwnerCandidates = $candidateQuery->fetchAll() ?: [];
+
+              $historyQuery = $pdo->prepare('SELECT h.changed_at, previous_user.display_name AS previous_name, previous_user.username AS previous_username, new_user.display_name AS new_name, new_user.username AS new_username, admin_user.display_name AS changed_by_name FROM case_ownership_history h LEFT JOIN users previous_user ON previous_user.id = h.previous_owner_id LEFT JOIN users new_user ON new_user.id = h.new_owner_id LEFT JOIN users admin_user ON admin_user.id = h.changed_by WHERE h.case_id = ? ORDER BY h.changed_at DESC, h.id DESC LIMIT 5');
+              $historyQuery->execute([$viewCaseId]);
+              $viewOwnershipHistory = $historyQuery->fetchAll() ?: [];
+            } catch (Throwable $e) {
+              $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+            }
             try {
               $aq = $pdo->prepare("SELECT
                   COUNT(*) AS total_views,
@@ -6808,6 +7017,137 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
           </div>
         </div>
+        <?php if (is_admin() && $viewCaseId > 0):
+          $ownerName = trim((string)($viewOwner['display_name'] ?? ''));
+          $ownerEmail = trim((string)($viewOwner['email'] ?? ''));
+          $ownerUsername = trim((string)($viewOwner['username'] ?? ''));
+          $submitterName = trim((string)($viewOriginalSubmitter['display_name'] ?? ''));
+          $submitterEmail = trim((string)($viewOriginalSubmitter['email'] ?? ''));
+          $submitterUsername = trim((string)($viewOriginalSubmitter['username'] ?? ''));
+          $submissionRecorded = !empty($viewSubmissionMeta);
+          $submittedAt = trim((string)($viewSubmissionMeta['submitted_at'] ?? ($viewCase['opened_at'] ?? '')));
+          $submitterDiffers = (int)($viewOriginalSubmitter['id'] ?? 0) > 0
+            && (int)($viewOriginalSubmitter['id'] ?? 0) !== (int)($viewOwner['id'] ?? 0);
+          $geoLocationParts = array_values(array_filter([
+            trim((string)($viewSubmissionGeo['geo_city'] ?? '')),
+            trim((string)($viewSubmissionGeo['geo_district'] ?? '')),
+            trim((string)($viewSubmissionGeo['geo_region'] ?? '')),
+            trim((string)($viewSubmissionGeo['geo_postcode'] ?? '')),
+            trim((string)($viewSubmissionGeo['geo_country_name'] ?? ($viewSubmissionGeo['geo_country'] ?? ''))),
+          ], static function ($value) { return $value !== ''; }));
+          $coordinates = '';
+          if (($viewSubmissionGeo['geo_lat'] ?? '') !== '' && ($viewSubmissionGeo['geo_lon'] ?? '') !== '') {
+            $coordinates = (string)$viewSubmissionGeo['geo_lat'] . ', ' . (string)$viewSubmissionGeo['geo_lon'];
+          }
+        ?>
+        <div class="card glass mb-3" id="case-owner-details">
+          <div class="card-body">
+            <div class="d-flex flex-column flex-lg-row justify-content-between gap-3 mb-3">
+              <div>
+                <h3 class="h6 mb-1"><i class="bi bi-person-badge me-1"></i> Case Ownership &amp; Submission Details</h3>
+                <div class="small text-secondary">Visible to site admins only.</div>
+              </div>
+              <form method="post" action="" class="case-owner-transfer-form" onsubmit="return confirm('Transfer this case to the selected user? The selected user will become the case owner.');">
+                <input type="hidden" name="action" value="transfer_case_ownership">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+                <div class="d-flex flex-column flex-sm-row align-items-sm-end gap-2">
+                  <div style="min-width:min(100%,28rem);">
+                    <label class="form-label small mb-1" for="caseOwnerSelect">Change case owner</label>
+                    <select class="form-select js-case-owner-select" id="caseOwnerSelect" name="new_owner_id" required>
+                      <?php foreach ($viewOwnerCandidates as $candidate):
+                        $candidateName = trim((string)($candidate['display_name'] ?? ''));
+                        $candidateUsername = trim((string)($candidate['username'] ?? ''));
+                        $candidateEmail = trim((string)($candidate['email'] ?? ''));
+                      ?>
+                        <option value="<?php echo (int)$candidate['id']; ?>" <?php echo (int)$candidate['id'] === (int)($viewCase['created_by'] ?? 0) ? 'selected' : ''; ?>><?php echo htmlspecialchars(($candidateName !== '' ? $candidateName : 'Unnamed user') . ($candidateUsername !== '' ? ' · @' . $candidateUsername : '') . ($candidateEmail !== '' ? ' · ' . $candidateEmail : '') . ' · ID ' . (int)$candidate['id']); ?></option>
+                      <?php endforeach; ?>
+                    </select>
+                  </div>
+                  <button class="btn btn-outline-warning" type="submit"><i class="bi bi-arrow-left-right me-1"></i> Change Owner</button>
+                </div>
+              </form>
+            </div>
+
+            <div class="row g-3">
+              <div class="col-xl-6">
+                <div class="border rounded p-3 h-100">
+                  <h4 class="h6 mb-3">Current Owner</h4>
+                  <?php if ($viewOwner): ?>
+                    <div class="row g-2 small">
+                      <div class="col-sm-6"><span class="text-secondary d-block">Name</span><?php echo htmlspecialchars($ownerName !== '' ? $ownerName : 'Not recorded'); ?></div>
+                      <div class="col-sm-6"><span class="text-secondary d-block">Username</span><?php echo $ownerUsername !== '' ? '@' . htmlspecialchars($ownerUsername) : 'Not recorded'; ?></div>
+                      <div class="col-sm-6"><span class="text-secondary d-block">Email</span><?php if ($ownerEmail !== ''): ?><a href="mailto:<?php echo htmlspecialchars($ownerEmail); ?>"><?php echo htmlspecialchars($ownerEmail); ?></a><?php else: ?>Not recorded<?php endif; ?></div>
+                      <div class="col-sm-3"><span class="text-secondary d-block">User ID</span><?php echo (int)$viewOwner['id']; ?></div>
+                      <div class="col-sm-3"><span class="text-secondary d-block">Role</span><?php echo htmlspecialchars($viewOwner['role'] ?? ''); ?></div>
+                      <div class="col-sm-4"><span class="text-secondary d-block">Account Status</span><?php echo (int)($viewOwner['is_active'] ?? 0) === 1 ? 'Active' : 'Disabled'; ?></div>
+                      <div class="col-sm-4"><span class="text-secondary d-block">Account Created</span><?php echo htmlspecialchars($viewOwner['created_at'] ?? 'Not recorded'); ?></div>
+                      <div class="col-sm-4"><span class="text-secondary d-block">Last Login</span><?php echo htmlspecialchars($viewOwner['last_login_at'] ?? 'Not recorded'); ?></div>
+                    </div>
+                  <?php else: ?>
+                    <div class="text-secondary small">This case currently has no matching owner account.</div>
+                  <?php endif; ?>
+                </div>
+              </div>
+
+              <div class="col-xl-6">
+                <div class="border rounded p-3 h-100">
+                  <h4 class="h6 mb-3">Original Submission</h4>
+                  <div class="row g-2 small">
+                    <div class="col-sm-6"><span class="text-secondary d-block">Submitted By</span><?php echo htmlspecialchars($submitterName !== '' ? $submitterName : ($submitterEmail !== '' ? $submitterEmail : 'Not recorded')); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block">Submitter Username</span><?php echo $submitterUsername !== '' ? '@' . htmlspecialchars($submitterUsername) : 'Not recorded'; ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block">Submitter Email</span><?php echo htmlspecialchars($submitterEmail !== '' ? $submitterEmail : 'Not recorded'); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block"><?php echo $submissionRecorded ? 'Submitted At' : 'Case Opened'; ?></span><?php echo htmlspecialchars($submittedAt !== '' ? $submittedAt : 'Not recorded'); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block">Submitting IP Address</span><?php echo htmlspecialchars(($viewSubmissionMeta['public_ip'] ?? '') !== '' ? $viewSubmissionMeta['public_ip'] : 'Not recorded'); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block">Forwarded IP Chain</span><?php echo htmlspecialchars(($viewSubmissionMeta['forwarded_for'] ?? '') !== '' ? $viewSubmissionMeta['forwarded_for'] : 'Not recorded'); ?></div>
+                  </div>
+                  <?php if (!$submissionRecorded): ?>
+                    <div class="alert alert-secondary small mt-3 mb-0">Submission IP and geo data were not recorded for this historical case. Later case-view analytics are not being presented as submission data.</div>
+                  <?php elseif ($submitterDiffers): ?>
+                    <div class="alert alert-info small mt-3 mb-0">The original submitter differs from the current case owner because ownership has been transferred.</div>
+                  <?php endif; ?>
+                </div>
+              </div>
+
+              <?php if ($submissionRecorded): ?>
+              <div class="col-12">
+                <div class="border rounded p-3">
+                  <h4 class="h6 mb-3">Submission Geo &amp; Network Data</h4>
+                  <div class="row g-2 small">
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Location</span><?php echo htmlspecialchars($geoLocationParts ? implode(', ', $geoLocationParts) : 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Continent</span><?php echo htmlspecialchars(trim((string)($viewSubmissionGeo['geo_continent_name'] ?? '')) ?: 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Coordinates</span><?php echo htmlspecialchars($coordinates !== '' ? $coordinates : 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Timezone</span><?php echo htmlspecialchars(trim((string)($viewSubmissionGeo['geo_timezone'] ?? '')) ?: 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Currency</span><?php echo htmlspecialchars(trim((string)($viewSubmissionGeo['geo_currency'] ?? '')) ?: 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">ISP</span><?php echo htmlspecialchars(trim((string)($viewSubmissionGeo['net_isp'] ?? '')) ?: 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Network Organisation</span><?php echo htmlspecialchars(trim((string)($viewSubmissionGeo['net_org'] ?? '')) ?: 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Autonomous System</span><?php echo htmlspecialchars(trim((string)(($viewSubmissionGeo['net_as'] ?? '') . ' ' . ($viewSubmissionGeo['net_as_name'] ?? ''))) ?: 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Reverse DNS</span><?php echo htmlspecialchars(trim((string)($viewSubmissionGeo['net_reverse_dns'] ?? '')) ?: 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Geo Source</span><?php echo htmlspecialchars(trim((string)($viewSubmissionGeo['geo_source'] ?? '')) ?: 'Not recorded'); ?></div>
+                    <div class="col-md-4 col-xl-3"><span class="text-secondary d-block">Connection Flags</span><?php echo !empty($viewSubmissionGeo['is_mobile']) ? 'Mobile ' : ''; ?><?php echo !empty($viewSubmissionGeo['is_proxy']) ? 'Proxy/VPN ' : ''; ?><?php echo !empty($viewSubmissionGeo['is_hosting']) ? 'Hosting ' : ''; ?><?php echo empty($viewSubmissionGeo['is_mobile']) && empty($viewSubmissionGeo['is_proxy']) && empty($viewSubmissionGeo['is_hosting']) ? 'None recorded' : ''; ?></div>
+                    <div class="col-12"><span class="text-secondary d-block">User Agent</span><span class="text-break"><?php echo htmlspecialchars(($viewSubmissionMeta['user_agent'] ?? '') !== '' ? $viewSubmissionMeta['user_agent'] : 'Not recorded'); ?></span></div>
+                  </div>
+                </div>
+              </div>
+              <?php endif; ?>
+
+              <?php if ($viewOwnershipHistory): ?>
+              <div class="col-12">
+                <details>
+                  <summary class="small text-secondary" style="cursor:pointer;">Recent ownership changes</summary>
+                  <ul class="small mt-2 mb-0">
+                    <?php foreach ($viewOwnershipHistory as $history): ?>
+                      <li><?php echo htmlspecialchars(($history['previous_name'] ?? 'Unassigned') . ' → ' . ($history['new_name'] ?? 'Unknown user') . ' on ' . ($history['changed_at'] ?? '') . (($history['changed_by_name'] ?? '') !== '' ? ' by ' . $history['changed_by_name'] : '')); ?></li>
+                    <?php endforeach; ?>
+                  </ul>
+                </details>
+              </div>
+              <?php endif; ?>
+            </div>
+          </div>
+        </div>
+        <?php endif; ?>
         <!-- Case View Tabs -->
         <ul class="nav nav-tabs mt-3" id="caseViewTabs" role="tablist">
           <li class="nav-item" role="presentation">
@@ -8558,6 +8898,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <input type="text" name="display_name" class="form-control" placeholder="Your name" required>
                 </div>
                 <div class="mb-2">
+                  <label class="form-label">Username</label>
+                  <input type="text" name="username" class="form-control" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" placeholder="your_username" required>
+                </div>
+                <div class="mb-2">
                   <label class="form-label">Password</label>
                   <input type="password" name="password" class="form-control" minlength="8" required>
                 </div>
@@ -8612,8 +8956,21 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 <?php endif; ?>
 
   <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js"></script>
   <script src="https://cdn.datatables.net/1.13.8/js/jquery.dataTables.min.js"></script>
   <script src="https://cdn.datatables.net/1.13.8/js/dataTables.bootstrap5.min.js"></script>
+
+  <script>
+  jQuery(function ($) {
+    $('.js-case-owner-select').each(function () {
+      $(this).select2({
+        theme: 'bootstrap-5',
+        width: '100%',
+        placeholder: 'Search by name, username or email'
+      });
+    });
+  });
+  </script>
 
   <script>
   document.addEventListener('DOMContentLoaded', function () {
