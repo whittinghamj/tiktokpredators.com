@@ -4972,7 +4972,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       <td class="text-nowrap"><?php echo $evc; ?></td>
                       <td class="text-nowrap"><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
                       <td class="text-end text-nowrap">                        
-                          <a class="btn btn-primary btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-pencil-square me-1"></i>Edit</a>
+                          <a class="btn btn-primary btn-sm" href="?view=case&code=<?php echo urlencode($code); ?>#case-view"><i class="bi bi-pencil-square me-1"></i><?php echo is_admin() ? 'Review' : 'Edit'; ?></a>
                           <?php if (is_admin()): ?>
                           <button type="button" class="btn btn-danger btn-sm btn-reject-case" data-bs-toggle="modal" data-bs-target="#rejectCaseModal" data-case-id="<?php echo (int)$r['id']; ?>" data-case-code="<?php echo htmlspecialchars($code); ?>" data-case-name="<?php echo htmlspecialchars($name); ?>"><i class="bi bi-x-circle me-1"></i>Reject</button>
                           <?php endif; ?>
