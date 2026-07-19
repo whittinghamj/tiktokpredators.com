@@ -3079,6 +3079,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $case_id = (int)($_POST['case_id'] ?? 0);
     $redir_code = trim($_POST['case_code'] ?? '');
     $title = trim($_POST['title'] ?? '');
+    $titleOnly = (string)($_POST['title_only'] ?? '') === '1';
     $type = $_POST['type'] ?? 'other';
     $allowedTypes = ['image','video','audio','pdf','doc','url','other'];
     if (!in_array($type, $allowedTypes, true)) $type = 'other';
@@ -3402,33 +3403,43 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
     }
 }
 
-// Handle update evidence (admin only)
+// Handle evidence updates. Case creators may edit titles; admins retain full metadata editing.
 if (($_POST['action'] ?? '') === 'update_evidence') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
     $evidence_id = (int)($_POST['evidence_id'] ?? 0);
     $case_id = (int)($_POST['case_id'] ?? 0);
-    $ownerCan = can_manage_case_submission($pdo, $case_id);
-    if (empty($_SESSION['user']) || (!is_admin() && !$ownerCan)) {
+    $ru = trim($_POST['redirect_url'] ?? '');
+    if ($evidence_id <= 0 || $case_id <= 0) { flash('error', 'Invalid evidence.'); if ($ru !== '') { header('Location: '.$ru); exit; } header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $prevEv = [];
+    try {
+        $ps = $pdo->prepare('SELECT e.title, e.type, e.filepath, c.created_by AS case_created_by FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? AND e.case_id = ? LIMIT 1');
+        $ps->execute([$evidence_id, $case_id]);
+        $prevEv = $ps->fetch() ?: [];
+    } catch (Throwable $e) {}
+    $isCaseCreator = !empty($_SESSION['user'])
+        && (int)($prevEv['case_created_by'] ?? 0) > 0
+        && (int)($prevEv['case_created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
+    if (!$prevEv || empty($_SESSION['user']) || (!is_admin() && !$isCaseCreator)) {
         flash('error', 'Unauthorized.');
+        if ($ru !== '') { header('Location: '.$ru); exit; }
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
     $title = trim($_POST['title'] ?? '');
     $type = $_POST['type'] ?? 'other';
     $allowedTypes = ['image','video','audio','pdf','doc','url','other'];
     if (!in_array($type, $allowedTypes, true)) $type = 'other';
-
-    if ($evidence_id <= 0 || $case_id <= 0) { flash('error', 'Invalid evidence.'); $ru = trim($_POST['redirect_url'] ?? ''); if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-
-    $prevEv = [];
-    try { $ps = $pdo->prepare('SELECT title, type, filepath FROM evidence WHERE id = ? AND case_id = ? LIMIT 1'); $ps->execute([$evidence_id, $case_id]); $prevEv = $ps->fetch() ?: []; } catch (Throwable $e) {}
     try {
-        if ($type === 'url') {
+        if (!is_admin() || $titleOnly) {
+            $type = (string)($prevEv['type'] ?? 'other');
+            $u = $pdo->prepare('UPDATE evidence SET title = ? WHERE id = ? AND case_id = ? LIMIT 1');
+            $u->execute([$title, $evidence_id, $case_id]);
+        } elseif ($type === 'url') {
             $url = trim($_POST['url_value'] ?? '');
             if ($url === '' || !filter_var($url, FILTER_VALIDATE_URL)) {
                 flash('error', 'Please provide a valid URL.');
-                $ru = trim($_POST['redirect_url'] ?? '');
                 if ($ru!==''){ header('Location: '.$ru); exit; }
                 header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
             }
@@ -3462,8 +3473,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
         }
         $changes = [];
         if (($prevEv['title'] ?? '') !== $title) { $changes[] = 'title: '.mb_strimwidth($prevEv['title'] ?? '',0,60,'…','UTF-8').' → '.mb_strimwidth($title,0,60,'…','UTF-8'); }
-        if (($prevEv['type'] ?? '') !== $type) { $changes[] = 'type: '.($prevEv['type'] ?? '').' → '.$type; }
-        if ($type === 'url' && ($prevEv['filepath'] ?? '') !== ($url ?? '')) { $changes[] = 'url updated'; }
+        if (is_admin() && !$titleOnly && ($prevEv['type'] ?? '') !== $type) { $changes[] = 'type: '.($prevEv['type'] ?? '').' → '.$type; }
+        if (is_admin() && !$titleOnly && $type === 'url' && ($prevEv['filepath'] ?? '') !== ($url ?? '')) { $changes[] = 'url updated'; }
         if ($changes) {
             log_case_event($pdo, $case_id, 'evidence_updated', $title !== '' ? $title : ($prevEv['title'] ?? ''), implode('; ', $changes), $evidence_id, null);
         }
@@ -3475,7 +3486,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
 log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to update evidence.');
     }
-    $ru = trim($_POST['redirect_url'] ?? ''); if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
 
 // Handle delete evidence (admin only)
@@ -6714,6 +6725,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       // Capability: can this user add evidence?
       $tp_canAddEvidence = false;
       $tp_isCaseOwner = false;
+      $tp_canEditCaseEvidence = false;
       $tp_canRunAiBuilder = false;
       $tp_canViewAiBuilder = false;
       $tp_aiRuns = [];
@@ -6724,6 +6736,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             && (int)($viewCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
           if (($_SESSION['user']['role'] ?? '') === 'admin') {
               $tp_canAddEvidence = true;
+              $tp_canEditCaseEvidence = !empty($viewCase);
               $tp_canRunAiBuilder = !empty($viewCase);
               $tp_canViewAiBuilder = !empty($viewCase);
           } elseif (!empty($viewCase) && in_array(($viewCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true)) {
@@ -6732,6 +6745,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               $tp_canViewAiBuilder = $tp_isCaseOwner;
               $tp_canRunAiBuilder = $tp_isCaseOwner && (($viewCase['status'] ?? '') === 'Being Built');
           }
+          if ($tp_isCaseOwner) { $tp_canEditCaseEvidence = true; }
       }
       if ($tp_canViewAiBuilder && $viewCaseId > 0) {
         try {
@@ -7366,7 +7380,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       <thead>
                         <tr>
                           <th>Title</th>
-                          <th>Tyle</th>
+                          <th>Type</th>
                           <th class="text-end">Actions</th>
                         </tr>
                       </thead>
@@ -7383,12 +7397,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                           data-id="<?php echo (int)$e['id']; ?>"
                                           data-case-id="<?php echo (int)$viewCaseId; ?>"
                                           data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
-                                          data-title="<?php echo htmlspecialchars($e['title'] ?? 'Note'); ?>">
+                                          data-title="<?php echo htmlspecialchars(is_logged_in() ? ($e['title'] ?? 'Note') : 'Evidence'); ?>">
                                     View
                                   </button>
-                                  <?php if (is_admin()): ?>
+                                  <?php if ($tp_canEditCaseEvidence): ?>
                                     <div class="btn-group ms-1">
-                                      <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal" data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">Edit</button>
+                                      <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal" data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">Edit</button>
+                                      <?php if (is_admin()): ?>
                                       <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
                                         <input type="hidden" name="action" value="delete_evidence">
                                         <?php csrf_field(); ?>
@@ -7397,6 +7412,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                         <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
                                         <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
                                       </form>
+                                      <?php endif; ?>
                                     </div>
                                   <?php endif; ?>
                                 <?php } else {
@@ -7407,12 +7423,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                          target="_blank" rel="noopener">
                                         Open
                                       </a>
-                                      <?php if (is_admin()): ?>
+                                      <?php if ($tp_canEditCaseEvidence): ?>
                                         <div class="btn-group ms-1">
                                           <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                                  data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1" data-url="1">
+                                                  data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-url="1">
                                             Edit
                                           </button>
+                                          <?php if (is_admin()): ?>
                                           <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
                                             <input type="hidden" name="action" value="delete_evidence">
                                             <?php csrf_field(); ?>
@@ -7421,6 +7438,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                             <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
                                             <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
                                           </form>
+                                          <?php endif; ?>
                                         </div>
                                       <?php endif; ?>
                                     <?php } else { ?>
@@ -7429,17 +7447,18 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                               data-id="<?php echo (int)$e['id']; ?>"
                                               data-case-id="<?php echo (int)$viewCaseId; ?>"
                                               data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
-                                              data-title="<?php echo htmlspecialchars($e['title']); ?>"
+                                              data-title="<?php echo htmlspecialchars(is_logged_in() ? $e['title'] : 'Evidence'); ?>"
                                               data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
                                               data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
                                         View
                                     </button>
-                                    <?php if (is_admin()): ?>
+                                    <?php if ($tp_canEditCaseEvidence): ?>
                                       <div class="btn-group ms-1">
                                         <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                                data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                                data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
                                           Edit
                                         </button>
+                                        <?php if (is_admin()): ?>
                                         <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
                                           <input type="hidden" name="action" value="delete_evidence">
                                           <?php csrf_field(); ?>
@@ -7448,6 +7467,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                           <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
                                           <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
                                         </form>
+                                        <?php endif; ?>
                                       </div>
                                     <?php endif; ?>
                                   <?php } ?>
@@ -8348,9 +8368,15 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
     <?php endif; ?>
   <?php endif; ?>
 
+  <?php
+    $tp_showEvidenceEditor = is_admin() || (($view ?? '') === 'case' && !empty($tp_canEditCaseEvidence));
+    $tp_evidenceEditRedirect = (($view ?? '') === 'case' && !empty($caseCode))
+      ? ('?view=case&code=' . rawurlencode($caseCode) . '#case-view')
+      : (string)($_SERVER['REQUEST_URI'] ?? '/');
+  ?>
   <!-- Global Evidence Viewer / Editor Modal -->
   <div class="modal fade evidence-modal" id="evidenceModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog modal-xl modal-dialog-centered">
+    <div class="modal-dialog modal-lg modal-fullscreen-md-down modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content">
         <div class="modal-header">
           <h5 class="modal-title"><i class="bi bi-file-earmark-text me-2"></i><span id="evModalTitle">Evidence</span></h5>
@@ -8358,47 +8384,36 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         </div>
         <div class="modal-body">
           <div class="row g-3">
-            <div class="col-lg-8">
-              <div id="evPreview" class="ratio ratio-16x9 bg-dark d-flex align-items-center justify-content-center rounded">
+            <div class="col-12" id="evPreviewColumn">
+              <div id="evPreview" class="ratio ratio-16x9 bg-dark d-flex align-items-center justify-content-center rounded overflow-hidden">
                 <div class="text-secondary small">No preview available</div>
               </div>
-              <div class="mt-2 small text-secondary"><span id="evSize">—</span></div>
             </div>
-            <div class="col-lg-4">
-              <?php if (is_admin()): ?>
+            <?php if ($tp_showEvidenceEditor): ?>
+            <div class="col-lg-4 d-none" id="evEditPanel">
               <div class="card glass">
                 <div class="card-body">
-                  <h6 class="mb-2">Edit Evidence</h6>
+                  <h6 class="mb-3">Edit Evidence Title</h6>
                   <form method="post" action="" id="evEditForm">
                     <input type="hidden" name="action" value="update_evidence">
+                    <input type="hidden" name="title_only" value="1">
                     <?php csrf_field(); ?>
                     <input type="hidden" name="evidence_id" id="evId">
                     <input type="hidden" name="case_id" id="evCaseId">
+                    <input type="hidden" name="redirect_url" value="<?php echo htmlspecialchars($tp_evidenceEditRedirect); ?>">
                     <div class="mb-2">
                       <label class="form-label">Title</label>
-                      <input type="text" name="title" id="evTitle" class="form-control">
+                      <input type="text" name="title" id="evTitle" class="form-control" required>
                     </div>
-                    <div class="mb-2">
-                      <label class="form-label">Type</label>
-                      <select name="type" id="evType" class="form-select">
-                        <option value="image">Image</option>
-                        <option value="video">Video</option>
-                        <option value="audio">Audio</option>
-                        <option value="pdf">PDF</option>
-                        <option value="doc">Document</option>
-                        <option value="other">Other</option>
-                      </select>
-                    </div>
+                    <input type="hidden" name="type" id="evType" value="other">
                     <div class="d-grid">
-                      <button class="btn btn-primary" type="submit"><i class="bi bi-save me-1"></i> Save</button>
+                      <button class="btn btn-primary" type="submit"><i class="bi bi-save me-1"></i> Save Title</button>
                     </div>
                   </form>
                 </div>
               </div>
-              <?php else: ?>
-              
-              <?php endif; ?>
             </div>
+            <?php endif; ?>
           </div>
         </div>
         <div class="modal-footer">
@@ -8656,6 +8671,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         var type = btn.getAttribute('data-type') || '';
         var id = btn.getAttribute('data-id') || '';
         var caseId = btn.getAttribute('data-case-id') || '';
+        var isEditMode = btn.classList.contains('btn-edit-evidence');
+        var showEvidenceTitles = <?php echo is_logged_in() ? 'true' : 'false'; ?>;
   
         // Fallbacks
         if (!type && mime.indexOf('/') > -1) type = mime.split('/')[0];
@@ -8666,9 +8683,16 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
   
         // Set header fields
         var titleEl = document.getElementById('evModalTitle');
-        if (titleEl) titleEl.textContent = title;
-        var sizeEl = document.getElementById('evSize');
-        if (sizeEl) sizeEl.textContent = '';
+        if (titleEl) titleEl.textContent = showEvidenceTitles ? title : 'Evidence';
+
+        // Viewing is evidence-only. Editing is a separate creator/admin action.
+        var previewColumn = document.getElementById('evPreviewColumn');
+        var editPanel = document.getElementById('evEditPanel');
+        if (previewColumn) {
+          previewColumn.classList.toggle('col-lg-8', isEditMode && !!editPanel);
+          previewColumn.classList.toggle('col-12', !isEditMode || !editPanel);
+        }
+        if (editPanel) editPanel.classList.toggle('d-none', !isEditMode);
   
         // Render preview
         var preview = document.getElementById('evPreview');
@@ -8700,12 +8724,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         var evCaseId = document.getElementById('evCaseId');
         var evTitle = document.getElementById('evTitle');
         var evType = document.getElementById('evType');
-        if (evId && evCaseId && evTitle && evType) {
+        if (isEditMode && evId && evCaseId && evTitle && evType) {
           evId.value = id;
           evCaseId.value = caseId;
           evTitle.value = title;
-          if (evType.querySelector('option[value="'+type+'"]')) {
+          if (evType.tagName === 'SELECT' && evType.querySelector('option[value="'+type+'"]')) {
             evType.value = type;
+          } else if (evType.tagName !== 'SELECT') {
+            evType.value = type || 'other';
           }
         }
       });
@@ -8716,6 +8742,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           preview.innerHTML = '<div class="text-secondary small">No preview available</div>';
           preview.classList.add('ratio','ratio-16x9');
         }
+        var previewColumn = document.getElementById('evPreviewColumn');
+        var editPanel = document.getElementById('evEditPanel');
+        if (previewColumn) {
+          previewColumn.classList.remove('col-lg-8');
+          previewColumn.classList.add('col-12');
+        }
+        if (editPanel) editPanel.classList.add('d-none');
       });
     })();
   
