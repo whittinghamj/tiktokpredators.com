@@ -4696,6 +4696,31 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     .select2-container--bootstrap-5 .select2-results__option {
       color: #f8f9fa !important;
     }
+    #case-owner-details .case-owner-transfer-form,
+    #case-owner-details .case-owner-transfer-controls,
+    #case-owner-details .case-owner-select-wrap {
+      min-width: 0;
+    }
+    #case-owner-details .case-owner-transfer-form {
+      width: 100%;
+    }
+    #case-owner-details .case-owner-select-wrap {
+      flex: 1 1 auto;
+      width: 100%;
+    }
+    #case-owner-details .case-owner-select-wrap .select2-container {
+      min-width: 0;
+      max-width: 100%;
+    }
+    #case-owner-details .case-owner-transfer-controls .btn {
+      flex: 0 0 auto;
+    }
+    @media (min-width: 992px) {
+      #case-owner-details .case-owner-transfer-form {
+        flex: 1 1 auto;
+        width: auto;
+      }
+    }
     .select2-container--bootstrap-5 .select2-results__option--selected {
       background-color: #343a40 !important;
     }
@@ -8089,8 +8114,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 <?php csrf_field(); ?>
                 <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
                 <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
-                <div class="d-flex flex-column flex-sm-row align-items-sm-end gap-2">
-                  <div style="min-width:min(100%,28rem);">
+                <div class="case-owner-transfer-controls d-flex flex-column flex-sm-row align-items-sm-end gap-2">
+                  <div class="case-owner-select-wrap">
                     <label class="form-label small mb-1" for="caseOwnerSelect">Change case owner</label>
                     <select class="form-select js-case-owner-select" id="caseOwnerSelect" name="new_owner_id" required>
                       <?php foreach ($viewOwnerCandidates as $candidate):
