@@ -2947,6 +2947,68 @@ if (in_array(($_POST['action'] ?? ''), ['submit_case_for_review', 'resubmit_case
     header('Location: ?view=pending#pending-review'); exit;
 }
 
+// Pull a published verified case back into the private Being Built workflow.
+if (($_POST['action'] ?? '') === 'return_published_case_to_building') {
+    throttle();
+    if (!check_csrf()) {
+        flash('error', 'Security check failed.');
+        header('Location: ?view=pending#published-cases'); exit;
+    }
+    if (empty($_SESSION['user'])) {
+        flash('error', 'You must be logged in to update this case.');
+        header('Location: ?view=pending#published-cases'); exit;
+    }
+
+    $caseId = (int)($_POST['case_id'] ?? 0);
+    $caseCode = trim((string)($_POST['case_code'] ?? ''));
+    try {
+        $pdo->beginTransaction();
+        $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
+        $caseStmt->execute([$caseId, $caseCode]);
+        $caseToBuild = $caseStmt->fetch();
+        $isCaseOwner = $caseToBuild
+            && (int)($caseToBuild['created_by'] ?? 0) > 0
+            && (int)($caseToBuild['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
+        if (!$caseToBuild || (!is_admin() && !$isCaseOwner)) {
+            $pdo->rollBack();
+            flash('error', 'Only the case owner or a site admin can return this case to Being Built.');
+        } elseif (($caseToBuild['status'] ?? '') !== 'Verified') {
+            $pdo->rollBack();
+            flash('error', 'Only verified published cases can be returned to Being Built.');
+        } else {
+            $updateStmt = $pdo->prepare("UPDATE cases SET status = 'Being Built', rejection_reason = NULL, rejected_at = NULL, rejected_by = NULL, resubmitted_at = NULL, closed_at = NULL WHERE id = ? AND status = 'Verified' LIMIT 1");
+            $updateStmt->execute([$caseId]);
+            if ($updateStmt->rowCount() !== 1) {
+                $pdo->rollBack();
+                flash('error', 'The case status changed before it could be returned to Being Built.');
+            } else {
+                $caseName = trim((string)($caseToBuild['case_name'] ?? ''));
+                log_case_event($pdo, $caseId, 'case_returned_to_building', $caseName !== '' ? $caseName : $caseCode, 'Published case removed from public view and returned to Being Built for updates.');
+                $ownerId = (int)($caseToBuild['created_by'] ?? 0);
+                if (is_admin() && $ownerId > 0 && $ownerId !== (int)($_SESSION['user']['id'] ?? 0)) {
+                    tp_create_user_notification(
+                        $pdo,
+                        $ownerId,
+                        'case_returned_to_building',
+                        'Case returned to Being Built: ' . $caseCode,
+                        'A site admin removed this case from public view and returned it to Being Built so you can update its details or evidence before submitting it for approval again.',
+                        $caseId
+                    );
+                }
+                $pdo->commit();
+                flash('success', 'Case removed from public view and returned to Being Built.');
+                log_console('SUCCESS', 'Published case returned to Being Built: ' . $caseCode . ' by user_id ' . (int)($_SESSION['user']['id'] ?? 0));
+            }
+        }
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to return the case to Being Built.');
+    }
+    header('Location: ?view=pending#published-cases'); exit;
+}
+
 if (($_POST['action'] ?? '') === 'mark_notifications_read') {
     if (!check_csrf() || empty($_SESSION['user'])) {
         flash('error', 'Unable to update notifications.');
@@ -5637,6 +5699,85 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             </div>
           </div>
         </div>
+        <div class="col-12" id="published-cases">
+          <div class="card glass border-success">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between mb-3">
+                <div>
+                  <h2 class="h5 mb-1"><i class="bi bi-patch-check-fill me-2 text-success"></i>Approved / Verified / Published</h2>
+                  <p class="small text-secondary mb-0"><?php echo is_admin() ? 'Cases that completed review, were verified, and are currently visible on the public site.' : 'Your cases that completed review, were verified, and are currently visible on the public site.'; ?></p>
+                </div>
+                <span class="badge text-bg-success">Published</span>
+              </div>
+              <?php
+                $publishedRows = [];
+                try {
+                  $publishedSql = "
+                    SELECT c.id, c.case_code, c.case_name, c.person_name, c.created_by, c.updated_at,
+                           u.display_name AS creator_name,
+                           COALESCE(ev.cnt, 0) AS evidence_count,
+                           COALESCE(ev.last_added, c.updated_at, c.opened_at) AS last_activity
+                    FROM cases c
+                    LEFT JOIN (
+                      SELECT case_id, COUNT(*) AS cnt, MAX(created_at) AS last_added
+                      FROM evidence GROUP BY case_id
+                    ) ev ON ev.case_id = c.id
+                    LEFT JOIN users u ON u.id = c.created_by
+                    WHERE c.status = 'Verified'
+                  ";
+                  $publishedParams = [];
+                  if ($pendingTagFilter !== '') {
+                    $publishedSql .= " AND EXISTS (SELECT 1 FROM case_tag_links ctl_filter JOIN case_tags ct_filter ON ct_filter.id = ctl_filter.tag_id WHERE ctl_filter.case_id = c.id AND ct_filter.slug = ?)";
+                    $publishedParams[] = $pendingTagFilter;
+                  }
+                  if (!is_admin()) {
+                    $publishedSql .= ' AND c.created_by = ?';
+                    $publishedParams[] = (int)($_SESSION['user']['id'] ?? 0);
+                  }
+                  $publishedSql .= ' ORDER BY c.updated_at DESC, c.opened_at DESC';
+                  $publishedStmt = $pdo->prepare($publishedSql);
+                  $publishedStmt->execute($publishedParams);
+                  $publishedRows = $publishedStmt->fetchAll() ?: [];
+                } catch (Throwable $e) {
+                  $_SESSION['sql_error'] = $e->getMessage();
+                }
+              ?>
+              <?php if ($publishedRows): ?>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle mb-0">
+                    <thead><tr><th>Case</th><th>Owner</th><th>Subject</th><th>Tags</th><th>Evidence</th><th>Published / Updated</th><th class="text-end">Actions</th></tr></thead>
+                    <tbody>
+                      <?php foreach ($publishedRows as $publishedCase):
+                        $publishedTags = get_case_tags($pdo, (int)$publishedCase['id']);
+                      ?>
+                        <tr>
+                          <td><div class="fw-semibold"><?php echo htmlspecialchars($publishedCase['case_name'] ?: $publishedCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($publishedCase['case_code']); ?></div></td>
+                          <td><?php echo htmlspecialchars(trim((string)($publishedCase['creator_name'] ?? '')) ?: '—'); ?></td>
+                          <td><?php echo htmlspecialchars(trim((string)($publishedCase['person_name'] ?? '')) ?: '—'); ?></td>
+                          <td><?php echo render_case_tag_badges($publishedTags, '<span class="text-secondary">&mdash;</span>'); ?></td>
+                          <td><?php echo (int)($publishedCase['evidence_count'] ?? 0); ?></td>
+                          <td class="text-nowrap"><?php echo !empty($publishedCase['updated_at']) ? htmlspecialchars(date('d M Y H:i', strtotime($publishedCase['updated_at']))) : '—'; ?></td>
+                          <td class="text-end text-nowrap">
+                            <a class="btn btn-outline-light btn-sm" href="?view=case&amp;code=<?php echo urlencode($publishedCase['case_code']); ?>#case-view"><i class="bi bi-eye me-1"></i>View</a>
+                            <form method="post" action="" class="d-inline" onsubmit="return confirm('Remove this case from public view and return it to Being Built? It must be submitted and approved again before it will be published.');">
+                              <input type="hidden" name="action" value="return_published_case_to_building">
+                              <?php csrf_field(); ?>
+                              <input type="hidden" name="case_id" value="<?php echo (int)$publishedCase['id']; ?>">
+                              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($publishedCase['case_code']); ?>">
+                              <button type="submit" class="btn btn-outline-warning btn-sm"><i class="bi bi-tools me-1"></i>Return to Building</button>
+                            </form>
+                          </td>
+                        </tr>
+                      <?php endforeach; ?>
+                    </tbody>
+                  </table>
+                </div>
+              <?php else: ?>
+                <div class="alert alert-secondary mb-0">No verified published cases to show.</div>
+              <?php endif; ?>
+            </div>
+          </div>
+        </div>
         <div class="col-12" id="rejected-cases">
           <div class="card glass border-danger">
             <div class="card-body">
@@ -7127,8 +7268,6 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   </div>
                   <?php if (!$submissionRecorded): ?>
                     <div class="alert alert-secondary small mt-3 mb-0">Submission IP and geo data were not recorded for this historical case. Later case-view analytics are not being presented as submission data.</div>
-                  <?php elseif ($submitterDiffers): ?>
-                    <div class="alert alert-info small mt-3 mb-0">The original submitter differs from the current case owner because ownership has been transferred.</div>
                   <?php endif; ?>
                 </div>
               </div>
@@ -7247,6 +7386,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                             'case_rejected' => 'Case rejected',
                             'case_resubmitted' => 'Case resubmitted',
                             'case_submitted_for_review' => 'Submitted for review',
+                            'case_returned_to_building' => 'Returned to Being Built',
                             'evidence_added' => 'Evidence added',
                             'evidence_updated' => 'Evidence updated',
                             'evidence_deleted' => 'Evidence deleted',
