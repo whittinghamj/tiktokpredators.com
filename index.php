@@ -4028,14 +4028,69 @@ if (($_POST['action'] ?? '') === 'delete_removal') {
     $rid = (int)($_POST['removal_id'] ?? 0);
     if ($rid <= 0) { flash('error', 'Invalid request.'); header('Location: ?view=removal#removal'); exit; }
     try {
-        $d = $pdo->prepare('DELETE FROM removal_requests WHERE id = ? LIMIT 1');
-        $d->execute([$rid]);
-        flash('success', 'Removal request deleted.');
-        log_console('SUCCESS', 'Removal request #' . $rid . ' deleted');
+        $d = $pdo->prepare('DELETE FROM removal_requests WHERE id = ? AND status <> ? LIMIT 1');
+        $d->execute([$rid, 'Approved / Closed']);
+        if ($d->rowCount() > 0) {
+            flash('success', 'Removal request deleted.');
+            log_console('SUCCESS', 'Removal request #' . $rid . ' deleted');
+        } else {
+            flash('error', 'Removal request not found or it is Approved / Closed and cannot be deleted.');
+        }
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
         log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to delete removal request.');
+    }
+    header('Location: ?view=removal#removal'); exit;
+}
+
+// Handle bulk delete removal requests (admin only)
+if (($_POST['action'] ?? '') === 'bulk_delete_removals') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ?view=removal#removal'); exit; }
+    if (!is_admin()) { flash('error', 'Unauthorized.'); header('Location: ?view=removal#removal'); exit; }
+
+    $submittedIds = $_POST['removal_ids'] ?? [];
+    $removalIds = [];
+    if (is_array($submittedIds)) {
+        foreach ($submittedIds as $submittedId) {
+            if (!is_string($submittedId) && !is_int($submittedId)) { continue; }
+            $submittedId = (string)$submittedId;
+            if (!ctype_digit($submittedId)) { continue; }
+            $removalId = (int)$submittedId;
+            if ($removalId > 0) { $removalIds[$removalId] = $removalId; }
+            if (count($removalIds) >= 200) { break; }
+        }
+    }
+    $removalIds = array_values($removalIds);
+
+    if (!$removalIds) {
+        flash('error', 'Select at least one removal request to delete.');
+        header('Location: ?view=removal#removal'); exit;
+    }
+
+    try {
+        $placeholders = implode(',', array_fill(0, count($removalIds), '?'));
+        $params = array_merge($removalIds, ['Approved / Closed']);
+        $d = $pdo->prepare('DELETE FROM removal_requests WHERE id IN (' . $placeholders . ') AND status <> ?');
+        $d->execute($params);
+        $deletedCount = $d->rowCount();
+        $skippedCount = count($removalIds) - $deletedCount;
+
+        if ($deletedCount > 0) {
+            $message = $deletedCount . ' removal request' . ($deletedCount === 1 ? '' : 's') . ' deleted.';
+            if ($skippedCount > 0) {
+                $message .= ' ' . $skippedCount . ' locked or missing request' . ($skippedCount === 1 ? ' was' : 's were') . ' skipped.';
+            }
+            flash('success', $message);
+            log_console('SUCCESS', 'Bulk deleted removal request IDs: ' . implode(',', $removalIds));
+        } else {
+            flash('error', 'None of the selected requests could be deleted. Approved / Closed requests are locked.');
+        }
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to delete the selected removal requests.');
     }
     header('Location: ?view=removal#removal'); exit;
 }
@@ -4941,6 +4996,16 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
         <div class="card glass">
           <div class="card-header d-flex align-items-center justify-content-between">
             <h5 class="mb-0"><i class="bi bi-inbox me-2"></i>Removal Requests</h5>
+            <?php if ($reqs): ?>
+              <form method="post" action="" id="bulkRemovalDeleteForm" class="m-0">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="action" value="bulk_delete_removals">
+                <button type="submit" class="btn btn-danger btn-sm" id="bulkRemovalDeleteButton" disabled>
+                  <i class="bi bi-trash me-1"></i>Delete selected
+                  <span class="badge text-bg-light ms-1" id="bulkRemovalSelectedCount">0</span>
+                </button>
+              </form>
+            <?php endif; ?>
           </div>
           <div class="card-body">
             <?php if (!$reqs): ?>
@@ -4950,6 +5015,9 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                 <table class="table align-middle table-hover">
                   <thead>
                     <tr>
+                      <th scope="col" style="width:2.5rem;">
+                        <input type="checkbox" class="form-check-input" id="selectAllRemovalRequests" aria-label="Select all deletable removal requests">
+                      </th>
                       <th scope="col">#</th>
                       <th scope="col">Submitted</th>
                       <th scope="col">Name</th>
@@ -4961,8 +5029,23 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                   </thead>
                   <tbody>
                     <?php foreach ($reqs as $r): ?>
-                      <?php $rowTargetUrl = trim((string)($r['target_url'] ?? '')); $rowTargetUrlIsSafe = tp_valid_public_http_url($rowTargetUrl); ?>
+                      <?php
+                        $rowTargetUrl = trim((string)($r['target_url'] ?? ''));
+                        $rowTargetUrlIsSafe = tp_valid_public_http_url($rowTargetUrl);
+                        $isLocked = (($r['status'] ?? '') === 'Approved / Closed');
+                      ?>
                       <tr>
+                        <td>
+                          <input
+                            type="checkbox"
+                            class="form-check-input removal-request-checkbox"
+                            name="removal_ids[]"
+                            value="<?php echo (int)$r['id']; ?>"
+                            form="bulkRemovalDeleteForm"
+                            aria-label="Select removal request #<?php echo (int)$r['id']; ?>"
+                            <?php echo $isLocked ? 'disabled title="Approved / Closed requests cannot be deleted"' : ''; ?>
+                          >
+                        </td>
                         <td><?php echo (int)$r['id']; ?></td>
                         <td class="small text-secondary"><?php echo htmlspecialchars($r['created_at']); ?></td>
                         <td><?php echo htmlspecialchars($r['full_name']); ?></td>
@@ -5005,8 +5088,6 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                             <a class="btn btn-sm btn-outline-primary" href="?view=removal_request&amp;id=<?php echo (int)$r['id']; ?>#removal-request">
                               <i class="bi bi-eye me-1"></i>View
                             </a>
-                            <?php $isLocked = (($row['status'] ?? $r['status'] ?? '') === 'Approved / Closed'); ?>
-
                             <form method="post" action="" onsubmit="return confirm('Delete this removal request?');">
                                 <?php csrf_field(); ?>
                                 <input type="hidden" name="action" value="delete_removal">
@@ -5081,6 +5162,43 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
             <?php endif; ?>
           </div>
         </div>
+        <?php if ($reqs): ?>
+          <script>
+          (function () {
+            var selectAll = document.getElementById('selectAllRemovalRequests');
+            var checkboxes = Array.prototype.slice.call(document.querySelectorAll('.removal-request-checkbox:not(:disabled)'));
+            var form = document.getElementById('bulkRemovalDeleteForm');
+            var button = document.getElementById('bulkRemovalDeleteButton');
+            var countBadge = document.getElementById('bulkRemovalSelectedCount');
+
+            if (!selectAll || !form || !button || !countBadge) return;
+
+            function updateBulkRemovalControls() {
+              var selectedCount = checkboxes.filter(function (checkbox) { return checkbox.checked; }).length;
+              countBadge.textContent = String(selectedCount);
+              button.disabled = selectedCount === 0;
+              selectAll.checked = checkboxes.length > 0 && selectedCount === checkboxes.length;
+              selectAll.indeterminate = selectedCount > 0 && selectedCount < checkboxes.length;
+              selectAll.disabled = checkboxes.length === 0;
+            }
+
+            selectAll.addEventListener('change', function () {
+              checkboxes.forEach(function (checkbox) { checkbox.checked = selectAll.checked; });
+              updateBulkRemovalControls();
+            });
+            checkboxes.forEach(function (checkbox) {
+              checkbox.addEventListener('change', updateBulkRemovalControls);
+            });
+            form.addEventListener('submit', function (event) {
+              var selectedCount = checkboxes.filter(function (checkbox) { return checkbox.checked; }).length;
+              if (selectedCount === 0 || !confirm('Delete ' + selectedCount + ' selected removal request' + (selectedCount === 1 ? '' : 's') + '?')) {
+                event.preventDefault();
+              }
+            });
+            updateBulkRemovalControls();
+          })();
+          </script>
+        <?php endif; ?>
       <?php endif; ?>
     </div>
   </main>
