@@ -79,7 +79,97 @@ if (empty($_SESSION['csrf_token'])) {
     $_SESSION['csrf_token'] = bin2hex(random_bytes(32));
 }
 function csrf_field(){ echo '<input type="hidden" name="csrf_token" value="'.htmlspecialchars($_SESSION['csrf_token']).'">'; }
-function check_csrf(){ return isset($_POST['csrf_token']) && hash_equals($_SESSION['csrf_token'] ?? '', $_POST['csrf_token']); }
+function check_csrf(){
+    $submitted = $_POST['csrf_token'] ?? '';
+    return is_string($submitted) && hash_equals((string)($_SESSION['csrf_token'] ?? ''), $submitted);
+}
+
+/** Read a scalar POST field without allowing arrays to reach string functions. */
+function tp_post_string(string $key): string {
+    $value = $_POST[$key] ?? '';
+    return is_string($value) ? trim($value) : '';
+}
+
+/**
+ * Reject malformed/control-character input and common code-execution probes.
+ * Submitted text is still treated as data, stored through prepared statements,
+ * and escaped when rendered; this is an additional abuse filter.
+ */
+function tp_valid_public_text(string $value, int $maxLength, bool $allowNewlines = false): bool {
+    if ($value === '' || !mb_check_encoding($value, 'UTF-8')) { return false; }
+    if (mb_strlen($value, 'UTF-8') > $maxLength) { return false; }
+
+    $controlPattern = $allowNewlines
+        ? '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/'
+        : '/[\x00-\x1F\x7F]/';
+    if (preg_match($controlPattern, $value)) { return false; }
+
+    return !preg_match(
+        '/<\?(?:php|=)|\b(?:assert|eval|system|exec|shell_exec|passthru|base64_decode|gethostbyname)\s*\(|\bchr\s*\(\s*(?:hex\s*\()?/i',
+        $value
+    );
+}
+
+/** Only allow links an admin can safely open in a browser. */
+function tp_valid_public_http_url(string $url): bool {
+    if ($url === ''
+        || strlen($url) > 2048
+        || preg_match('/[\x00-\x20\x7F]/', $url)
+        || !filter_var($url, FILTER_VALIDATE_URL)
+    ) { return false; }
+    $parts = parse_url($url);
+    if (!is_array($parts)) { return false; }
+    $scheme = strtolower((string)($parts['scheme'] ?? ''));
+    $host = trim((string)($parts['host'] ?? ''));
+    return in_array($scheme, ['http', 'https'], true)
+        && $host !== ''
+        && !isset($parts['user'])
+        && !isset($parts['pass']);
+}
+
+/** Create one short-lived, session-bound addition challenge per public form. */
+function tp_math_captcha_question(string $purpose): string {
+    $challenge = $_SESSION['math_captcha'][$purpose] ?? null;
+    if (!is_array($challenge)
+        || !isset($challenge['left'], $challenge['right'], $challenge['answer'], $challenge['created_at'])
+        || (time() - (int)$challenge['created_at']) > 900
+    ) {
+        $left = random_int(2, 9);
+        $right = random_int(2, 9);
+        $challenge = [
+            'left' => $left,
+            'right' => $right,
+            'answer' => $left + $right,
+            'created_at' => time(),
+        ];
+        $_SESSION['math_captcha'][$purpose] = $challenge;
+    }
+    return (int)$challenge['left'] . ' + ' . (int)$challenge['right'];
+}
+
+function tp_math_captcha_field(string $purpose): void {
+    static $renderCount = 0;
+    $renderCount++;
+    $inputId = 'math_captcha_' . preg_replace('/[^a-z0-9_-]/i', '_', $purpose) . '_' . $renderCount;
+    echo '<div class="mb-3">';
+    echo '<label class="form-label" for="' . htmlspecialchars($inputId) . '">Security check: What is '
+        . htmlspecialchars(tp_math_captcha_question($purpose)) . '?</label>';
+    echo '<input type="text" class="form-control" id="' . htmlspecialchars($inputId)
+        . '" name="captcha_answer" inputmode="numeric" pattern="[0-9]+" maxlength="3" autocomplete="off" required>';
+    echo '</div>';
+}
+
+/** Validate and consume the challenge so an answer cannot be replayed. */
+function tp_check_math_captcha(string $purpose): bool {
+    $challenge = $_SESSION['math_captcha'][$purpose] ?? null;
+    unset($_SESSION['math_captcha'][$purpose]);
+    $submitted = $_POST['captcha_answer'] ?? '';
+    if (!is_array($challenge) || !is_string($submitted)) { return false; }
+    $submitted = trim($submitted);
+    if ($submitted === '' || strlen($submitted) > 3 || !ctype_digit($submitted)) { return false; }
+    if ((time() - (int)($challenge['created_at'] ?? 0)) > 900) { return false; }
+    return (int)$submitted === (int)($challenge['answer'] ?? -1);
+}
 
 // VERY simple throttle (per-session)
 $_SESSION['auth_attempts'] = $_SESSION['auth_attempts'] ?? 0;
@@ -2086,25 +2176,30 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
 if (($_POST['action'] ?? '') === 'register') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); $_SESSION['auth_tab'] = 'register'; header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    $email = trim($_POST['email'] ?? '');
-    $displayName = trim($_POST['display_name'] ?? '');
-    $username = tp_normalize_account_username($_POST['username'] ?? '');
-    $password = $_POST['password'] ?? '';
-    $confirm = $_POST['password_confirm'] ?? '';
+    if (!tp_check_math_captcha('register')) {
+        flash('error', 'Please answer the math security question correctly.');
+        $_SESSION['auth_tab'] = 'register';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    $email = tp_post_string('email');
+    $displayName = tp_post_string('display_name');
+    $username = tp_post_string('username');
+    $password = is_string($_POST['password'] ?? null) ? $_POST['password'] : '';
+    $confirm = is_string($_POST['password_confirm'] ?? null) ? $_POST['password_confirm'] : '';
     $agree = isset($_POST['agree']);
 
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+    if (strlen($email) > 254 || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
         flash('error', 'Please enter a valid email address.');
         $_SESSION['auth_tab'] = 'register';
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
-    if ($displayName === '') {
-        flash('error', 'Please enter a display name.');
+    if (!tp_valid_public_text($displayName, 120)) {
+        flash('error', 'Please enter a valid display name (maximum 120 characters).');
         $_SESSION['auth_tab'] = 'register';
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
-    if (mb_strlen($username, 'UTF-8') < 3) {
-        flash('error', 'Please enter a username of at least 3 letters or numbers.');
+    if (!preg_match('/\A[A-Za-z0-9._-]{3,120}\z/D', $username)) {
+        flash('error', 'Username must be 3–120 characters using only letters, numbers, dots, underscores, or hyphens.');
         $_SESSION['auth_tab'] = 'register';
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
@@ -3862,16 +3957,27 @@ if (($_POST['action'] ?? '') === 'save_redaction_mask') {
 if (($_POST['action'] ?? '') === 'submit_removal') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ?view=removal#removal'); exit; }
+    if (!tp_check_math_captcha('removal')) {
+        flash('error', 'Please answer the math security question correctly.');
+        header('Location: ?view=removal#removal'); exit;
+    }
 
-    $full_name = trim($_POST['full_name'] ?? '');
-    $email = trim($_POST['email'] ?? '');
-    $phone = trim($_POST['phone'] ?? '');
-    $org = trim($_POST['organization'] ?? '');
-    $target_url = trim($_POST['target_url'] ?? '');
-    $justification = trim($_POST['justification'] ?? '');
+    $full_name = tp_post_string('full_name');
+    $email = tp_post_string('email');
+    $phone = tp_post_string('phone');
+    $org = tp_post_string('organization');
+    $target_url = tp_post_string('target_url');
+    $justification = tp_post_string('justification');
 
-    if ($full_name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || $target_url === '' || $justification === '') {
-        flash('error', 'Please complete all required fields (Full name, valid Email, URL, and Justification).');
+    $validRequest = tp_valid_public_text($full_name, 255)
+        && strlen($email) <= 254
+        && filter_var($email, FILTER_VALIDATE_EMAIL)
+        && ($phone === '' || tp_valid_public_text($phone, 64))
+        && ($org === '' || tp_valid_public_text($org, 255))
+        && tp_valid_public_http_url($target_url)
+        && tp_valid_public_text($justification, 5000, true);
+    if (!$validRequest) {
+        flash('error', 'Please enter valid request details and an http:// or https:// URL. Code-like or malformed input is not accepted.');
         header('Location: ?view=removal#removal'); exit;
     }
 
@@ -4444,7 +4550,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
               <?php csrf_field(); ?>
               <div class="mb-3">
                 <label for="reg_display_name" class="form-label">Display Name</label>
-                <input type="text" class="form-control" id="reg_display_name" name="display_name" required>
+                <input type="text" class="form-control" id="reg_display_name" name="display_name" maxlength="120" required>
               </div>
               <div class="mb-3">
                 <label for="reg_username" class="form-label">Username</label>
@@ -4452,7 +4558,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
               </div>
               <div class="mb-3">
                 <label for="reg_email" class="form-label">Email</label>
-                <input type="email" class="form-control" id="reg_email" name="email" placeholder="you@example.com" required>
+                <input type="email" class="form-control" id="reg_email" name="email" maxlength="254" placeholder="you@example.com" required>
               </div>
               <div class="mb-3">
                 <label for="reg_password" class="form-label">Password</label>
@@ -4468,6 +4574,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                   I agree to the Terms and Privacy Policy
                 </label>
               </div>
+              <?php tp_math_captcha_field('register'); ?>
               <div class="d-grid">
                 <button type="submit" class="btn btn-primary">
                   <i class="bi bi-person-plus me-1"></i> Create account
@@ -4644,6 +4751,8 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
       flash('error', 'Removal request not found.');
       header('Location: ?view=removal#removal'); exit;
     }
+    $reqTargetUrl = trim((string)($req['target_url'] ?? ''));
+    $reqTargetUrlIsSafe = tp_valid_public_http_url($reqTargetUrl);
   ?>
   <main class="container-xl my-4" id="removal-request">
     <div class="d-flex align-items-center justify-content-between mb-3">
@@ -4695,7 +4804,13 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
               </div>
               <div class="col-12">
                 <label class="form-label">Target URL</label>
-                <div><a href="<?php echo htmlspecialchars($req['target_url']); ?>" target="_blank" rel="noopener"><?php echo htmlspecialchars($req['target_url']); ?></a></div>
+                <div>
+                  <?php if ($reqTargetUrlIsSafe): ?>
+                    <a href="<?php echo htmlspecialchars($reqTargetUrl); ?>" target="_blank" rel="noopener noreferrer"><?php echo htmlspecialchars($reqTargetUrl); ?></a>
+                  <?php else: ?>
+                    <span class="text-warning" title="This stored value is not a safe HTTP(S) URL."><?php echo htmlspecialchars($reqTargetUrl); ?></span>
+                  <?php endif; ?>
+                </div>
               </div>
               <div class="col-12">
                 <label class="form-label">Justification</label>
@@ -4745,9 +4860,15 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
             <h2 class="h6 mb-0">Quick Links</h2>
           </div>
           <div class="card-body">
-            <a href="<?php echo htmlspecialchars($req['target_url']); ?>" class="btn btn-outline-light w-100 mb-2" target="_blank" rel="noopener">
-              <i class="bi bi-box-arrow-up-right me-1"></i> Open Target URL
-            </a>
+            <?php if ($reqTargetUrlIsSafe): ?>
+              <a href="<?php echo htmlspecialchars($reqTargetUrl); ?>" class="btn btn-outline-light w-100 mb-2" target="_blank" rel="noopener noreferrer">
+                <i class="bi bi-box-arrow-up-right me-1"></i> Open Target URL
+              </a>
+            <?php else: ?>
+              <button type="button" class="btn btn-outline-warning w-100 mb-2" disabled>
+                <i class="bi bi-exclamation-triangle me-1"></i> Unsafe URL blocked
+              </button>
+            <?php endif; ?>
             <a href="mailto:<?php echo htmlspecialchars($req['email']); ?>" class="btn btn-outline-light w-100">
               <i class="bi bi-envelope me-1"></i> Email Submitter
             </a>
@@ -4775,28 +4896,31 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                   <div class="row g-3">
                     <div class="col-md-6">
                       <label class="form-label">Full name*</label>
-                      <input type="text" name="full_name" class="form-control" required>
+                      <input type="text" name="full_name" class="form-control" maxlength="255" required>
                     </div>
                     <div class="col-md-6">
                       <label class="form-label">Email*</label>
-                      <input type="email" name="email" class="form-control" required>
+                      <input type="email" name="email" class="form-control" maxlength="254" required>
                     </div>
                     <div class="col-md-6">
                       <label class="form-label">Phone</label>
-                      <input type="text" name="phone" class="form-control" placeholder="Optional">
+                      <input type="text" name="phone" class="form-control" maxlength="64" placeholder="Optional">
                     </div>
                     <div class="col-md-6">
                       <label class="form-label">Organization</label>
-                      <input type="text" name="organization" class="form-control" placeholder="Optional">
+                      <input type="text" name="organization" class="form-control" maxlength="255" placeholder="Optional">
                     </div>
                     <div class="col-12">
                       <label class="form-label">URL to the evidence or case*</label>
-                      <input type="url" name="target_url" class="form-control" placeholder="https://tiktokpredators.com/?view=case&code=..." required>
+                      <input type="url" name="target_url" class="form-control" maxlength="2048" placeholder="https://tiktokpredators.com/?view=case&code=..." required>
                     </div>
                     <div class="col-12">
                       <label class="form-label">Justification*</label>
-                      <textarea name="justification" rows="6" class="form-control" placeholder="Explain why this item should be reviewed or removed." required></textarea>
+                      <textarea name="justification" rows="6" class="form-control" maxlength="5000" placeholder="Explain why this item should be reviewed or removed." required></textarea>
                     </div>
+                  </div>
+                  <div class="mt-3">
+                    <?php tp_math_captcha_field('removal'); ?>
                   </div>
                   <div class="d-grid mt-3">
                     <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i> Submit request</button>
@@ -4837,12 +4961,19 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                   </thead>
                   <tbody>
                     <?php foreach ($reqs as $r): ?>
+                      <?php $rowTargetUrl = trim((string)($r['target_url'] ?? '')); $rowTargetUrlIsSafe = tp_valid_public_http_url($rowTargetUrl); ?>
                       <tr>
                         <td><?php echo (int)$r['id']; ?></td>
                         <td class="small text-secondary"><?php echo htmlspecialchars($r['created_at']); ?></td>
                         <td><?php echo htmlspecialchars($r['full_name']); ?></td>
                         <td><a href="mailto:<?php echo htmlspecialchars($r['email']); ?>"><?php echo htmlspecialchars($r['email']); ?></a></td>
-                        <td class="text-truncate" style="max-width:280px;"><a href="<?php echo htmlspecialchars($r['target_url']); ?>" target="_blank" rel="noopener"><?php echo htmlspecialchars($r['target_url']); ?></a></td>
+                        <td class="text-truncate" style="max-width:280px;">
+                          <?php if ($rowTargetUrlIsSafe): ?>
+                            <a href="<?php echo htmlspecialchars($rowTargetUrl); ?>" target="_blank" rel="noopener noreferrer"><?php echo htmlspecialchars($rowTargetUrl); ?></a>
+                          <?php else: ?>
+                            <span class="text-warning" title="Unsafe URL blocked"><?php echo htmlspecialchars($rowTargetUrl); ?></span>
+                          <?php endif; ?>
+                        </td>
                         <td>
                             <?php
                             $status = $r['status'];
@@ -4900,6 +5031,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
               </div>
 
               <?php foreach ($reqs as $r): ?>
+                <?php $rowTargetUrl = trim((string)($r['target_url'] ?? '')); $rowTargetUrlIsSafe = tp_valid_public_http_url($rowTargetUrl); ?>
                 <div class="modal fade" id="modalRemoval<?php echo (int)$r['id']; ?>" tabindex="-1" aria-hidden="true">
                   <div class="modal-dialog modal-lg modal-dialog-scrollable">
                     <div class="modal-content">
@@ -4914,7 +5046,14 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                           <dt class="col-sm-3">Email</dt><dd class="col-sm-9"><a href="mailto:<?php echo htmlspecialchars($r['email']); ?>"><?php echo htmlspecialchars($r['email']); ?></a></dd>
                           <dt class="col-sm-3">Phone</dt><dd class="col-sm-9"><?php echo htmlspecialchars($r['phone'] ?? ''); ?></dd>
                           <dt class="col-sm-3">Organization</dt><dd class="col-sm-9"><?php echo htmlspecialchars($r['organization'] ?? ''); ?></dd>
-                          <dt class="col-sm-3">URL</dt><dd class="col-sm-9"><a href="<?php echo htmlspecialchars($r['target_url']); ?>" target="_blank" rel="noopener"><?php echo htmlspecialchars($r['target_url']); ?></a></dd>
+                          <dt class="col-sm-3">URL</dt>
+                          <dd class="col-sm-9">
+                            <?php if ($rowTargetUrlIsSafe): ?>
+                              <a href="<?php echo htmlspecialchars($rowTargetUrl); ?>" target="_blank" rel="noopener noreferrer"><?php echo htmlspecialchars($rowTargetUrl); ?></a>
+                            <?php else: ?>
+                              <span class="text-warning" title="Unsafe URL blocked"><?php echo htmlspecialchars($rowTargetUrl); ?></span>
+                            <?php endif; ?>
+                          </dd>
                           <dt class="col-sm-3">Justification</dt><dd class="col-sm-9"><pre class="mb-0" style="white-space: pre-wrap;"><?php echo htmlspecialchars($r['justification']); ?></pre></dd>
                         </dl>
                       </div>
@@ -9095,7 +9234,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 <?php csrf_field(); ?>
                 <div class="mb-2">
                   <label class="form-label">Email</label>
-                  <input type="email" name="email" class="form-control" placeholder="you@example.com" required>
+                  <input type="email" name="email" class="form-control" maxlength="254" placeholder="you@example.com" required>
                 </div>
                 <div class="mb-2">
                   <label class="form-label">Password</label>
@@ -9117,7 +9256,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 </div>
                 <div class="mb-2">
                   <label class="form-label">Display Name</label>
-                  <input type="text" name="display_name" class="form-control" placeholder="Your name" required>
+                  <input type="text" name="display_name" class="form-control" maxlength="120" placeholder="Your name" required>
                 </div>
                 <div class="mb-2">
                   <label class="form-label">Username</label>
@@ -9135,6 +9274,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <input class="form-check-input" type="checkbox" name="agree" id="agreeTerms" required>
                   <label class="form-check-label small" for="agreeTerms">I agree to the terms and privacy policy.</label>
                 </div>
+                <?php tp_math_captcha_field('register'); ?>
                 <div class="d-grid">
                   <button class="btn btn-success" type="submit"><i class="bi bi-person-plus me-1"></i> Create Account</button>
                 </div>
