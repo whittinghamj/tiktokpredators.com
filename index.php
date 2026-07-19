@@ -1090,6 +1090,34 @@ try {
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
+// --- Account signup metadata and successful login history (admin-only display) ---
+try {
+  $userAuditColumns = [
+    'signup_ip' => "ALTER TABLE users ADD COLUMN signup_ip VARCHAR(45) NULL",
+    'signup_forwarded_for' => "ALTER TABLE users ADD COLUMN signup_forwarded_for VARCHAR(255) NULL",
+    'signup_user_agent' => "ALTER TABLE users ADD COLUMN signup_user_agent VARCHAR(1024) NULL",
+  ];
+  foreach ($userAuditColumns as $columnName => $alterSql) {
+    $column = $pdo->query("SHOW COLUMNS FROM users LIKE " . $pdo->quote($columnName));
+    if (!$column || !$column->fetch()) { $pdo->exec($alterSql); }
+  }
+  $pdo->exec(<<<SQL
+CREATE TABLE IF NOT EXISTS user_login_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  user_id BIGINT UNSIGNED NOT NULL,
+  ip_address VARCHAR(45) NULL,
+  forwarded_for VARCHAR(255) NULL,
+  user_agent VARCHAR(1024) NULL,
+  logged_in_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_user_login_history_user_time (user_id, logged_in_at),
+  INDEX idx_user_login_history_ip (ip_address),
+  INDEX idx_user_login_history_time (logged_in_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+SQL
+  );
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
 // --- Project settings table setup ---
 try {
   $pdo->exec(<<<SQL
@@ -1542,6 +1570,50 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
         }
       }
       return [$publicIp, $forwarded];
+    }
+
+    /** Delete accounts while preserving submitted cases and detaching ownership references. */
+    function tp_delete_user_accounts(PDO $pdo, array $userIds): int {
+      $userIds = array_values(array_unique(array_filter(array_map('intval', $userIds), static fn (int $id): bool => $id > 0)));
+      if (!$userIds) { return 0; }
+      $placeholders = implode(',', array_fill(0, count($userIds), '?'));
+      $startedTransaction = !$pdo->inTransaction();
+      if ($startedTransaction) { $pdo->beginTransaction(); }
+
+      try {
+        $cleanupStatements = [
+          'UPDATE cases SET created_by = NULL WHERE created_by IN (' . $placeholders . ')',
+          'UPDATE evidence SET uploaded_by = NULL WHERE uploaded_by IN (' . $placeholders . ')',
+          'UPDATE evidence SET created_by = NULL WHERE created_by IN (' . $placeholders . ')',
+          'UPDATE case_notes SET created_by = NULL WHERE created_by IN (' . $placeholders . ')',
+          'UPDATE case_events SET created_by = NULL WHERE created_by IN (' . $placeholders . ')',
+          'UPDATE case_submission_metadata SET submitted_by = NULL WHERE submitted_by IN (' . $placeholders . ')',
+          'UPDATE case_ownership_history SET previous_owner_id = NULL WHERE previous_owner_id IN (' . $placeholders . ')',
+          'UPDATE case_ownership_history SET changed_by = NULL WHERE changed_by IN (' . $placeholders . ')',
+          'DELETE FROM case_ownership_history WHERE new_owner_id IN (' . $placeholders . ')',
+          'UPDATE case_ai_runs SET requested_by = NULL WHERE requested_by IN (' . $placeholders . ')',
+          'UPDATE case_ai_suggestions SET decided_by = NULL WHERE decided_by IN (' . $placeholders . ')',
+          'UPDATE case_analytics_alerts SET resolved_by = NULL WHERE resolved_by IN (' . $placeholders . ')',
+          'DELETE FROM user_notifications WHERE user_id IN (' . $placeholders . ')',
+          'DELETE FROM user_login_history WHERE user_id IN (' . $placeholders . ')',
+        ];
+        foreach ($cleanupStatements as $cleanupSql) {
+          try {
+            $cleanup = $pdo->prepare($cleanupSql);
+            $cleanup->execute($userIds);
+          } catch (Throwable $cleanupError) {
+            log_console('WARN', 'User deletion cleanup skipped: ' . $cleanupError->getMessage());
+          }
+        }
+        $delete = $pdo->prepare('DELETE FROM users WHERE id IN (' . $placeholders . ')');
+        $delete->execute($userIds);
+        $deletedCount = $delete->rowCount();
+        if ($startedTransaction) { $pdo->commit(); }
+        return $deletedCount;
+      } catch (Throwable $e) {
+        if ($startedTransaction && $pdo->inTransaction()) { $pdo->rollBack(); }
+        throw $e;
+      }
     }
 
     function tp_parse_user_agent(string $ua): array {
@@ -2152,8 +2224,18 @@ if (($_POST['action'] ?? '') === 'login') {
               'username' => $user['username'] ?? '',
               'role' => $user['role']
             ];
-            $loginUpdate = $pdo->prepare('UPDATE users SET last_login_at = NOW() WHERE id = ?');
+            $loginUpdate = $pdo->prepare('UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?');
             $loginUpdate->execute([(int)$user['id']]);
+            try {
+                [$loginIp, $loginForwardedFor] = tp_client_ip();
+                $loginForwardedFor = mb_check_encoding($loginForwardedFor, 'UTF-8') ? mb_substr($loginForwardedFor, 0, 255, 'UTF-8') : '';
+                $loginUserAgentRaw = trim((string)($_SERVER['HTTP_USER_AGENT'] ?? ''));
+                $loginUserAgent = mb_check_encoding($loginUserAgentRaw, 'UTF-8') ? mb_substr($loginUserAgentRaw, 0, 1024, 'UTF-8') : '';
+                $loginHistory = $pdo->prepare('INSERT INTO user_login_history (user_id, ip_address, forwarded_for, user_agent, logged_in_at) VALUES (?, NULLIF(?, \'\'), NULLIF(?, \'\'), NULLIF(?, \'\'), CURRENT_TIMESTAMP)');
+                $loginHistory->execute([(int)$user['id'], $loginIp, $loginForwardedFor, $loginUserAgent]);
+            } catch (Throwable $auditError) {
+                log_console('WARN', 'Unable to record login history for user #' . (int)$user['id'] . ': ' . $auditError->getMessage());
+            }
             $_SESSION['auth_attempts'] = 0; $_SESSION['auth_last'] = time();
             flash('success', 'Welcome back, '. htmlspecialchars($user['email']));
             log_console('INFO', 'Login success for ' . ($user['email'] ?? 'unknown'));
@@ -2228,8 +2310,12 @@ if (($_POST['action'] ?? '') === 'register') {
             header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
         }
         $hash = password_hash($password, PASSWORD_DEFAULT);
-        $ins = $pdo->prepare('INSERT INTO users (email, display_name, username, password_hash, role, is_active) VALUES (?, ?, ?, ?, "viewer", 1)');
-        $ins->execute([$email, $displayName, $username, $hash]);
+        [$signupIp, $signupForwardedFor] = tp_client_ip();
+        $signupForwardedFor = mb_check_encoding($signupForwardedFor, 'UTF-8') ? mb_substr($signupForwardedFor, 0, 255, 'UTF-8') : '';
+        $signupUserAgentRaw = trim((string)($_SERVER['HTTP_USER_AGENT'] ?? ''));
+        $signupUserAgent = mb_check_encoding($signupUserAgentRaw, 'UTF-8') ? mb_substr($signupUserAgentRaw, 0, 1024, 'UTF-8') : '';
+        $ins = $pdo->prepare('INSERT INTO users (email, display_name, username, password_hash, role, is_active, signup_ip, signup_forwarded_for, signup_user_agent) VALUES (?, ?, ?, ?, "viewer", 1, NULLIF(?, \'\'), NULLIF(?, \'\'), NULLIF(?, \'\'))');
+        $ins->execute([$email, $displayName, $username, $hash, $signupIp, $signupForwardedFor, $signupUserAgent]);
         flash('success', 'Registration successful. You can now log in.');
     } catch (Throwable $e) {
         // Map common PDO errors to user-friendly messages, append safe error code
@@ -2269,7 +2355,7 @@ if (($_POST['action'] ?? '') === 'admin_add_user') {
     $password = $_POST['password'] ?? '';
     $confirm = $_POST['password_confirm'] ?? '';
     $role = trim($_POST['role'] ?? 'viewer');
-    $isActive = isset($_POST['is_active']) ? 1 : 1; // default active
+    $isActive = isset($_POST['is_active']) ? 1 : 0;
 
     $allowedRoles = ['admin','viewer'];
 
@@ -3141,7 +3227,11 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $initial_summary = trim($_POST['initial_summary'] ?? '');
     $remove_person_photo = !empty($_POST['remove_person_photo']);
     $sensitivity = $_POST['sensitivity'] ?? '';
-    $status = $_POST['status'] ?? '';
+    $requestedStatus = is_string($_POST['status'] ?? null) ? trim($_POST['status']) : '';
+    $skipVerifiedAnnouncement = is_admin() && $requestedStatus === 'Verified dont announce';
+    // "Verified dont announce" is a one-time publishing action, not a stored
+    // status. Persist the case as Verified so all normal public queries include it.
+    $status = $skipVerifiedAnnouncement ? 'Verified' : $requestedStatus;
 
     $allowed_sensitivity = ['Standard','Restricted','Sealed'];
     $allowed_status = ['Being Built','Pending','Open','In Review','Verified','Closed','Rejected'];
@@ -3255,20 +3345,37 @@ if (($_POST['action'] ?? '') === 'update_case') {
         if ($changes) {
             log_case_event($pdo, $case_id, 'case_updated', $case_name !== '' ? $case_name : $case_code, 'Updated fields: '.implode('; ', $changes));
         }
-        // Fire Discord notification if status just moved to Verified
+        // Fire Discord notification if status just moved to Verified, unless the
+        // admin explicitly selected the one-time no-announcement publishing option.
         $prevStatus = $prev['status'] ?? '';
         if ($status === 'Verified' && $prevStatus !== 'Verified') {
-            $photoRel = find_person_photo_url($case_code);
-            notify_discord_case_verified(
-                $case_code,
-                $case_name,
-                $person_name,
-                $location,
-                $initial_summary,
-                $photoRel
-            );
+            if ($skipVerifiedAnnouncement) {
+                log_case_event(
+                    $pdo,
+                    $case_id,
+                    'discord_announcement_skipped',
+                    $case_name !== '' ? $case_name : $case_code,
+                    'Case published as Verified without sending Discord webhook announcements.'
+                );
+                log_console('INFO', 'Case published without Discord announcement: ' . $case_code);
+            } else {
+                $photoRel = find_person_photo_url($case_code);
+                notify_discord_case_verified(
+                    $case_code,
+                    $case_name,
+                    $person_name,
+                    $location,
+                    $initial_summary,
+                    $photoRel
+                );
+            }
         }
-        flash('success', 'Case updated.');
+        flash(
+            'success',
+            ($skipVerifiedAnnouncement && $prevStatus !== 'Verified')
+                ? 'Case published as Verified without a Discord announcement.'
+                : 'Case updated.'
+        );
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
@@ -4095,6 +4202,85 @@ if (($_POST['action'] ?? '') === 'bulk_delete_removals') {
     header('Location: ?view=removal#removal'); exit;
 }
 
+// Handle update user (admin only)
+if (($_POST['action'] ?? '') === 'update_user') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ?view=users#users'); exit; }
+    if (!is_admin()) { flash('error', 'Unauthorized.'); header('Location: ?view=users#users'); exit; }
+
+    $userId = (int)($_POST['user_id'] ?? 0);
+    $email = tp_post_string('email');
+    $displayName = tp_post_string('display_name');
+    $username = tp_post_string('username');
+    $role = tp_post_string('role');
+    $isActive = isset($_POST['is_active']) ? 1 : 0;
+    $newPassword = is_string($_POST['new_password'] ?? null) ? $_POST['new_password'] : '';
+    $confirmPassword = is_string($_POST['password_confirm'] ?? null) ? $_POST['password_confirm'] : '';
+    $returnToProfile = (($_POST['return_to_profile'] ?? '') === '1');
+    $redirect = $returnToProfile && $userId > 0
+        ? '?view=user_profile&id=' . $userId . '#user-profile'
+        : '?view=users#users';
+
+    if ($userId <= 0) { flash('error', 'Invalid user.'); header('Location: ?view=users#users'); exit; }
+    if (strlen($email) > 254 || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        flash('error', 'Please enter a valid email address.'); header('Location: ' . $redirect); exit;
+    }
+    if (!tp_valid_public_text($displayName, 120)) {
+        flash('error', 'Please enter a valid display name.'); header('Location: ' . $redirect); exit;
+    }
+    if (!preg_match('/\A[A-Za-z0-9._-]{3,120}\z/D', $username)) {
+        flash('error', 'Username must be 3–120 characters using only letters, numbers, dots, underscores, or hyphens.');
+        header('Location: ' . $redirect); exit;
+    }
+    if (!in_array($role, ['admin', 'viewer'], true)) { $role = 'viewer'; }
+    if ($newPassword !== '' && strlen($newPassword) < 8) {
+        flash('error', 'A new password must be at least 8 characters.'); header('Location: ' . $redirect); exit;
+    }
+    if ($newPassword !== '' && !hash_equals($newPassword, $confirmPassword)) {
+        flash('error', 'New passwords do not match.'); header('Location: ' . $redirect); exit;
+    }
+
+    $isCurrentUser = $userId === (int)($_SESSION['user']['id'] ?? 0);
+    if ($isCurrentUser) {
+        $role = 'admin';
+        $isActive = 1;
+    }
+
+    try {
+        $exists = $pdo->prepare('SELECT id FROM users WHERE id = ? LIMIT 1');
+        $exists->execute([$userId]);
+        if (!$exists->fetch()) {
+            flash('error', 'User not found.'); header('Location: ?view=users#users'); exit;
+        }
+        $duplicate = $pdo->prepare('SELECT id FROM users WHERE (email = ? OR username = ?) AND id <> ? LIMIT 1');
+        $duplicate->execute([$email, $username, $userId]);
+        if ($duplicate->fetch()) {
+            flash('error', 'That email address or username is already registered.'); header('Location: ' . $redirect); exit;
+        }
+
+        if ($newPassword !== '') {
+            $update = $pdo->prepare('UPDATE users SET email = ?, display_name = ?, username = ?, role = ?, is_active = ?, password_hash = ? WHERE id = ?');
+            $update->execute([$email, $displayName, $username, $role, $isActive, password_hash($newPassword, PASSWORD_DEFAULT), $userId]);
+        } else {
+            $update = $pdo->prepare('UPDATE users SET email = ?, display_name = ?, username = ?, role = ?, is_active = ? WHERE id = ?');
+            $update->execute([$email, $displayName, $username, $role, $isActive, $userId]);
+        }
+        if ($isCurrentUser) {
+            $_SESSION['user']['email'] = $email;
+            $_SESSION['user']['display_name'] = $displayName;
+            $_SESSION['user']['username'] = $username;
+            $_SESSION['user']['role'] = $role;
+        }
+        flash('success', 'User updated successfully.');
+        log_console('SUCCESS', 'Admin updated user #' . $userId);
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to update user.');
+    }
+    header('Location: ' . $redirect); exit;
+}
+
 // Handle delete user (admin only)
 if (($_POST['action'] ?? '') === 'delete_user') {
     throttle();
@@ -4102,21 +4288,16 @@ if (($_POST['action'] ?? '') === 'delete_user') {
     if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
     $user_id = (int)($_POST['user_id'] ?? 0);
-    $ru = trim($_POST['redirect_url'] ?? '?view=users#users');
+    $ru = '?view=users#users';
 
     if ($user_id <= 0) { flash('error', 'Invalid user.'); header('Location: '. $ru); exit; }
     if (($user_id === (int)($_SESSION['user']['id'] ?? 0))) { flash('error', 'You cannot delete your own account.'); header('Location: '. $ru); exit; }
 
     try {
-        // Best-effort nullify foreign keys if they exist (avoid FK constraint errors)
-        try { $pdo->prepare('UPDATE evidence SET uploaded_by = NULL WHERE uploaded_by = ?')->execute([$user_id]); } catch (Throwable $e) {}
-        try { $pdo->prepare('UPDATE evidence SET created_by = NULL WHERE created_by = ?')->execute([$user_id]); } catch (Throwable $e) {}
-        try { $pdo->prepare('UPDATE case_notes SET created_by = NULL WHERE created_by = ?')->execute([$user_id]); } catch (Throwable $e) {}
-
-        $d = $pdo->prepare('DELETE FROM users WHERE id = ? LIMIT 1');
-        $d->execute([$user_id]);
-        if ($d->rowCount() > 0) {
+        $deletedCount = tp_delete_user_accounts($pdo, [$user_id]);
+        if ($deletedCount > 0) {
             flash('success', 'User deleted.');
+            log_console('SUCCESS', 'Admin deleted user #' . $user_id);
         } else {
             flash('error', 'User not found or could not be deleted.');
         }
@@ -4126,6 +4307,49 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to delete user.');
     }
     header('Location: '. $ru); exit;
+}
+
+// Handle bulk delete users (admin only)
+if (($_POST['action'] ?? '') === 'bulk_delete_users') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ?view=users#users'); exit; }
+    if (!is_admin()) { flash('error', 'Unauthorized.'); header('Location: ?view=users#users'); exit; }
+
+    $submittedIds = $_POST['user_ids'] ?? [];
+    $currentUserId = (int)($_SESSION['user']['id'] ?? 0);
+    $userIds = [];
+    if (is_array($submittedIds)) {
+        foreach ($submittedIds as $submittedId) {
+            if (!is_string($submittedId) && !is_int($submittedId)) { continue; }
+            $submittedId = (string)$submittedId;
+            if (!ctype_digit($submittedId)) { continue; }
+            $userId = (int)$submittedId;
+            if ($userId > 0 && $userId !== $currentUserId) { $userIds[$userId] = $userId; }
+        }
+    }
+    $userIds = array_values($userIds);
+    if (!$userIds) {
+        flash('error', 'Select at least one user to delete. Your own account cannot be selected.');
+        header('Location: ?view=users#users'); exit;
+    }
+
+    try {
+        $deletedCount = tp_delete_user_accounts($pdo, $userIds);
+        $skippedCount = count($userIds) - $deletedCount;
+        if ($deletedCount > 0) {
+            $message = $deletedCount . ' user account' . ($deletedCount === 1 ? '' : 's') . ' deleted.';
+            if ($skippedCount > 0) { $message .= ' ' . $skippedCount . ' missing account' . ($skippedCount === 1 ? ' was' : 's were') . ' skipped.'; }
+            flash('success', $message);
+            log_console('SUCCESS', 'Admin bulk deleted user IDs: ' . implode(',', $userIds));
+        } else {
+            flash('error', 'None of the selected users could be deleted.');
+        }
+    } catch (Throwable $e) {
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to delete the selected users.');
+    }
+    header('Location: ?view=users#users'); exit;
 }
 
 // --- Face / Evidence Scanner: POST handler ---
@@ -4709,7 +4933,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
   <li class="nav-item"><a class="nav-link <?php echo ($view==='submit_case')?'active':''; ?>" href="?view=submit_case#submit-case">Create Case</a></li>
 <?php endif; ?>
 <?php if (is_admin()): ?>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='users')?'active':''; ?>" href="?view=users#users">Users</a></li>
+  <li class="nav-item"><a class="nav-link <?php echo in_array($view, ['users', 'user_profile'], true) ? 'active' : ''; ?>" href="?view=users#users">Users</a></li>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='viewer_stats')?'active':''; ?>" href="?view=viewer_stats#viewer-stats">Viewer Stats</a></li>
   <?php if (tp_is_main_admin()): ?>
     <li class="nav-item"><a class="nav-link <?php echo ($view==='project_settings')?'active':''; ?>" href="?view=project_settings#project-settings">Project Settings</a></li>
@@ -6574,6 +6798,203 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
   })();
   </script>
 
+  <?php if ($view === 'user_profile'): ?>
+  <main class="py-4" id="user-profile">
+    <div class="container-xl">
+      <?php if (!is_admin()): ?>
+        <div class="alert alert-danger"><i class="bi bi-shield-lock me-2"></i>Unauthorized. Admins only.</div>
+      <?php else: ?>
+        <?php
+          $profileUserId = (int)($_GET['id'] ?? 0);
+          $profileUser = null;
+          $profileCases = [];
+          $profileLogins = [];
+          $profileStatusCounts = [];
+          $profileLoginPage = max(1, (int)($_GET['login_page'] ?? 1));
+          $profileLoginsPerPage = 100;
+          $profileLoginTotal = 0;
+          $profileLoginTotalPages = 1;
+          try {
+            $profileStmt = $pdo->prepare("SELECT u.id, u.email, u.display_name, u.username, u.role, u.is_active, u.created_at, u.last_login_at, u.signup_ip, u.signup_forwarded_for, u.signup_user_agent,
+                (SELECT COUNT(*) FROM user_login_history ulh WHERE ulh.user_id = u.id) AS login_count,
+                (SELECT ulh.ip_address FROM user_login_history ulh WHERE ulh.user_id = u.id ORDER BY ulh.logged_in_at DESC, ulh.id DESC LIMIT 1) AS last_login_ip
+              FROM users u WHERE u.id = ? LIMIT 1");
+            $profileStmt->execute([$profileUserId]);
+            $profileUser = $profileStmt->fetch() ?: null;
+
+            if ($profileUser) {
+              $profileLoginTotal = (int)($profileUser['login_count'] ?? 0);
+              $profileLoginTotalPages = max(1, (int)ceil($profileLoginTotal / $profileLoginsPerPage));
+              $profileLoginPage = min($profileLoginPage, $profileLoginTotalPages);
+              $caseStmt = $pdo->prepare("SELECT c.id, c.case_code, c.case_name, c.person_name, c.status, c.sensitivity, c.created_by, c.opened_at, c.updated_at,
+                    csm.submitted_by AS original_submitter_id,
+                    (SELECT COUNT(*) FROM evidence e WHERE e.case_id = c.id) AS evidence_count
+                  FROM cases c
+                  LEFT JOIN case_submission_metadata csm ON csm.case_id = c.id
+                  WHERE c.created_by = ? OR csm.submitted_by = ?
+                  ORDER BY COALESCE(c.updated_at, c.opened_at) DESC");
+              $caseStmt->execute([$profileUserId, $profileUserId]);
+              $profileCases = $caseStmt->fetchAll() ?: [];
+              foreach ($profileCases as $profileCase) {
+                $caseStatus = (string)($profileCase['status'] ?? 'Unknown');
+                $profileStatusCounts[$caseStatus] = ($profileStatusCounts[$caseStatus] ?? 0) + 1;
+              }
+
+              $profileLoginOffset = ($profileLoginPage - 1) * $profileLoginsPerPage;
+              $loginStmt = $pdo->prepare('SELECT id, ip_address, forwarded_for, user_agent, logged_in_at FROM user_login_history WHERE user_id = ? ORDER BY logged_in_at DESC, id DESC LIMIT ' . $profileLoginsPerPage . ' OFFSET ' . $profileLoginOffset);
+              $loginStmt->execute([$profileUserId]);
+              $profileLogins = $loginStmt->fetchAll() ?: [];
+            }
+          } catch (Throwable $e) {
+            $_SESSION['sql_error'] = $e->getMessage();
+            log_console('ERROR', 'SQL: ' . $e->getMessage());
+          }
+          $profileIsCurrentUser = $profileUserId === (int)($_SESSION['user']['id'] ?? 0);
+        ?>
+
+        <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-2 mb-3">
+          <div>
+            <h1 class="h4 mb-1"><i class="bi bi-person-vcard me-2"></i>User Profile</h1>
+            <div class="text-secondary small">Account details, submitted cases, and successful login history.</div>
+          </div>
+          <a class="btn btn-outline-light btn-sm" href="?view=users#users"><i class="bi bi-arrow-left me-1"></i>Back to Users</a>
+        </div>
+
+        <?php if (!$profileUser): ?>
+          <div class="alert alert-warning">User not found.</div>
+        <?php else: ?>
+          <div class="row g-4">
+            <div class="col-lg-8">
+              <div class="row g-3 mb-4">
+                <div class="col-sm-6 col-xl-3"><div class="card glass h-100"><div class="card-body"><div class="text-secondary small">Submitted Cases</div><div class="display-6"><?php echo count($profileCases); ?></div></div></div></div>
+                <div class="col-sm-6 col-xl-3"><div class="card glass h-100"><div class="card-body"><div class="text-secondary small">Verified Cases</div><div class="display-6"><?php echo (int)($profileStatusCounts['Verified'] ?? 0); ?></div></div></div></div>
+                <div class="col-sm-6 col-xl-3"><div class="card glass h-100"><div class="card-body"><div class="text-secondary small">Recorded Logins</div><div class="display-6"><?php echo (int)($profileUser['login_count'] ?? 0); ?></div></div></div></div>
+                <div class="col-sm-6 col-xl-3"><div class="card glass h-100"><div class="card-body"><div class="text-secondary small">Account</div><div class="mt-2"><?php echo (int)$profileUser['is_active'] === 1 ? '<span class="badge text-bg-success">Active</span>' : '<span class="badge text-bg-secondary">Disabled</span>'; ?></div></div></div></div>
+              </div>
+
+              <div class="card glass mb-4">
+                <div class="card-header"><h2 class="h6 mb-0">Account Overview</h2></div>
+                <div class="card-body">
+                  <div class="row g-3">
+                    <div class="col-sm-6"><span class="text-secondary d-block small">User ID</span><?php echo (int)$profileUser['id']; ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block small">Role</span><?php echo htmlspecialchars(ucfirst((string)$profileUser['role'])); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block small">Display Name</span><?php echo htmlspecialchars((string)$profileUser['display_name']); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block small">Username</span>@<?php echo htmlspecialchars((string)$profileUser['username']); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block small">Email</span><?php echo htmlspecialchars((string)$profileUser['email']); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block small">Signed Up</span><?php echo htmlspecialchars((string)($profileUser['created_at'] ?? 'Not recorded')); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block small">Signup IP Address</span><span class="font-monospace"><?php echo htmlspecialchars((string)(($profileUser['signup_ip'] ?? '') !== '' ? $profileUser['signup_ip'] : 'Not recorded')); ?></span></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block small">Signup Forwarded IP Chain</span><span class="font-monospace small text-break"><?php echo htmlspecialchars((string)(($profileUser['signup_forwarded_for'] ?? '') !== '' ? $profileUser['signup_forwarded_for'] : 'Not recorded')); ?></span></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block small">Last Login</span><?php echo htmlspecialchars((string)(($profileUser['last_login_at'] ?? '') !== '' ? $profileUser['last_login_at'] : 'Never')); ?></div>
+                    <div class="col-sm-6"><span class="text-secondary d-block small">Last Login IP</span><span class="font-monospace"><?php echo htmlspecialchars((string)(($profileUser['last_login_ip'] ?? '') !== '' ? $profileUser['last_login_ip'] : 'Not recorded')); ?></span></div>
+                    <div class="col-12"><span class="text-secondary d-block small">Signup User Agent</span><span class="small text-break"><?php echo htmlspecialchars((string)(($profileUser['signup_user_agent'] ?? '') !== '' ? $profileUser['signup_user_agent'] : 'Not recorded')); ?></span></div>
+                  </div>
+                </div>
+              </div>
+
+              <div class="card glass mb-4">
+                <div class="card-header d-flex align-items-center justify-content-between"><h2 class="h6 mb-0">Submitted Cases</h2><span class="badge text-bg-dark border"><?php echo count($profileCases); ?></span></div>
+                <div class="card-body">
+                  <?php if ($profileCases): ?>
+                    <div class="table-responsive">
+                      <table class="table table-sm align-middle mb-0">
+                        <thead><tr><th>Case</th><th>Relationship</th><th>Status</th><th>Evidence</th><th>Updated</th><th class="text-end">Action</th></tr></thead>
+                        <tbody>
+                          <?php foreach ($profileCases as $profileCase): ?>
+                            <?php
+                              $isOriginalSubmitter = (int)($profileCase['original_submitter_id'] ?? 0) === $profileUserId;
+                              $isCurrentOwner = (int)($profileCase['created_by'] ?? 0) === $profileUserId;
+                              $relationship = $isOriginalSubmitter && $isCurrentOwner ? 'Submitted / Owner' : ($isOriginalSubmitter ? 'Original Submitter' : 'Current Owner');
+                            ?>
+                            <tr>
+                              <td><div class="fw-semibold"><?php echo htmlspecialchars((string)($profileCase['case_name'] ?: $profileCase['case_code'])); ?></div><div class="small text-secondary"><?php echo htmlspecialchars((string)$profileCase['case_code']); ?></div></td>
+                              <td><span class="badge text-bg-dark border"><?php echo htmlspecialchars($relationship); ?></span></td>
+                              <td><?php echo htmlspecialchars((string)$profileCase['status']); ?></td>
+                              <td><?php echo (int)($profileCase['evidence_count'] ?? 0); ?></td>
+                              <td class="text-nowrap"><?php echo htmlspecialchars((string)($profileCase['updated_at'] ?? $profileCase['opened_at'] ?? '')); ?></td>
+                              <td class="text-end"><a class="btn btn-outline-light btn-sm" href="?view=case&amp;code=<?php echo urlencode((string)$profileCase['case_code']); ?>#case-view"><i class="bi bi-eye me-1"></i>View</a></td>
+                            </tr>
+                          <?php endforeach; ?>
+                        </tbody>
+                      </table>
+                    </div>
+                  <?php else: ?>
+                    <div class="text-secondary">No submitted or currently owned cases were found.</div>
+                  <?php endif; ?>
+                </div>
+              </div>
+
+              <div class="card glass">
+                <div class="card-header d-flex align-items-center justify-content-between"><h2 class="h6 mb-0">Successful Login History</h2><span class="badge text-bg-dark border"><?php echo $profileLoginTotal; ?> total</span></div>
+                <div class="card-body">
+                  <?php if ($profileLogins): ?>
+                    <div class="table-responsive">
+                      <table class="table table-sm align-middle mb-0">
+                        <thead><tr><th>Date / Time</th><th>IP Address</th><th>Forwarded IP Chain</th><th>User Agent</th></tr></thead>
+                        <tbody>
+                          <?php foreach ($profileLogins as $profileLogin): ?>
+                            <tr>
+                              <td class="text-nowrap"><?php echo htmlspecialchars((string)$profileLogin['logged_in_at']); ?></td>
+                              <td class="font-monospace"><?php echo htmlspecialchars((string)(($profileLogin['ip_address'] ?? '') !== '' ? $profileLogin['ip_address'] : 'Not recorded')); ?></td>
+                              <td class="font-monospace small text-break" style="max-width:18rem;"><?php echo htmlspecialchars((string)(($profileLogin['forwarded_for'] ?? '') !== '' ? $profileLogin['forwarded_for'] : '—')); ?></td>
+                              <td class="small text-break" style="min-width:20rem;"><?php echo htmlspecialchars((string)(($profileLogin['user_agent'] ?? '') !== '' ? $profileLogin['user_agent'] : 'Not recorded')); ?></td>
+                            </tr>
+                          <?php endforeach; ?>
+                        </tbody>
+                      </table>
+                    </div>
+                    <?php if ($profileLoginTotalPages > 1): ?>
+                      <nav class="d-flex align-items-center justify-content-between mt-3" aria-label="Login history pages">
+                        <a class="btn btn-outline-light btn-sm <?php echo $profileLoginPage <= 1 ? 'disabled' : ''; ?>" href="?view=user_profile&amp;id=<?php echo $profileUserId; ?>&amp;login_page=<?php echo max(1, $profileLoginPage - 1); ?>#user-profile">Previous</a>
+                        <span class="small text-secondary">Page <?php echo $profileLoginPage; ?> of <?php echo $profileLoginTotalPages; ?></span>
+                        <a class="btn btn-outline-light btn-sm <?php echo $profileLoginPage >= $profileLoginTotalPages ? 'disabled' : ''; ?>" href="?view=user_profile&amp;id=<?php echo $profileUserId; ?>&amp;login_page=<?php echo min($profileLoginTotalPages, $profileLoginPage + 1); ?>#user-profile">Next</a>
+                      </nav>
+                    <?php endif; ?>
+                  <?php else: ?>
+                    <div class="text-secondary">No login history recorded yet. Tracking begins after this feature is deployed.</div>
+                  <?php endif; ?>
+                </div>
+              </div>
+            </div>
+
+            <div class="col-lg-4">
+              <div class="card glass position-sticky" style="top:5.5rem;">
+                <div class="card-header"><h2 class="h6 mb-0"><i class="bi bi-pencil-square me-2"></i>Edit User</h2></div>
+                <form method="post" action="" autocomplete="off">
+                  <?php csrf_field(); ?>
+                  <input type="hidden" name="action" value="update_user">
+                  <input type="hidden" name="user_id" value="<?php echo (int)$profileUser['id']; ?>">
+                  <input type="hidden" name="return_to_profile" value="1">
+                  <div class="card-body vstack gap-3">
+                    <div><label class="form-label">Display Name</label><input type="text" name="display_name" class="form-control" maxlength="120" value="<?php echo htmlspecialchars((string)$profileUser['display_name']); ?>" required></div>
+                    <div><label class="form-label">Username</label><input type="text" name="username" class="form-control" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" value="<?php echo htmlspecialchars((string)$profileUser['username']); ?>" required></div>
+                    <div><label class="form-label">Email</label><input type="email" name="email" class="form-control" maxlength="254" value="<?php echo htmlspecialchars((string)$profileUser['email']); ?>" required></div>
+                    <div><label class="form-label">Role</label><select name="role" class="form-select" <?php echo $profileIsCurrentUser ? 'disabled' : ''; ?>><option value="viewer" <?php echo $profileUser['role'] === 'viewer' ? 'selected' : ''; ?>>Viewer</option><option value="admin" <?php echo $profileUser['role'] === 'admin' ? 'selected' : ''; ?>>Admin</option></select><?php if ($profileIsCurrentUser): ?><input type="hidden" name="role" value="admin"><div class="form-text">You cannot remove your own admin role.</div><?php endif; ?></div>
+                    <div class="form-check"><input type="checkbox" name="is_active" value="1" class="form-check-input" id="profileUserActive" <?php echo (int)$profileUser['is_active'] === 1 ? 'checked' : ''; ?> <?php echo $profileIsCurrentUser ? 'disabled' : ''; ?>><label class="form-check-label" for="profileUserActive">Account active</label><?php if ($profileIsCurrentUser): ?><input type="hidden" name="is_active" value="1"><?php endif; ?></div>
+                    <hr class="my-0">
+                    <div><label class="form-label">New Password</label><input type="password" name="new_password" class="form-control" minlength="8" autocomplete="new-password"><div class="form-text">Leave blank to keep the current password.</div></div>
+                    <div><label class="form-label">Confirm New Password</label><input type="password" name="password_confirm" class="form-control" minlength="8" autocomplete="new-password"></div>
+                  </div>
+                  <div class="card-footer d-flex justify-content-between gap-2">
+                    <?php if (!$profileIsCurrentUser): ?>
+                      <button type="submit" class="btn btn-outline-danger" form="deleteProfileUserForm"><i class="bi bi-person-x me-1"></i>Delete</button>
+                    <?php else: ?><span></span><?php endif; ?>
+                    <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save User</button>
+                  </div>
+                </form>
+                <?php if (!$profileIsCurrentUser): ?>
+                  <form method="post" action="" id="deleteProfileUserForm" class="d-none" onsubmit="return confirm('Delete this user permanently? Submitted cases will be preserved without this account attached.');">
+                    <?php csrf_field(); ?><input type="hidden" name="action" value="delete_user"><input type="hidden" name="user_id" value="<?php echo (int)$profileUser['id']; ?>"><input type="hidden" name="redirect_url" value="?view=users#users">
+                  </form>
+                <?php endif; ?>
+              </div>
+            </div>
+          </div>
+        <?php endif; ?>
+      <?php endif; ?>
+    </div>
+  </main>
+  <?php endif; ?>
+
   <?php if ($view === 'users'): ?>
   <main class="py-4" id="users">
     <div class="container-xl">
@@ -6588,45 +7009,68 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       <?php if (!is_admin()): ?>
         <div class="alert alert-danger">Unauthorized. Admins only.</div>
       <?php else: ?>
-        <div class="card glass">
-          <div class="card-body">
-            <?php
+        <?php
+          $users = [];
+          try {
+            $q = $pdo->query("SELECT u.id, u.email, u.display_name, u.username, u.role, u.is_active, u.created_at, u.last_login_at, u.signup_ip,
+                (SELECT COUNT(DISTINCT c.id) FROM cases c LEFT JOIN case_submission_metadata csm ON csm.case_id = c.id WHERE c.created_by = u.id OR csm.submitted_by = u.id) AS case_count,
+                (SELECT COUNT(*) FROM user_login_history ulh WHERE ulh.user_id = u.id) AS login_count,
+                (SELECT ulh.ip_address FROM user_login_history ulh WHERE ulh.user_id = u.id ORDER BY ulh.logged_in_at DESC, ulh.id DESC LIMIT 1) AS last_login_ip
+              FROM users u ORDER BY u.created_at DESC");
+            $users = $q->fetchAll();
+          } catch (Throwable $e) {
+            $_SESSION['sql_error'] = $e->getMessage();
+            log_console('ERROR', 'SQL: ' . $e->getMessage());
             $users = [];
-            try {
-              $q = $pdo->query('SELECT id, email, display_name, username, role, is_active, created_at FROM users ORDER BY created_at DESC');
-              $users = $q->fetchAll();
-            } catch (Throwable $e) {
-              $_SESSION['sql_error'] = $e->getMessage();
-log_console('ERROR', 'SQL: ' . $e->getMessage());
-              $users = [];
-            }
-            ?>
+          }
+        ?>
+        <div class="card glass">
+          <div class="card-header d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-2">
+            <div class="input-group input-group-sm" style="max-width:28rem;">
+              <span class="input-group-text"><i class="bi bi-search"></i></span>
+              <input type="search" class="form-control" id="userSummarySearch" placeholder="Search users, email, username, IP…" aria-label="Search users">
+            </div>
+            <?php if ($users): ?>
+              <form method="post" action="" id="bulkUserDeleteForm" class="m-0">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="action" value="bulk_delete_users">
+                <button type="submit" class="btn btn-danger btn-sm" id="bulkUserDeleteButton" disabled>
+                  <i class="bi bi-person-x me-1"></i>Delete selected
+                  <span class="badge text-bg-light ms-1" id="bulkUserSelectedCount">0</span>
+                </button>
+              </form>
+            <?php endif; ?>
+          </div>
+          <div class="card-body">
             <div class="table-responsive">
               <table class="table table-sm align-middle">
                 <thead>
                   <tr>
-                    <th>ID</th>
-                    <th>Display Name</th>
-                    <th>Username</th>
+                    <th style="width:2.5rem;"><input type="checkbox" class="form-check-input" id="selectAllUsers" aria-label="Select all visible users except your account"></th>
+                    <th>User</th>
                     <th>Email</th>
-                    <th>Role</th>
-                    <th>Status</th>
-                    <th>Created</th>
-                    <th>Actions</th>
+                    <th>Role / Status</th>
+                    <th>Cases</th>
+                    <th>Signup IP</th>
+                    <th>Last Login</th>
+                    <th class="text-end">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   <?php if ($users && count($users) > 0): foreach ($users as $u): ?>
-                    <tr>
-                      <td><?php echo (int)$u['id']; ?></td>
-                      <td><?php echo htmlspecialchars($u['display_name'] ?? ''); ?></td>
-                      <td><?php echo ($u['username'] ?? '') !== '' ? '@' . htmlspecialchars($u['username']) : '<span class="text-secondary">Not recorded</span>'; ?></td>
+                    <?php $isCurrentSummaryUser = (int)$u['id'] === (int)($_SESSION['user']['id'] ?? 0); ?>
+                    <tr class="user-summary-row" data-user-search="<?php echo htmlspecialchars(strtolower(implode(' ', [(string)($u['id'] ?? ''), (string)($u['display_name'] ?? ''), (string)($u['username'] ?? ''), (string)($u['email'] ?? ''), (string)($u['role'] ?? ''), (string)($u['signup_ip'] ?? ''), (string)($u['last_login_ip'] ?? '')]))); ?>">
+                      <td><input type="checkbox" class="form-check-input user-summary-checkbox" name="user_ids[]" value="<?php echo (int)$u['id']; ?>" form="bulkUserDeleteForm" aria-label="Select user #<?php echo (int)$u['id']; ?>" <?php echo $isCurrentSummaryUser ? 'disabled title="You cannot delete your own account"' : ''; ?>></td>
+                      <td><div class="fw-semibold"><?php echo htmlspecialchars((string)($u['display_name'] ?? '')); ?><?php echo $isCurrentSummaryUser ? ' <span class="badge text-bg-info">You</span>' : ''; ?></div><div class="small text-secondary">#<?php echo (int)$u['id']; ?> · <?php echo ($u['username'] ?? '') !== '' ? '@' . htmlspecialchars((string)$u['username']) : 'No username'; ?></div></td>
                       <td><?php echo htmlspecialchars($u['email'] ?? ''); ?></td>
-                      <td><span class="badge text-bg-dark border"><?php echo htmlspecialchars($u['role'] ?? 'viewer'); ?></span></td>
-                      <td><?php echo ((int)($u['is_active'] ?? 0) ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Disabled</span>'); ?></td>
-                      <td><?php echo htmlspecialchars($u['created_at'] ?? ''); ?></td>
-                      <td>
-                        <?php if ((int)$u['id'] !== (int)($_SESSION['user']['id'] ?? 0)): ?>
+                      <td><span class="badge text-bg-dark border"><?php echo htmlspecialchars(ucfirst((string)($u['role'] ?? 'viewer'))); ?></span> <?php echo ((int)($u['is_active'] ?? 0) ? '<span class="badge bg-success">Active</span>' : '<span class="badge bg-secondary">Disabled</span>'); ?></td>
+                      <td><span class="badge text-bg-dark border"><?php echo (int)($u['case_count'] ?? 0); ?></span></td>
+                      <td class="font-monospace small"><?php echo htmlspecialchars((string)(($u['signup_ip'] ?? '') !== '' ? $u['signup_ip'] : 'Not recorded')); ?></td>
+                      <td><div class="text-nowrap"><?php echo htmlspecialchars((string)(($u['last_login_at'] ?? '') !== '' ? $u['last_login_at'] : 'Never')); ?></div><div class="font-monospace small text-secondary"><?php echo htmlspecialchars((string)(($u['last_login_ip'] ?? '') !== '' ? $u['last_login_ip'] : 'No IP recorded')); ?></div></td>
+                      <td class="text-end text-nowrap">
+                        <a class="btn btn-sm btn-outline-light" href="?view=user_profile&amp;id=<?php echo (int)$u['id']; ?>#user-profile"><i class="bi bi-eye me-1"></i>View</a>
+                        <button type="button" class="btn btn-sm btn-outline-primary edit-user-button" data-bs-toggle="modal" data-bs-target="#editUserModal" data-user-id="<?php echo (int)$u['id']; ?>" data-display-name="<?php echo htmlspecialchars((string)($u['display_name'] ?? '')); ?>" data-username="<?php echo htmlspecialchars((string)($u['username'] ?? '')); ?>" data-email="<?php echo htmlspecialchars((string)($u['email'] ?? '')); ?>" data-role="<?php echo htmlspecialchars((string)($u['role'] ?? 'viewer')); ?>" data-active="<?php echo (int)($u['is_active'] ?? 0); ?>" data-is-self="<?php echo $isCurrentSummaryUser ? '1' : '0'; ?>"><i class="bi bi-pencil-square me-1"></i>Edit</button>
+                        <?php if (!$isCurrentSummaryUser): ?>
                           <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this user permanently? This cannot be undone.');">
                             <input type="hidden" name="action" value="delete_user">
                             <?php csrf_field(); ?>
@@ -6634,8 +7078,6 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                             <input type="hidden" name="redirect_url" value="?view=users#users">
                             <button type="submit" class="btn btn-sm btn-outline-danger"><i class="bi bi-person-x me-1"></i>Delete</button>
                           </form>
-                        <?php else: ?>
-                          <span class="text-secondary small">(You)</span>
                         <?php endif; ?>
                       </td>
                     </tr>
@@ -6645,6 +7087,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 </tbody>
               </table>
             </div>
+            <div class="small text-secondary d-none" id="userSummaryNoResults">No users match this search.</div>
           </div>
         </div>
       <?php endif; ?>
@@ -6707,6 +7150,120 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           </div>
         </div>
       </div>
+
+      <?php if (is_admin()): ?>
+      <div class="modal fade" id="editUserModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-md modal-dialog-centered">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>Edit User</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <form method="post" action="" id="editUserForm" autocomplete="off">
+              <?php csrf_field(); ?>
+              <input type="hidden" name="action" value="update_user">
+              <input type="hidden" name="user_id" id="editUserId" value="">
+              <div class="modal-body vstack gap-3">
+                <div><label class="form-label" for="editUserDisplayName">Display Name</label><input type="text" name="display_name" id="editUserDisplayName" class="form-control" maxlength="120" required></div>
+                <div><label class="form-label" for="editUserUsername">Username</label><input type="text" name="username" id="editUserUsername" class="form-control" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" required></div>
+                <div><label class="form-label" for="editUserEmail">Email</label><input type="email" name="email" id="editUserEmail" class="form-control" maxlength="254" required></div>
+                <div class="row g-2">
+                  <div class="col-md-6"><label class="form-label" for="editUserRole">Role</label><select name="role" id="editUserRole" class="form-select"><option value="viewer">Viewer</option><option value="admin">Admin</option></select></div>
+                  <div class="col-md-6 d-flex align-items-end"><div class="form-check mb-2"><input type="checkbox" name="is_active" value="1" class="form-check-input" id="editUserActive"><label class="form-check-label" for="editUserActive">Account active</label></div></div>
+                </div>
+                <div class="alert alert-info py-2 mb-0 d-none" id="editUserSelfNotice">Your own admin role and active status cannot be removed.</div>
+                <hr class="my-0">
+                <div><label class="form-label" for="editUserPassword">New Password</label><input type="password" name="new_password" id="editUserPassword" class="form-control" minlength="8" autocomplete="new-password"><div class="form-text">Leave blank to keep the current password.</div></div>
+                <div><label class="form-label" for="editUserPasswordConfirm">Confirm New Password</label><input type="password" name="password_confirm" id="editUserPasswordConfirm" class="form-control" minlength="8" autocomplete="new-password"></div>
+              </div>
+              <div class="modal-footer">
+                <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+                <button type="submit" class="btn btn-primary"><i class="bi bi-save me-1"></i>Save User</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+      <?php endif; ?>
+
+      <script>
+      (function () {
+        var rows = Array.prototype.slice.call(document.querySelectorAll('.user-summary-row'));
+        var search = document.getElementById('userSummarySearch');
+        var noResults = document.getElementById('userSummaryNoResults');
+        var selectAll = document.getElementById('selectAllUsers');
+        var checkboxes = Array.prototype.slice.call(document.querySelectorAll('.user-summary-checkbox:not(:disabled)'));
+        var bulkForm = document.getElementById('bulkUserDeleteForm');
+        var bulkButton = document.getElementById('bulkUserDeleteButton');
+        var countBadge = document.getElementById('bulkUserSelectedCount');
+
+        function visibleCheckboxes() {
+          return checkboxes.filter(function (checkbox) { return !checkbox.closest('tr').hidden; });
+        }
+        function updateBulkControls() {
+          if (!selectAll || !bulkButton || !countBadge) return;
+          var visible = visibleCheckboxes();
+          var visibleSelected = visible.filter(function (checkbox) { return checkbox.checked; }).length;
+          var totalSelected = checkboxes.filter(function (checkbox) { return checkbox.checked; }).length;
+          countBadge.textContent = String(totalSelected);
+          bulkButton.disabled = totalSelected === 0;
+          selectAll.disabled = visible.length === 0;
+          selectAll.checked = visible.length > 0 && visibleSelected === visible.length;
+          selectAll.indeterminate = visibleSelected > 0 && visibleSelected < visible.length;
+        }
+        if (search) {
+          search.addEventListener('input', function () {
+            var term = search.value.trim().toLocaleLowerCase();
+            var visibleCount = 0;
+            rows.forEach(function (row) {
+              var matches = term === '' || (row.getAttribute('data-user-search') || '').indexOf(term) !== -1;
+              row.hidden = !matches;
+              if (matches) visibleCount++;
+            });
+            if (noResults) noResults.classList.toggle('d-none', visibleCount !== 0);
+            updateBulkControls();
+          });
+        }
+        if (selectAll) {
+          selectAll.addEventListener('change', function () {
+            visibleCheckboxes().forEach(function (checkbox) { checkbox.checked = selectAll.checked; });
+            updateBulkControls();
+          });
+        }
+        checkboxes.forEach(function (checkbox) { checkbox.addEventListener('change', updateBulkControls); });
+        if (bulkForm) {
+          bulkForm.addEventListener('submit', function (event) {
+            var selectedCount = checkboxes.filter(function (checkbox) { return checkbox.checked; }).length;
+            if (selectedCount === 0 || !confirm('Delete ' + selectedCount + ' selected user account' + (selectedCount === 1 ? '' : 's') + '? Submitted cases will be preserved without those accounts attached.')) {
+              event.preventDefault();
+            }
+          });
+        }
+        updateBulkControls();
+
+        var editModal = document.getElementById('editUserModal');
+        if (editModal) {
+          editModal.addEventListener('show.bs.modal', function (event) {
+            var button = event.relatedTarget;
+            if (!button) return;
+            var isSelf = button.getAttribute('data-is-self') === '1';
+            document.getElementById('editUserId').value = button.getAttribute('data-user-id') || '';
+            document.getElementById('editUserDisplayName').value = button.getAttribute('data-display-name') || '';
+            document.getElementById('editUserUsername').value = button.getAttribute('data-username') || '';
+            document.getElementById('editUserEmail').value = button.getAttribute('data-email') || '';
+            var role = document.getElementById('editUserRole');
+            var active = document.getElementById('editUserActive');
+            role.value = button.getAttribute('data-role') || 'viewer';
+            role.disabled = isSelf;
+            active.checked = button.getAttribute('data-active') === '1';
+            active.disabled = isSelf;
+            document.getElementById('editUserSelfNotice').classList.toggle('d-none', !isSelf);
+            document.getElementById('editUserPassword').value = '';
+            document.getElementById('editUserPasswordConfirm').value = '';
+          });
+        }
+      })();
+      </script>
     </div>
   </main>
   <?php endif; ?>
@@ -8363,7 +8920,17 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <div class="col-md-3">
                 <label class="form-label">Status</label>
                 <select name="status" class="form-select" required>
-                  <?php $currentStatus = (string)($viewCase['status'] ?? 'Being Built'); $statOpts = in_array($currentStatus, ['Being Built','Rejected'], true) ? [$currentStatus] : ['Being Built','Pending','Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = ($currentStatus === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                  <?php
+                    $currentStatus = (string)($viewCase['status'] ?? 'Being Built');
+                    $statOpts = in_array($currentStatus, ['Being Built','Rejected'], true)
+                      ? [$currentStatus]
+                      : ['Being Built','Pending','Open','In Review','Verified','Verified dont announce','Closed'];
+                    foreach ($statOpts as $opt) {
+                      $sel = ($currentStatus === $opt) ? ' selected' : '';
+                      $label = $opt === 'Verified dont announce' ? "Verified — Don't Announce" : $opt;
+                      echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($label)."</option>";
+                    }
+                  ?>
                 </select>
               </div>
             </div>
@@ -8786,7 +9353,17 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="col-md-3">
                     <label class="form-label">Status</label>
                     <select name="status" class="form-select" required>
-                      <?php $currentStatus = (string)($caseRow['status'] ?? 'Being Built'); $statOpts = in_array($currentStatus, ['Being Built','Rejected'], true) ? [$currentStatus] : ['Being Built','Pending','Open','In Review','Verified','Closed']; foreach ($statOpts as $opt) { $sel = ($currentStatus === $opt) ? ' selected' : ''; echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($opt)."</option>"; } ?>
+                      <?php
+                        $currentStatus = (string)($caseRow['status'] ?? 'Being Built');
+                        $statOpts = in_array($currentStatus, ['Being Built','Rejected'], true)
+                          ? [$currentStatus]
+                          : ['Being Built','Pending','Open','In Review','Verified','Verified dont announce','Closed'];
+                        foreach ($statOpts as $opt) {
+                          $sel = ($currentStatus === $opt) ? ' selected' : '';
+                          $label = $opt === 'Verified dont announce' ? "Verified — Don't Announce" : $opt;
+                          echo '<option value="'.htmlspecialchars($opt).'"'.$sel.'>'.htmlspecialchars($label)."</option>";
+                        }
+                      ?>
                     </select>
                   </div>
                 </div>
