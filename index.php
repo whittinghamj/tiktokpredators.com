@@ -2200,6 +2200,45 @@ if (($_POST['action'] ?? '') === 'update_view_client') {
   exit;
 }
 
+// Check account username availability without reloading the page.
+if (($_POST['action'] ?? '') === 'check_username_availability') {
+  header('Content-Type: application/json; charset=utf-8');
+  header('Cache-Control: no-store');
+
+  if (!check_csrf()) {
+    http_response_code(403);
+    echo json_encode(['ok' => false, 'available' => false, 'message' => 'Security check failed. Please refresh and try again.']);
+    exit;
+  }
+
+  $username = tp_post_string('username');
+  if (!preg_match('/\A[A-Za-z0-9._-]{3,120}\z/D', $username)) {
+    echo json_encode([
+      'ok' => true,
+      'available' => false,
+      'message' => 'Use 3–120 characters: letters, numbers, dots, underscores, or hyphens.',
+    ]);
+    exit;
+  }
+
+  $excludeUserId = is_admin() ? max(0, (int)($_POST['exclude_user_id'] ?? 0)) : 0;
+  try {
+    $availability = $pdo->prepare('SELECT id FROM users WHERE LOWER(username) = LOWER(?) AND id <> ? LIMIT 1');
+    $availability->execute([$username, $excludeUserId]);
+    $available = !$availability->fetch();
+    echo json_encode([
+      'ok' => true,
+      'available' => $available,
+      'message' => $available ? 'Username is available.' : 'That username is already taken.',
+    ]);
+  } catch (Throwable $e) {
+    http_response_code(500);
+    log_console('ERROR', 'USERNAME AVAILABILITY: ' . $e->getMessage());
+    echo json_encode(['ok' => false, 'available' => false, 'message' => 'Unable to check username availability. Please try again.']);
+  }
+  exit;
+}
+
 // Handle login POST
 if (($_POST['action'] ?? '') === 'login') {
     throttle();
@@ -2302,7 +2341,7 @@ if (($_POST['action'] ?? '') === 'register') {
     }
 
     try {
-        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? OR username = ? LIMIT 1');
+        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? OR LOWER(username) = LOWER(?) LIMIT 1');
         $stmt->execute([$email, $username]);
         if ($stmt->fetch()) {
             flash('error', 'That email address or username is already registered.');
@@ -2384,7 +2423,7 @@ if (($_POST['action'] ?? '') === 'admin_add_user') {
     if (!in_array($role, $allowedRoles, true)) { $role = 'viewer'; }
 
     try {
-        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? OR username = ? LIMIT 1');
+        $stmt = $pdo->prepare('SELECT id FROM users WHERE email = ? OR LOWER(username) = LOWER(?) LIMIT 1');
         $stmt->execute([$email, $username]);
         if ($stmt->fetch()) {
             flash('error', 'That email address or username is already registered.');
@@ -4252,7 +4291,7 @@ if (($_POST['action'] ?? '') === 'update_user') {
         if (!$exists->fetch()) {
             flash('error', 'User not found.'); header('Location: ?view=users#users'); exit;
         }
-        $duplicate = $pdo->prepare('SELECT id FROM users WHERE (email = ? OR username = ?) AND id <> ? LIMIT 1');
+        $duplicate = $pdo->prepare('SELECT id FROM users WHERE (email = ? OR LOWER(username) = LOWER(?)) AND id <> ? LIMIT 1');
         $duplicate->execute([$email, $username, $userId]);
         if ($duplicate->fetch()) {
             flash('error', 'That email address or username is already registered.'); header('Location: ' . $redirect); exit;
@@ -4276,7 +4315,8 @@ if (($_POST['action'] ?? '') === 'update_user') {
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $e->getMessage();
         log_console('ERROR', 'SQL: ' . $e->getMessage());
-        flash('error', 'Unable to update user.');
+        $code = ($e instanceof PDOException && isset($e->errorInfo[1])) ? (int)$e->errorInfo[1] : 0;
+        flash('error', $code === 1062 ? 'That email address or username is already registered.' : 'Unable to update user.');
     }
     header('Location: ' . $redirect); exit;
 }
@@ -4849,7 +4889,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
 
           <!-- Register pane -->
           <div class="tab-pane fade" id="pane-register" role="tabpanel" aria-labelledby="tab-register" tabindex="0">
-            <form method="post" action="">
+            <form method="post" action="" data-username-availability-form>
               <input type="hidden" name="action" value="register">
               <?php csrf_field(); ?>
               <div class="mb-3">
@@ -4858,7 +4898,8 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
               </div>
               <div class="mb-3">
                 <label for="reg_username" class="form-label">Username</label>
-                <input type="text" class="form-control" id="reg_username" name="username" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" placeholder="your_username" required>
+                <input type="text" class="form-control" id="reg_username" name="username" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" placeholder="your_username" aria-describedby="regUsernameAvailability" data-username-availability required>
+                <div class="form-text" id="regUsernameAvailability" data-username-availability-feedback aria-live="polite">Enter a username to check availability.</div>
               </div>
               <div class="mb-3">
                 <label for="reg_email" class="form-label">Email</label>
@@ -4911,6 +4952,153 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     });
   }
 })();
+</script>
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+  var usernamePattern = /^[A-Za-z0-9._-]{3,120}$/;
+
+  document.querySelectorAll('input[data-username-availability]').forEach(function (input) {
+    var form = input.closest('form[data-username-availability-form]');
+    var feedbackId = input.getAttribute('aria-describedby');
+    var feedback = feedbackId ? document.getElementById(feedbackId) : null;
+    var debounceTimer = null;
+    var requestController = null;
+    var checkedUsername = '';
+    var availabilityState = 'unchecked';
+
+    if (!form || !feedback) return;
+
+    function showStatus(state, message) {
+      availabilityState = state;
+      feedback.textContent = message;
+      feedback.classList.remove('text-success', 'text-danger', 'text-info', 'text-secondary');
+      input.classList.remove('is-valid', 'is-invalid');
+
+      if (state === 'available') {
+        feedback.classList.add('text-success');
+        input.classList.add('is-valid');
+      } else if (state === 'taken' || state === 'error' || state === 'invalid') {
+        feedback.classList.add('text-danger');
+        input.classList.add('is-invalid');
+      } else if (state === 'checking') {
+        feedback.classList.add('text-info');
+      } else {
+        feedback.classList.add('text-secondary');
+      }
+    }
+
+    function localValidationMessage(username) {
+      if (username === '') return 'Enter a username to check availability.';
+      if (!usernamePattern.test(username)) {
+        return 'Use 3–120 characters: letters, numbers, dots, underscores, or hyphens.';
+      }
+      return '';
+    }
+
+    function checkAvailability() {
+      clearTimeout(debounceTimer);
+      var username = input.value.trim();
+      var validationMessage = localValidationMessage(username);
+      input.setCustomValidity('');
+
+      if (validationMessage !== '') {
+        checkedUsername = '';
+        showStatus(username === '' ? 'unchecked' : 'invalid', validationMessage);
+        return Promise.resolve(false);
+      }
+
+      if (requestController) requestController.abort();
+      requestController = new AbortController();
+      var activeController = requestController;
+      var formData = new FormData();
+      var csrfInput = form.querySelector('input[name="csrf_token"]');
+      var userIdInput = form.querySelector('input[name="user_id"]');
+      formData.append('action', 'check_username_availability');
+      formData.append('csrf_token', csrfInput ? csrfInput.value : '');
+      formData.append('username', username);
+      formData.append('exclude_user_id', userIdInput ? userIdInput.value : '0');
+      showStatus('checking', 'Checking username availability…');
+
+      return fetch(window.location.pathname + window.location.search, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'X-Requested-With': 'XMLHttpRequest' },
+        body: formData,
+        signal: activeController.signal
+      }).then(function (response) {
+        return response.json().then(function (data) {
+          if (!response.ok || !data.ok) throw new Error(data.message || 'Unable to check username availability.');
+          return data;
+        });
+      }).then(function (data) {
+        if (input.value.trim() !== username || requestController !== activeController) return false;
+        checkedUsername = username;
+        if (data.available) {
+          input.setCustomValidity('');
+          showStatus('available', data.message || 'Username is available.');
+          return true;
+        }
+        input.setCustomValidity(data.message || 'That username is already taken.');
+        showStatus('taken', data.message || 'That username is already taken.');
+        return false;
+      }).catch(function (error) {
+        if (error.name === 'AbortError') return false;
+        if (input.value.trim() !== username) return false;
+        checkedUsername = '';
+        var message = error.message || 'Unable to check username availability. Please try again.';
+        input.setCustomValidity(message);
+        showStatus('error', message);
+        return false;
+      });
+    }
+
+    input.addEventListener('input', function () {
+      clearTimeout(debounceTimer);
+      if (requestController) requestController.abort();
+      requestController = null;
+      checkedUsername = '';
+      input.setCustomValidity('');
+      var username = input.value.trim();
+      var validationMessage = localValidationMessage(username);
+      if (validationMessage !== '') {
+        showStatus(username === '' ? 'unchecked' : 'invalid', validationMessage);
+        return;
+      }
+      showStatus('waiting', 'Waiting to check availability…');
+      debounceTimer = setTimeout(checkAvailability, 350);
+    });
+
+    input.addEventListener('blur', function () {
+      if (availabilityState !== 'available' || checkedUsername !== input.value.trim()) {
+        checkAvailability();
+      }
+    });
+
+    form.addEventListener('submit', function (event) {
+      var username = input.value.trim();
+      if (availabilityState === 'available' && checkedUsername === username) return;
+
+      event.preventDefault();
+      var submitter = event.submitter;
+      checkAvailability().then(function (available) {
+        if (!available) {
+          input.reportValidity();
+          return;
+        }
+        if (typeof form.requestSubmit === 'function') {
+          form.requestSubmit(submitter || undefined);
+        } else {
+          form.submit();
+        }
+      });
+    });
+
+    if (input.value.trim() !== '') {
+      debounceTimer = setTimeout(checkAvailability, 350);
+    }
+  });
+});
 </script>
 
   <?php if (!empty($openAuth)): ?>
@@ -6984,14 +7172,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             <div class="col-lg-4">
               <div class="card glass position-sticky" style="top:5.5rem;">
                 <div class="card-header"><h2 class="h6 mb-0"><i class="bi bi-pencil-square me-2"></i>Edit User</h2></div>
-                <form method="post" action="" autocomplete="off">
+                <form method="post" action="" autocomplete="off" data-username-availability-form>
                   <?php csrf_field(); ?>
                   <input type="hidden" name="action" value="update_user">
                   <input type="hidden" name="user_id" value="<?php echo (int)$profileUser['id']; ?>">
                   <input type="hidden" name="return_to_profile" value="1">
                   <div class="card-body vstack gap-3">
                     <div><label class="form-label">Display Name</label><input type="text" name="display_name" class="form-control" maxlength="120" value="<?php echo htmlspecialchars((string)$profileUser['display_name']); ?>" required></div>
-                    <div><label class="form-label">Username</label><input type="text" name="username" class="form-control" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" value="<?php echo htmlspecialchars((string)$profileUser['username']); ?>" required></div>
+                    <div><label class="form-label" for="profileUserUsername">Username</label><input type="text" name="username" id="profileUserUsername" class="form-control" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" value="<?php echo htmlspecialchars((string)$profileUser['username']); ?>" aria-describedby="profileUsernameAvailability" data-username-availability required><div class="form-text" id="profileUsernameAvailability" data-username-availability-feedback aria-live="polite">Checking username availability…</div></div>
                     <div><label class="form-label">Email</label><input type="email" name="email" class="form-control" maxlength="254" value="<?php echo htmlspecialchars((string)$profileUser['email']); ?>" required></div>
                     <div><label class="form-label">Role</label><select name="role" class="form-select" <?php echo $profileIsCurrentUser ? 'disabled' : ''; ?>><option value="viewer" <?php echo $profileUser['role'] === 'viewer' ? 'selected' : ''; ?>>Viewer</option><option value="admin" <?php echo $profileUser['role'] === 'admin' ? 'selected' : ''; ?>>Admin</option></select><?php if ($profileIsCurrentUser): ?><input type="hidden" name="role" value="admin"><div class="form-text">You cannot remove your own admin role.</div><?php endif; ?></div>
                     <div class="form-check"><input type="checkbox" name="is_active" value="1" class="form-check-input" id="profileUserActive" <?php echo (int)$profileUser['is_active'] === 1 ? 'checked' : ''; ?> <?php echo $profileIsCurrentUser ? 'disabled' : ''; ?>><label class="form-check-label" for="profileUserActive">Account active</label><?php if ($profileIsCurrentUser): ?><input type="hidden" name="is_active" value="1"><?php endif; ?></div>
@@ -7184,13 +7372,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
               <h5 class="modal-title"><i class="bi bi-pencil-square me-2"></i>Edit User</h5>
               <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
-            <form method="post" action="" id="editUserForm" autocomplete="off">
+            <form method="post" action="" id="editUserForm" autocomplete="off" data-username-availability-form>
               <?php csrf_field(); ?>
               <input type="hidden" name="action" value="update_user">
               <input type="hidden" name="user_id" id="editUserId" value="">
               <div class="modal-body vstack gap-3">
                 <div><label class="form-label" for="editUserDisplayName">Display Name</label><input type="text" name="display_name" id="editUserDisplayName" class="form-control" maxlength="120" required></div>
-                <div><label class="form-label" for="editUserUsername">Username</label><input type="text" name="username" id="editUserUsername" class="form-control" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" required></div>
+                <div><label class="form-label" for="editUserUsername">Username</label><input type="text" name="username" id="editUserUsername" class="form-control" minlength="3" maxlength="120" pattern="[A-Za-z0-9._-]+" aria-describedby="editUsernameAvailability" data-username-availability required><div class="form-text" id="editUsernameAvailability" data-username-availability-feedback aria-live="polite">Enter a username to check availability.</div></div>
                 <div><label class="form-label" for="editUserEmail">Email</label><input type="email" name="email" id="editUserEmail" class="form-control" maxlength="254" required></div>
                 <div class="row g-2">
                   <div class="col-md-6"><label class="form-label" for="editUserRole">Role</label><select name="role" id="editUserRole" class="form-select"><option value="viewer">Viewer</option><option value="admin">Admin</option></select></div>
@@ -7274,7 +7462,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             var isSelf = button.getAttribute('data-is-self') === '1';
             document.getElementById('editUserId').value = button.getAttribute('data-user-id') || '';
             document.getElementById('editUserDisplayName').value = button.getAttribute('data-display-name') || '';
-            document.getElementById('editUserUsername').value = button.getAttribute('data-username') || '';
+            var username = document.getElementById('editUserUsername');
+            username.value = button.getAttribute('data-username') || '';
+            username.dispatchEvent(new Event('input', { bubbles: true }));
             document.getElementById('editUserEmail').value = button.getAttribute('data-email') || '';
             var role = document.getElementById('editUserRole');
             var active = document.getElementById('editUserActive');
