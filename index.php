@@ -279,6 +279,149 @@ function tp_test_openai_api_key(string $apiKey): array {
   return [false, $httpCode, 'OpenAI test failed with HTTP ' . ($httpCode > 0 ? $httpCode : 'unknown') . '.'];
 }
 
+function tp_ai_case_field_labels(): array {
+  return [
+    'case_name' => 'Case Name',
+    'person_name' => 'Person Name',
+    'location' => 'Location',
+    'snapchat_username' => 'Snapchat Username',
+    'tiktok_username' => 'TikTok Usernames',
+    'initial_summary' => 'Summary',
+    'case_tags' => 'Case Tags',
+  ];
+}
+
+function tp_ai_case_current_values(PDO $pdo, array $case): array {
+  $caseId = (int)($case['id'] ?? 0);
+  $tiktok = $caseId > 0 ? get_case_tiktok_usernames($pdo, $caseId) : '';
+  if ($tiktok === '') { $tiktok = normalize_tiktok_usernames($case['tiktok_username'] ?? ''); }
+  $tags = $caseId > 0 ? get_case_tags($pdo, $caseId) : [];
+  return [
+    'case_name' => trim((string)($case['case_name'] ?? '')),
+    'person_name' => trim((string)($case['person_name'] ?? '')),
+    'location' => trim((string)($case['location'] ?? '')),
+    'snapchat_username' => normalize_social_username($case['snapchat_username'] ?? ''),
+    'tiktok_username' => $tiktok,
+    'initial_summary' => trim((string)($case['initial_summary'] ?? '')),
+    'case_tags' => implode(', ', array_keys($tags)),
+  ];
+}
+
+function tp_ai_normalize_case_suggestion(string $field, string $value): string {
+  $value = trim($value);
+  if ($field === 'tiktok_username') { return normalize_tiktok_usernames($value); }
+  if ($field === 'snapchat_username') { return normalize_social_username($value); }
+  if ($field === 'case_tags') { return implode(', ', array_keys(tp_normalize_case_tags($value))); }
+
+  $limits = [
+    'case_name' => 255,
+    'person_name' => 255,
+    'location' => 255,
+    'initial_summary' => 20000,
+  ];
+  $limit = (int)($limits[$field] ?? 1000);
+  return mb_substr($value, 0, $limit, 'UTF-8');
+}
+
+/** Request structured, non-binding case edit suggestions from OpenAI. */
+function tp_openai_case_builder_request(string $apiKey, string $model, array $caseContext): array {
+  $apiKey = trim($apiKey);
+  if ($apiKey === '') { return [false, [], 'OpenAI has not been configured in Project Settings.']; }
+  if (!function_exists('curl_init')) { return [false, [], 'The server cURL extension is unavailable.']; }
+
+  $fieldLabels = tp_ai_case_field_labels();
+  $schema = [
+    'type' => 'object',
+    'properties' => [
+      'overall_notes' => ['type' => 'string'],
+      'suggestions' => [
+        'type' => 'array',
+        'maxItems' => 8,
+        'items' => [
+          'type' => 'object',
+          'properties' => [
+            'field' => ['type' => 'string', 'enum' => array_keys($fieldLabels)],
+            'suggested_value' => ['type' => 'string'],
+            'reason' => ['type' => 'string'],
+          ],
+          'required' => ['field', 'suggested_value', 'reason'],
+          'additionalProperties' => false,
+        ],
+      ],
+    ],
+    'required' => ['overall_notes', 'suggestions'],
+    'additionalProperties' => false,
+  ];
+
+  $payload = [
+    'model' => $model,
+    'store' => false,
+    'instructions' => 'You are an editing assistant for a sensitive case-record system. Suggest only materially helpful edits for factual clarity, neutral wording, consistency, formatting, or privacy. Never invent facts, infer guilt, make legal conclusions, add allegations, or identify people from indirect clues. Do not suggest changing phone numbers, case status, sensitivity, ownership, identifiers, or evidence. Use only the allowed field names. Preserve every material fact and uncertainty. Case tags must be a comma-separated list selected only from allowed_case_tags. Return at most eight distinct suggestions. If no safe improvement is supported by the supplied record, return an empty suggestions array.',
+    'input' => json_encode($caseContext, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+    'max_output_tokens' => 4000,
+    'text' => [
+      'format' => [
+        'type' => 'json_schema',
+        'name' => 'case_builder_suggestions',
+        'schema' => $schema,
+        'strict' => true,
+      ],
+    ],
+  ];
+  if ($payload['input'] === false) { return [false, [], 'Unable to prepare the case for AI review.']; }
+  $payloadJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+  if ($payloadJson === false) { return [false, [], 'Unable to prepare the AI request.']; }
+
+  $ch = curl_init('https://api.openai.com/v1/responses');
+  curl_setopt_array($ch, [
+    CURLOPT_POST => true,
+    CURLOPT_POSTFIELDS => $payloadJson,
+    CURLOPT_HTTPHEADER => [
+      'Authorization: Bearer ' . $apiKey,
+      'Content-Type: application/json',
+      'Accept: application/json',
+    ],
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_CONNECTTIMEOUT => 10,
+    CURLOPT_TIMEOUT => 60,
+    CURLOPT_PROTOCOLS => CURLPROTO_HTTPS,
+  ]);
+  $response = curl_exec($ch);
+  $curlError = curl_error($ch);
+  $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+  if ($response === false) {
+    return [false, [], 'Unable to connect to OpenAI: ' . ($curlError !== '' ? $curlError : 'network error')];
+  }
+
+  $decoded = json_decode((string)$response, true);
+  if ($httpCode < 200 || $httpCode >= 300) {
+    if ($httpCode === 401) { return [false, [], 'OpenAI rejected the configured API key.']; }
+    if ($httpCode === 403) { return [false, [], 'The configured OpenAI project cannot use this model.']; }
+    if ($httpCode === 429) { return [false, [], 'OpenAI rate-limited the request or the project has no available quota.']; }
+    $apiMessage = is_array($decoded) ? trim((string)($decoded['error']['message'] ?? '')) : '';
+    $safeMessage = $apiMessage !== '' ? mb_substr($apiMessage, 0, 240, 'UTF-8') : ('HTTP ' . ($httpCode > 0 ? $httpCode : 'unknown'));
+    return [false, [], 'OpenAI could not analyse this case: ' . $safeMessage];
+  }
+
+  $outputText = '';
+  $refusal = '';
+  foreach (($decoded['output'] ?? []) as $item) {
+    if (!is_array($item)) { continue; }
+    foreach (($item['content'] ?? []) as $content) {
+      if (!is_array($content)) { continue; }
+      if (($content['type'] ?? '') === 'output_text') { $outputText .= (string)($content['text'] ?? ''); }
+      if (($content['type'] ?? '') === 'refusal') { $refusal = trim((string)($content['refusal'] ?? '')); }
+    }
+  }
+  if ($refusal !== '') { return [false, [], 'OpenAI declined to analyse this case. Review its content and try again.']; }
+  if ($outputText === '') { return [false, [], 'OpenAI returned no case suggestions.']; }
+  $result = json_decode($outputText, true);
+  if (!is_array($result) || !isset($result['suggestions']) || !is_array($result['suggestions'])) {
+    return [false, [], 'OpenAI returned an invalid suggestion format.'];
+  }
+  return [true, $result, ''];
+}
+
 /** Allow the original submitter to build or revise an unpublished case. */
 function can_manage_case_submission(PDO $pdo, int $caseId): bool {
     if ($caseId <= 0 || empty($_SESSION['user'])) { return false; }
@@ -942,6 +1085,44 @@ try {
             INDEX idx_case_id_created (case_id, created_at),
             INDEX idx_event_type (event_type),
             INDEX idx_ref_evidence (ref_evidence_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+} catch (Throwable $e) {
+    $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+// --- AI-assisted case builder runs and reviewable suggestions ---
+try {
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS case_ai_runs (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            case_id BIGINT UNSIGNED NOT NULL,
+            requested_by BIGINT UNSIGNED NULL,
+            model VARCHAR(128) NOT NULL,
+            status ENUM('Processing','Completed','Failed') NOT NULL DEFAULT 'Processing',
+            overall_notes TEXT NULL,
+            error_message TEXT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            completed_at DATETIME NULL,
+            INDEX idx_case_ai_runs_case_created (case_id, created_at),
+            INDEX idx_case_ai_runs_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+    ");
+    $pdo->exec("
+        CREATE TABLE IF NOT EXISTS case_ai_suggestions (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            run_id BIGINT UNSIGNED NOT NULL,
+            case_id BIGINT UNSIGNED NOT NULL,
+            field_name VARCHAR(64) NOT NULL,
+            current_value LONGTEXT NULL,
+            suggested_value LONGTEXT NOT NULL,
+            reason TEXT NOT NULL,
+            decision ENUM('Pending','Approved','Rejected') NOT NULL DEFAULT 'Pending',
+            decided_by BIGINT UNSIGNED NULL,
+            decided_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_case_ai_suggestions_run (run_id, id),
+            INDEX idx_case_ai_suggestions_case_decision (case_id, decision),
+            INDEX idx_case_ai_suggestions_decided_by (decided_by)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     ");
 } catch (Throwable $e) {
@@ -2117,6 +2298,191 @@ if (($_POST['action'] ?? '') === 'test_discord_webhook') {
     }
     header('Location: '. $redir); exit;
   }
+
+// Generate reviewable AI suggestions for an owned draft or, for admins, any case.
+if (($_POST['action'] ?? '') === 'generate_ai_case_suggestions') {
+    throttle();
+    $caseCode = trim((string)($_POST['case_code'] ?? ''));
+    $redirect = '?view=case&code=' . rawurlencode($caseCode) . '#ai-case-builder';
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ' . $redirect); exit; }
+    if (!is_logged_in()) { flash('error', 'You must be logged in to use the AI case builder.'); header('Location: ' . $redirect); exit; }
+
+    $caseId = (int)($_POST['case_id'] ?? 0);
+    try {
+      $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, snapchat_username, tiktok_username, initial_summary, status, created_by FROM cases WHERE id = ? LIMIT 1');
+      $caseStmt->execute([$caseId]);
+      $case = $caseStmt->fetch();
+      if (!$case) { throw new RuntimeException('Case not found.'); }
+      $caseCode = (string)$case['case_code'];
+      $redirect = '?view=case&code=' . rawurlencode($caseCode) . '#ai-case-builder';
+
+      $isOwnerDraft = (int)($case['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0)
+        && (string)($case['status'] ?? '') === 'Being Built';
+      if (!is_admin() && !$isOwnerDraft) {
+        flash('error', 'Only an admin, or the owner of a case being built, can run the AI case builder.');
+        header('Location: ' . $redirect); exit;
+      }
+
+      $apiKey = trim(tp_project_setting($pdo, 'openai_api_key', ''));
+      if ($apiKey === '') {
+        flash('error', 'OpenAI has not been configured in Project Settings.');
+        header('Location: ' . $redirect); exit;
+      }
+      $model = trim(tp_project_setting($pdo, 'openai_case_builder_model', 'gpt-5.4-mini'));
+      if ($model === '') { $model = 'gpt-5.4-mini'; }
+
+      $runStmt = $pdo->prepare("INSERT INTO case_ai_runs (case_id, requested_by, model, status) VALUES (?, ?, ?, 'Processing')");
+      $runStmt->execute([$caseId, (int)($_SESSION['user']['id'] ?? 0), mb_substr($model, 0, 128, 'UTF-8')]);
+      $runId = (int)$pdo->lastInsertId();
+
+      $currentValues = tp_ai_case_current_values($pdo, $case);
+      $safeValues = $currentValues;
+      foreach ($safeValues as $field => $value) {
+        $safeValues[$field] = mb_substr((string)$value, 0, $field === 'initial_summary' ? 12000 : 1000, 'UTF-8');
+      }
+      $evidenceMeta = [];
+      $evidenceStmt = $pdo->prepare('SELECT type, title, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC LIMIT 30');
+      $evidenceStmt->execute([$caseId]);
+      foreach ($evidenceStmt->fetchAll() as $evidenceRow) {
+        $evidenceMeta[] = [
+          'type' => mb_substr(trim((string)($evidenceRow['type'] ?? '')), 0, 64, 'UTF-8'),
+          'title' => mb_substr(trim((string)($evidenceRow['title'] ?? '')), 0, 255, 'UTF-8'),
+          'created_at' => (string)($evidenceRow['created_at'] ?? ''),
+        ];
+      }
+      $context = [
+        'case_code' => (string)$case['case_code'],
+        'case_status' => (string)$case['status'],
+        'editable_fields' => $safeValues,
+        'allowed_case_tags' => tp_case_tag_options(),
+        'evidence_metadata' => $evidenceMeta,
+      ];
+
+      [$ok, $result, $error] = tp_openai_case_builder_request($apiKey, $model, $context);
+      if (!$ok) {
+        $failedStmt = $pdo->prepare("UPDATE case_ai_runs SET status = 'Failed', error_message = ?, completed_at = NOW() WHERE id = ?");
+        $failedStmt->execute([mb_substr($error, 0, 2000, 'UTF-8'), $runId]);
+        flash('error', $error);
+        header('Location: ' . $redirect); exit;
+      }
+
+      $labels = tp_ai_case_field_labels();
+      $insertSuggestion = $pdo->prepare("INSERT INTO case_ai_suggestions (run_id, case_id, field_name, current_value, suggested_value, reason, decision) VALUES (?, ?, ?, ?, ?, ?, 'Pending')");
+      $suggestionCount = 0;
+      $seenFields = [];
+      foreach (array_slice($result['suggestions'] ?? [], 0, 8) as $suggestion) {
+        if (!is_array($suggestion)) { continue; }
+        $field = trim((string)($suggestion['field'] ?? ''));
+        if (!isset($labels[$field]) || isset($seenFields[$field])) { continue; }
+        $suggestedValue = tp_ai_normalize_case_suggestion($field, (string)($suggestion['suggested_value'] ?? ''));
+        $reason = mb_substr(trim((string)($suggestion['reason'] ?? '')), 0, 2000, 'UTF-8');
+        $currentValue = (string)($currentValues[$field] ?? '');
+        if ($suggestedValue === '' || $reason === '' || $suggestedValue === $currentValue) { continue; }
+        $insertSuggestion->execute([$runId, $caseId, $field, $currentValue, $suggestedValue, $reason]);
+        $seenFields[$field] = true;
+        $suggestionCount++;
+      }
+      $overallNotes = mb_substr(trim((string)($result['overall_notes'] ?? '')), 0, 4000, 'UTF-8');
+      $completeStmt = $pdo->prepare("UPDATE case_ai_runs SET status = 'Completed', overall_notes = ?, completed_at = NOW() WHERE id = ?");
+      $completeStmt->execute([$overallNotes, $runId]);
+      log_case_event($pdo, $caseId, 'ai_case_reviewed', 'AI case builder', $suggestionCount . ' suggestion(s) generated for admin review.');
+      flash('success', $suggestionCount > 0
+        ? ($suggestionCount . ' AI suggestion' . ($suggestionCount === 1 ? '' : 's') . ' ready for admin review.')
+        : 'The AI review completed and found no safe changes to suggest.');
+    } catch (Throwable $e) {
+      if (!empty($runId)) {
+        try {
+          $failedStmt = $pdo->prepare("UPDATE case_ai_runs SET status = 'Failed', error_message = ?, completed_at = NOW() WHERE id = ?");
+          $failedStmt->execute(['The AI review could not be completed.', (int)$runId]);
+        } catch (Throwable $ignored) {}
+      }
+      $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+      flash('error', 'The AI review could not be completed.');
+    }
+    header('Location: ' . $redirect); exit;
+}
+
+// Admin approval/rejection is intentionally required for every AI suggestion.
+if (($_POST['action'] ?? '') === 'decide_ai_case_suggestion') {
+    throttle();
+    $caseCode = trim((string)($_POST['case_code'] ?? ''));
+    $redirect = '?view=case&code=' . rawurlencode($caseCode) . '#ai-case-builder';
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: ' . $redirect); exit; }
+    if (!is_admin()) { flash('error', 'Only a site admin can approve or reject AI suggestions.'); header('Location: ' . $redirect); exit; }
+
+    $suggestionId = (int)($_POST['suggestion_id'] ?? 0);
+    $decision = strtolower(trim((string)($_POST['decision'] ?? '')));
+    if (!in_array($decision, ['approve', 'reject'], true)) {
+      flash('error', 'Invalid AI suggestion decision.'); header('Location: ' . $redirect); exit;
+    }
+
+    try {
+      $pdo->beginTransaction();
+      $suggestionStmt = $pdo->prepare('SELECT * FROM case_ai_suggestions WHERE id = ? FOR UPDATE');
+      $suggestionStmt->execute([$suggestionId]);
+      $suggestion = $suggestionStmt->fetch();
+      if (!$suggestion) { throw new RuntimeException('Suggestion not found.'); }
+
+      $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, snapchat_username, tiktok_username, initial_summary, status, created_by FROM cases WHERE id = ? FOR UPDATE');
+      $caseStmt->execute([(int)$suggestion['case_id']]);
+      $case = $caseStmt->fetch();
+      if (!$case) { throw new RuntimeException('Case not found.'); }
+      $caseCode = (string)$case['case_code'];
+      $redirect = '?view=case&code=' . rawurlencode($caseCode) . '#ai-case-builder';
+      if (($suggestion['decision'] ?? '') !== 'Pending') {
+        $pdo->rollBack();
+        flash('error', 'This suggestion has already been decided.'); header('Location: ' . $redirect); exit;
+      }
+
+      $field = (string)($suggestion['field_name'] ?? '');
+      $labels = tp_ai_case_field_labels();
+      if (!isset($labels[$field])) { throw new RuntimeException('Unsupported suggestion field.'); }
+      $userId = (int)($_SESSION['user']['id'] ?? 0);
+
+      if ($decision === 'reject') {
+        $updateSuggestion = $pdo->prepare("UPDATE case_ai_suggestions SET decision = 'Rejected', decided_by = ?, decided_at = NOW() WHERE id = ?");
+        $updateSuggestion->execute([$userId, $suggestionId]);
+        log_case_event($pdo, (int)$case['id'], 'ai_suggestion_rejected', $labels[$field], 'AI suggestion rejected.');
+        $pdo->commit();
+        flash('success', $labels[$field] . ' suggestion rejected.');
+        header('Location: ' . $redirect); exit;
+      }
+
+      $currentValues = tp_ai_case_current_values($pdo, $case);
+      $currentValue = (string)($currentValues[$field] ?? '');
+      if ($currentValue !== (string)($suggestion['current_value'] ?? '')) {
+        $pdo->rollBack();
+        flash('error', 'The ' . $labels[$field] . ' field has changed since this suggestion was created. Run the AI case builder again before approving it.');
+        header('Location: ' . $redirect); exit;
+      }
+      $suggestedValue = tp_ai_normalize_case_suggestion($field, (string)($suggestion['suggested_value'] ?? ''));
+      if ($suggestedValue === '') { throw new RuntimeException('Suggestion value is empty.'); }
+
+      if ($field === 'case_tags') {
+        save_case_tags($pdo, (int)$case['id'], $suggestedValue);
+      } elseif ($field === 'tiktok_username') {
+        $savedTiktok = save_case_tiktok_usernames($pdo, (int)$case['id'], $suggestedValue);
+        $updateCase = $pdo->prepare('UPDATE cases SET tiktok_username = ? WHERE id = ?');
+        $updateCase->execute([$savedTiktok !== '' ? $savedTiktok : null, (int)$case['id']]);
+      } else {
+        $editableColumns = ['case_name', 'person_name', 'location', 'snapchat_username', 'initial_summary'];
+        if (!in_array($field, $editableColumns, true)) { throw new RuntimeException('Unsupported suggestion field.'); }
+        $updateCase = $pdo->prepare('UPDATE cases SET ' . $field . ' = ? WHERE id = ?');
+        $updateCase->execute([$suggestedValue, (int)$case['id']]);
+      }
+
+      $updateSuggestion = $pdo->prepare("UPDATE case_ai_suggestions SET decision = 'Approved', decided_by = ?, decided_at = NOW() WHERE id = ?");
+      $updateSuggestion->execute([$userId, $suggestionId]);
+      log_case_event($pdo, (int)$case['id'], 'ai_suggestion_approved', $labels[$field], 'AI suggestion approved and applied.');
+      $pdo->commit();
+      flash('success', $labels[$field] . ' suggestion approved and applied.');
+    } catch (Throwable $e) {
+      if ($pdo->inTransaction()) { $pdo->rollBack(); }
+      $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+      flash('error', 'Unable to process the AI suggestion.');
+    }
+    header('Location: ' . $redirect); exit;
+}
 
 // Handle viewer submit case (viewer only)
 if (($_POST['action'] ?? '') === 'viewer_submit_case') {
@@ -6347,13 +6713,41 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       }
       // Capability: can this user add evidence?
       $tp_canAddEvidence = false;
+      $tp_isCaseOwner = false;
+      $tp_canRunAiBuilder = false;
+      $tp_canViewAiBuilder = false;
+      $tp_aiRuns = [];
+      $tp_openAiConfigured = trim(tp_project_setting($pdo, 'openai_api_key', '')) !== '';
       if (!empty($_SESSION['user'])) {
+          $tp_isCaseOwner = !empty($viewCase)
+            && (int)($viewCase['created_by'] ?? 0) > 0
+            && (int)($viewCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
           if (($_SESSION['user']['role'] ?? '') === 'admin') {
               $tp_canAddEvidence = true;
+              $tp_canRunAiBuilder = !empty($viewCase);
+              $tp_canViewAiBuilder = !empty($viewCase);
           } elseif (!empty($viewCase) && in_array(($viewCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true)) {
               $ownerId = (int)($viewCase['created_by'] ?? 0);
               $tp_canAddEvidence = ($ownerId > 0) && ($ownerId === (int)($_SESSION['user']['id'] ?? 0));
+              $tp_canViewAiBuilder = $tp_isCaseOwner;
+              $tp_canRunAiBuilder = $tp_isCaseOwner && (($viewCase['status'] ?? '') === 'Being Built');
           }
+      }
+      if ($tp_canViewAiBuilder && $viewCaseId > 0) {
+        try {
+          $runQuery = $pdo->prepare('SELECT r.*, u.display_name AS requested_by_name FROM case_ai_runs r LEFT JOIN users u ON u.id = r.requested_by WHERE r.case_id = ? ORDER BY r.created_at DESC, r.id DESC LIMIT 5');
+          $runQuery->execute([$viewCaseId]);
+          $tp_aiRuns = $runQuery->fetchAll() ?: [];
+          $suggestionQuery = $pdo->prepare('SELECT s.*, u.display_name AS decided_by_name FROM case_ai_suggestions s LEFT JOIN users u ON u.id = s.decided_by WHERE s.run_id = ? ORDER BY s.id ASC');
+          foreach ($tp_aiRuns as &$tpAiRun) {
+            $suggestionQuery->execute([(int)$tpAiRun['id']]);
+            $tpAiRun['suggestions'] = $suggestionQuery->fetchAll() ?: [];
+          }
+          unset($tpAiRun);
+        } catch (Throwable $e) {
+          $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+          $tp_aiRuns = [];
+        }
       }
     ?>
     <section class="py-5 border-top" id="case-view">
@@ -6752,6 +7146,136 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 </div>
               </div>
             </div>
+            <?php if ($tp_canViewAiBuilder): ?>
+            <div class="col-12" id="ai-case-builder">
+              <div class="card glass">
+                <div class="card-body">
+                  <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-3">
+                    <div>
+                      <h3 class="h6 mb-1"><i class="bi bi-stars me-1"></i> AI-Assisted Case Builder</h3>
+                      <div class="small text-secondary">Suggestions are itemised for human review. Nothing changes until a site admin approves that individual suggestion.</div>
+                    </div>
+                    <?php if ($tp_canRunAiBuilder && $tp_openAiConfigured): ?>
+                      <form method="post" action="" class="ai-builder-run-form flex-shrink-0" onsubmit="var b=this.querySelector('.ai-builder-run-button');if(b){b.disabled=true;b.innerHTML='<span class=&quot;spinner-border spinner-border-sm me-1&quot; aria-hidden=&quot;true&quot;></span> Analysing case...';}">
+                        <input type="hidden" name="action" value="generate_ai_case_suggestions">
+                        <?php csrf_field(); ?>
+                        <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                        <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+                        <button type="submit" class="btn btn-primary btn-sm ai-builder-run-button">
+                          <i class="bi bi-stars me-1"></i> <?php echo $tp_aiRuns ? 'Run Again' : 'Run AI Case Builder'; ?>
+                        </button>
+                      </form>
+                    <?php endif; ?>
+                  </div>
+
+                  <?php if (!$tp_openAiConfigured): ?>
+                    <div class="alert alert-warning mb-3">
+                      OpenAI is not configured.
+                      <?php if (is_admin()): ?><a href="?view=project_settings#project-settings" class="alert-link">Add the API key in Project Settings</a>.<?php else: ?>Ask a site admin to configure it in Project Settings.<?php endif; ?>
+                    </div>
+                  <?php elseif (!$tp_canRunAiBuilder && !is_admin()): ?>
+                    <div class="alert alert-secondary mb-3">The case owner can run this assistant while the case is Being Built. A site admin can run it again at any stage.</div>
+                  <?php endif; ?>
+
+                  <?php if (!$tp_aiRuns): ?>
+                    <div class="border rounded p-3 text-secondary">No AI review has been run for this case yet.</div>
+                  <?php else: ?>
+                    <div class="d-flex flex-column gap-3">
+                    <?php foreach ($tp_aiRuns as $tpAiRun):
+                      $runStatus = (string)($tpAiRun['status'] ?? 'Processing');
+                      $runBadge = $runStatus === 'Completed' ? 'success' : ($runStatus === 'Failed' ? 'danger' : 'warning');
+                      $runSuggestions = is_array($tpAiRun['suggestions'] ?? null) ? $tpAiRun['suggestions'] : [];
+                      $runDate = !empty($tpAiRun['created_at']) ? date('d M Y H:i', strtotime((string)$tpAiRun['created_at'])) : '';
+                    ?>
+                      <div class="border rounded p-3">
+                        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2 mb-2">
+                          <div class="small">
+                            <span class="badge text-bg-<?php echo $runBadge; ?> me-1"><?php echo htmlspecialchars($runStatus); ?></span>
+                            <span class="text-secondary"><?php echo htmlspecialchars($runDate); ?></span>
+                            <?php if (!empty($tpAiRun['requested_by_name'])): ?><span class="text-secondary"> &middot; Run by <?php echo htmlspecialchars($tpAiRun['requested_by_name']); ?></span><?php endif; ?>
+                          </div>
+                          <span class="small text-secondary">Model: <?php echo htmlspecialchars($tpAiRun['model'] ?? ''); ?></span>
+                        </div>
+                        <?php if ($runStatus === 'Failed'): ?>
+                          <div class="alert alert-danger mb-0"><?php echo htmlspecialchars($tpAiRun['error_message'] ?? 'The AI review failed.'); ?></div>
+                        <?php else: ?>
+                          <?php if (trim((string)($tpAiRun['overall_notes'] ?? '')) !== ''): ?>
+                            <div class="small text-secondary mb-3"><?php echo nl2br(htmlspecialchars($tpAiRun['overall_notes'])); ?></div>
+                          <?php endif; ?>
+                          <?php if (!$runSuggestions): ?>
+                            <div class="small text-secondary">No changes were suggested in this review.</div>
+                          <?php else: ?>
+                            <ol class="list-group list-group-numbered">
+                            <?php foreach ($runSuggestions as $tpSuggestion):
+                              $fieldName = (string)($tpSuggestion['field_name'] ?? '');
+                              $fieldLabel = tp_ai_case_field_labels()[$fieldName] ?? ucfirst(str_replace('_', ' ', $fieldName));
+                              $suggestionDecision = (string)($tpSuggestion['decision'] ?? 'Pending');
+                              $decisionBadge = $suggestionDecision === 'Approved' ? 'success' : ($suggestionDecision === 'Rejected' ? 'danger' : 'warning');
+                              $beforeValue = (string)($tpSuggestion['current_value'] ?? '');
+                              $afterValue = (string)($tpSuggestion['suggested_value'] ?? '');
+                              if (!is_admin() && $fieldName === 'location') {
+                                $beforeValue = tp_mask_case_location_house_number($beforeValue);
+                                $afterValue = tp_mask_case_location_house_number($afterValue);
+                              }
+                            ?>
+                              <li class="list-group-item bg-transparent text-light border-secondary ps-5 py-3">
+                                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+                                  <div class="fw-semibold"><?php echo htmlspecialchars($fieldLabel); ?></div>
+                                  <div>
+                                    <span class="badge text-bg-<?php echo $decisionBadge; ?>"><?php echo htmlspecialchars($suggestionDecision); ?></span>
+                                    <?php if ($suggestionDecision !== 'Pending' && !empty($tpSuggestion['decided_by_name'])): ?>
+                                      <span class="small text-secondary ms-1">by <?php echo htmlspecialchars($tpSuggestion['decided_by_name']); ?></span>
+                                    <?php endif; ?>
+                                  </div>
+                                </div>
+                                <div class="row g-3 mb-3">
+                                  <div class="col-md-6">
+                                    <div class="small text-secondary mb-1">Before</div>
+                                    <div class="border rounded p-3 h-100 bg-black bg-opacity-25" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:20rem;overflow:auto;"><?php echo $beforeValue !== '' ? htmlspecialchars($beforeValue) : '<span class="text-secondary">Empty</span>'; ?></div>
+                                  </div>
+                                  <div class="col-md-6">
+                                    <div class="small text-secondary mb-1">Suggested change</div>
+                                    <div class="border border-info rounded p-3 h-100 bg-info bg-opacity-10" style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:20rem;overflow:auto;"><?php echo htmlspecialchars($afterValue); ?></div>
+                                  </div>
+                                </div>
+                                <div class="small mb-3"><span class="text-secondary">Why:</span> <?php echo nl2br(htmlspecialchars($tpSuggestion['reason'] ?? '')); ?></div>
+                                <?php if ($suggestionDecision === 'Pending'): ?>
+                                  <?php if (is_admin()): ?>
+                                    <div class="d-flex flex-wrap gap-2">
+                                      <form method="post" action="">
+                                        <input type="hidden" name="action" value="decide_ai_case_suggestion">
+                                        <?php csrf_field(); ?>
+                                        <input type="hidden" name="suggestion_id" value="<?php echo (int)$tpSuggestion['id']; ?>">
+                                        <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+                                        <input type="hidden" name="decision" value="approve">
+                                        <button type="submit" class="btn btn-success btn-sm"><i class="bi bi-check-lg me-1"></i> Approve Change</button>
+                                      </form>
+                                      <form method="post" action="" onsubmit="return confirm('Reject this AI suggestion?');">
+                                        <input type="hidden" name="action" value="decide_ai_case_suggestion">
+                                        <?php csrf_field(); ?>
+                                        <input type="hidden" name="suggestion_id" value="<?php echo (int)$tpSuggestion['id']; ?>">
+                                        <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+                                        <input type="hidden" name="decision" value="reject">
+                                        <button type="submit" class="btn btn-outline-danger btn-sm"><i class="bi bi-x-lg me-1"></i> Reject Change</button>
+                                      </form>
+                                    </div>
+                                  <?php else: ?>
+                                    <div class="small text-warning"><i class="bi bi-hourglass-split me-1"></i> Awaiting a site admin decision.</div>
+                                  <?php endif; ?>
+                                <?php endif; ?>
+                              </li>
+                            <?php endforeach; ?>
+                            </ol>
+                          <?php endif; ?>
+                        <?php endif; ?>
+                      </div>
+                    <?php endforeach; ?>
+                    </div>
+                  <?php endif; ?>
+                </div>
+              </div>
+            </div>
+            <?php endif; ?>
             <?php if (is_admin()): ?>
             <div class="col-12">
               <div class="card glass">
