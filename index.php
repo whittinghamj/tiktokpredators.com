@@ -4279,6 +4279,10 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
                   radial-gradient(800px 400px at 10% -10%, rgba(25,195,125,.15), transparent);
     }
     .glass { backdrop-filter: blur(8px); background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); }
+    #case-view.case-outline-building .card.glass { border-color: rgba(13,110,253,.9); }
+    #case-view.case-outline-pending .card.glass { border-color: rgba(255,193,7,.9); }
+    #case-view.case-outline-published .card.glass { border-color: rgba(25,135,84,.9); }
+    #case-view.case-outline-rejected .card.glass { border-color: rgba(220,53,69,.9); }
     #case-owner-details .select2-container--bootstrap-5 .select2-selection,
     .select2-container--bootstrap-5 .select2-dropdown,
     .select2-container--bootstrap-5 .select2-search__field {
@@ -7137,7 +7141,19 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         }
       }
     ?>
-    <section class="py-5 border-top" id="case-view">
+    <?php
+      $tpCaseOutlineStatus = (string)($viewCase['status'] ?? '');
+      $tpCaseOutlineClass = [
+        'Being Built' => 'case-outline-building',
+        'Pending' => 'case-outline-pending',
+        'In Review' => 'case-outline-pending',
+        'Open' => 'case-outline-published',
+        'Verified' => 'case-outline-published',
+        'Closed' => 'case-outline-published',
+        'Rejected' => 'case-outline-rejected',
+      ][$tpCaseOutlineStatus] ?? '';
+    ?>
+    <section class="py-5 border-top <?php echo htmlspecialchars($tpCaseOutlineClass); ?>" id="case-view">
       <div class="container-xl">
         <?php
           $tp_headerName = trim((string)($viewCase['person_name'] ?? ''));
