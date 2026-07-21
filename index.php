@@ -4822,23 +4822,23 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     }
     .tp-public-watermark {
       position: fixed;
-      top: 50%;
-      left: 50%;
+      inset: 0;
       z-index: 2147483647;
-      color: rgba(255, 255, 255, .11);
-      font-size: clamp(1.5rem, 6vw, 5rem);
-      font-weight: 800;
-      letter-spacing: .06em;
-      line-height: 1;
-      text-shadow: 0 1px 2px rgba(0, 0, 0, .2);
-      white-space: nowrap;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='360' height='220' viewBox='0 0 360 220'%3E%3Ctext x='180' y='110' fill='%23fff' fill-opacity='.085' font-family='Arial,sans-serif' font-size='26' font-weight='700' letter-spacing='1' text-anchor='middle' transform='rotate(-28 180 110)'%3Etiktokpredators.com%3C/text%3E%3C/svg%3E");
+      background-position: center;
+      background-repeat: repeat;
+      background-size: 360px 220px;
       pointer-events: none;
       user-select: none;
-      transform: translate(-50%, -50%) rotate(-28deg);
+    }
+    @media (max-width: 575.98px) {
+      .tp-public-watermark {
+        background-size: 280px 171px;
+      }
     }
     @media print {
       .tp-public-watermark {
-        color: rgba(0, 0, 0, .14);
+        filter: invert(1);
         -webkit-print-color-adjust: exact;
         print-color-adjust: exact;
       }
@@ -4978,7 +4978,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
 </head>
 <body>
   <?php if (in_array($view, ['cases', 'case'], true)): ?>
-    <div class="tp-public-watermark" aria-hidden="true">tiktokpredators.com</div>
+    <div class="tp-public-watermark" aria-hidden="true"></div>
   <?php endif; ?>
 
   <!-- Ownership banner -->
