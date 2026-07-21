@@ -376,6 +376,26 @@ function tp_test_openai_api_key(string $apiKey): array {
   return [false, $httpCode, 'OpenAI test failed with HTTP ' . ($httpCode > 0 ? $httpCode : 'unknown') . '.'];
 }
 
+function tp_format_bytes($bytes): string {
+  if (!is_numeric($bytes) || (float)$bytes < 0) { return 'Unknown'; }
+  $value = (float)$bytes;
+  $units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  $unitIndex = 0;
+  while ($value >= 1024 && $unitIndex < count($units) - 1) {
+    $value /= 1024;
+    $unitIndex++;
+  }
+  return number_format($value, $unitIndex === 0 ? 0 : 1) . ' ' . $units[$unitIndex];
+}
+
+function tp_health_status_meta(string $status): array {
+  return [
+    'success' => ['label' => 'Operational', 'badge' => 'success', 'icon' => 'bi-check-circle-fill'],
+    'warning' => ['label' => 'Attention', 'badge' => 'warning', 'icon' => 'bi-exclamation-triangle-fill'],
+    'danger' => ['label' => 'Unavailable', 'badge' => 'danger', 'icon' => 'bi-x-circle-fill'],
+  ][$status] ?? ['label' => 'Unknown', 'badge' => 'secondary', 'icon' => 'bi-question-circle-fill'];
+}
+
 function tp_ai_case_field_labels(): array {
   return [
     'case_name' => 'Case Name',
@@ -2617,6 +2637,40 @@ if (($_POST['action'] ?? '') === 'test_openai_api_key') {
     if ($isAjax) { $respondJson($ok, $message, $httpCode); }
     flash($ok ? 'success' : 'error', $message);
     header('Location: ?view=project_settings#project-settings'); exit;
+}
+
+// Run an explicit OpenAI availability check from the admin System Health page.
+if (($_POST['action'] ?? '') === 'run_system_health_openai') {
+    throttle();
+    if (!check_csrf()) {
+      flash('error', 'Security check failed.');
+      header('Location: ?view=system_health#system-health'); exit;
+    }
+    if (!is_admin()) {
+      flash('error', 'Unauthorized. Admins only.');
+      header('Location: ?view=system_health#system-health'); exit;
+    }
+
+    $apiKey = trim(tp_project_setting($pdo, 'openai_api_key', ''));
+    if ($apiKey === '') {
+      $result = [
+        'ok' => false,
+        'http_code' => 0,
+        'message' => 'No OpenAI API key is configured.',
+        'tested_at' => date('c'),
+      ];
+    } else {
+      [$ok, $httpCode, $message] = tp_test_openai_api_key($apiKey);
+      $result = [
+        'ok' => $ok,
+        'http_code' => $httpCode,
+        'message' => $message,
+        'tested_at' => date('c'),
+      ];
+    }
+    $_SESSION['system_health_openai'] = $result;
+    flash(!empty($result['ok']) ? 'success' : 'error', (string)$result['message']);
+    header('Location: ?view=system_health#system-health'); exit;
 }
 
 // Handle webhook test (main admin only)
@@ -5401,6 +5455,7 @@ document.addEventListener('DOMContentLoaded', function () {
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo in_array($view, ['users', 'user_profile'], true) ? 'active' : ''; ?>" href="?view=users#users">Users</a></li>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='viewer_stats')?'active':''; ?>" href="?view=viewer_stats#viewer-stats">Viewer Stats</a></li>
+  <li class="nav-item"><a class="nav-link <?php echo ($view==='system_health')?'active':''; ?>" href="?view=system_health#system-health"><i class="bi bi-heart-pulse me-1"></i>System Health</a></li>
   <?php if (tp_is_main_admin()): ?>
     <li class="nav-item"><a class="nav-link <?php echo ($view==='project_settings')?'active':''; ?>" href="?view=project_settings#project-settings">Project Settings</a></li>
   <?php endif; ?>
@@ -10000,6 +10055,210 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         </div>
       </section>
     <?php else: ?>
+    <?php endif; ?>
+  <?php endif; ?>
+
+  <?php if ($view === 'system_health'): ?>
+    <?php if (!is_admin()): ?>
+      <section class="py-5 border-top" id="system-health">
+        <div class="container-xl">
+          <div class="alert alert-danger"><i class="bi bi-shield-lock me-2"></i>Unauthorized. Admins only.</div>
+        </div>
+      </section>
+    <?php else: ?>
+      <?php
+        $healthCheckedAt = date('Y-m-d H:i:s T');
+
+        $databaseHealth = ['status' => 'danger', 'message' => 'Database check failed.', 'latency_ms' => null, 'details' => []];
+        try {
+          $databaseStartedAt = microtime(true);
+          $databaseInfo = $pdo->query('SELECT DATABASE() AS database_name, VERSION() AS server_version, NOW() AS server_time')->fetch() ?: [];
+          $databaseHealth['latency_ms'] = round((microtime(true) - $databaseStartedAt) * 1000, 1);
+          $databaseCounts = $pdo->query('SELECT (SELECT COUNT(*) FROM cases) AS case_count, (SELECT COUNT(*) FROM evidence) AS evidence_count, (SELECT COUNT(*) FROM users) AS user_count')->fetch() ?: [];
+          $databaseHealth['status'] = 'success';
+          $databaseHealth['message'] = 'Database queries are completing normally.';
+          $databaseHealth['details'] = array_merge($databaseInfo, $databaseCounts);
+        } catch (Throwable $e) {
+          $databaseHealth['message'] = 'The application could not complete its database health query.';
+        }
+
+        $storageDirectory = rtrim((string)$storagePath, '/');
+        $storageExists = is_dir($storageDirectory);
+        $storageReadable = $storageExists && is_readable($storageDirectory);
+        $storageWritable = $storageExists && is_writable($storageDirectory);
+        $storageFree = $storageExists ? @disk_free_space($storageDirectory) : false;
+        $storageTotal = $storageExists ? @disk_total_space($storageDirectory) : false;
+        $storageUsedPercent = null;
+        if (is_numeric($storageFree) && is_numeric($storageTotal) && (float)$storageTotal > 0) {
+          $storageUsedPercent = (int)round((1 - ((float)$storageFree / (float)$storageTotal)) * 100);
+        }
+        $storageStatus = ($storageExists && $storageReadable && $storageWritable) ? 'success' : 'danger';
+        if ($storageStatus === 'success' && $storageUsedPercent !== null && $storageUsedPercent >= 90) { $storageStatus = 'warning'; }
+        $storageMessage = !$storageExists
+          ? 'The evidence storage directory does not exist.'
+          : (!$storageReadable || !$storageWritable
+            ? 'The evidence storage directory does not have the required permissions.'
+            : (($storageUsedPercent !== null && $storageUsedPercent >= 90) ? 'Storage is operational but running low on free space.' : 'Evidence storage is readable and writable.'));
+
+        $healthWebhooks = tp_discord_webhooks($pdo);
+        $webhookStatus = 'warning';
+        $webhookMessage = 'No Discord webhooks are configured.';
+        $webhookSuccessCount = 0;
+        $webhookFailedCount = 0;
+        $webhookUntestedCount = 0;
+        foreach ($healthWebhooks as $healthWebhook) {
+          $testStatus = trim((string)($healthWebhook['last_test_status'] ?? ''));
+          if ($testStatus === 'success') { $webhookSuccessCount++; }
+          elseif ($testStatus === 'failed') { $webhookFailedCount++; }
+          else { $webhookUntestedCount++; }
+        }
+        if ($healthWebhooks) {
+          if ($webhookFailedCount > 0) {
+            $webhookStatus = 'danger';
+            $webhookMessage = $webhookFailedCount . ' configured webhook' . ($webhookFailedCount === 1 ? ' has' : 's have') . ' a failed last test.';
+          } elseif ($webhookUntestedCount > 0) {
+            $webhookStatus = 'warning';
+            $webhookMessage = $webhookUntestedCount . ' configured webhook' . ($webhookUntestedCount === 1 ? ' has' : 's have') . ' not been tested yet.';
+          } else {
+            $webhookStatus = 'success';
+            $webhookMessage = 'All configured webhooks passed their most recent test.';
+          }
+        }
+
+        $openAiKeyConfigured = trim(tp_project_setting($pdo, 'openai_api_key', '')) !== '';
+        $openAiTest = $_SESSION['system_health_openai'] ?? [];
+        $openAiStatus = 'warning';
+        $openAiMessage = $openAiKeyConfigured ? 'API key configured; run a live test to confirm availability.' : 'No OpenAI API key is configured.';
+        if (is_array($openAiTest) && !empty($openAiTest['tested_at'])) {
+          $openAiStatus = !empty($openAiTest['ok']) ? 'success' : 'danger';
+          $openAiMessage = trim((string)($openAiTest['message'] ?? $openAiMessage));
+        }
+
+        $healthStatuses = [$databaseHealth['status'], $storageStatus, $webhookStatus, $openAiStatus];
+        $healthOperationalCount = count(array_filter($healthStatuses, static function ($status) { return $status === 'success'; }));
+        $overallHealth = in_array('danger', $healthStatuses, true) ? 'danger' : (in_array('warning', $healthStatuses, true) ? 'warning' : 'success');
+        $overallMeta = tp_health_status_meta($overallHealth);
+      ?>
+      <section class="py-5 border-top" id="system-health">
+        <div class="container-xl">
+          <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between gap-3 mb-4">
+            <div>
+              <h1 class="h4 mb-1"><i class="bi bi-heart-pulse me-2"></i>System Health</h1>
+              <div class="text-secondary small">Live infrastructure checks and saved integration test results. Checked <?php echo htmlspecialchars($healthCheckedAt); ?>.</div>
+            </div>
+            <div class="d-flex align-items-center gap-2">
+              <span class="badge text-bg-<?php echo htmlspecialchars($overallMeta['badge']); ?> fs-6"><i class="bi <?php echo htmlspecialchars($overallMeta['icon']); ?> me-1"></i><?php echo htmlspecialchars($overallMeta['label']); ?></span>
+              <a class="btn btn-outline-light btn-sm" href="?view=system_health#system-health"><i class="bi bi-arrow-clockwise me-1"></i>Refresh Checks</a>
+            </div>
+          </div>
+
+          <div class="alert alert-<?php echo htmlspecialchars($overallMeta['badge']); ?> d-flex justify-content-between align-items-center">
+            <span><strong><?php echo $healthOperationalCount; ?> of 4</strong> health areas currently report operational.</span>
+            <span class="small">Warnings can indicate an untested or unconfigured optional integration.</span>
+          </div>
+
+          <div class="row g-4">
+            <?php $databaseMeta = tp_health_status_meta((string)$databaseHealth['status']); ?>
+            <div class="col-md-6">
+              <div class="card glass h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-start mb-3">
+                    <h2 class="h6 mb-0"><i class="bi bi-database me-2"></i>Database</h2>
+                    <span class="badge text-bg-<?php echo htmlspecialchars($databaseMeta['badge']); ?>"><?php echo htmlspecialchars($databaseMeta['label']); ?></span>
+                  </div>
+                  <p class="small mb-3"><?php echo htmlspecialchars((string)$databaseHealth['message']); ?></p>
+                  <div class="row g-2 small">
+                    <div class="col-6"><span class="text-secondary d-block">Latency</span><?php echo $databaseHealth['latency_ms'] !== null ? htmlspecialchars((string)$databaseHealth['latency_ms']) . ' ms' : 'Unavailable'; ?></div>
+                    <div class="col-6"><span class="text-secondary d-block">Database</span><?php echo htmlspecialchars((string)($databaseHealth['details']['database_name'] ?? 'Unavailable')); ?></div>
+                    <div class="col-12"><span class="text-secondary d-block">Server Version</span><?php echo htmlspecialchars((string)($databaseHealth['details']['server_version'] ?? 'Unavailable')); ?></div>
+                    <div class="col-4"><span class="text-secondary d-block">Cases</span><?php echo number_format((int)($databaseHealth['details']['case_count'] ?? 0)); ?></div>
+                    <div class="col-4"><span class="text-secondary d-block">Evidence</span><?php echo number_format((int)($databaseHealth['details']['evidence_count'] ?? 0)); ?></div>
+                    <div class="col-4"><span class="text-secondary d-block">Users</span><?php echo number_format((int)($databaseHealth['details']['user_count'] ?? 0)); ?></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <?php $storageMeta = tp_health_status_meta($storageStatus); ?>
+            <div class="col-md-6">
+              <div class="card glass h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-start mb-3">
+                    <h2 class="h6 mb-0"><i class="bi bi-device-hdd me-2"></i>Evidence Storage</h2>
+                    <span class="badge text-bg-<?php echo htmlspecialchars($storageMeta['badge']); ?>"><?php echo htmlspecialchars($storageMeta['label']); ?></span>
+                  </div>
+                  <p class="small mb-3"><?php echo htmlspecialchars($storageMessage); ?></p>
+                  <div class="small text-break mb-2"><span class="text-secondary d-block">Directory</span><?php echo htmlspecialchars($storageDirectory); ?></div>
+                  <div class="row g-2 small">
+                    <div class="col-4"><span class="text-secondary d-block">Readable</span><?php echo $storageReadable ? 'Yes' : 'No'; ?></div>
+                    <div class="col-4"><span class="text-secondary d-block">Writable</span><?php echo $storageWritable ? 'Yes' : 'No'; ?></div>
+                    <div class="col-4"><span class="text-secondary d-block">Used</span><?php echo $storageUsedPercent !== null ? $storageUsedPercent . '%' : 'Unknown'; ?></div>
+                    <div class="col-6"><span class="text-secondary d-block">Free</span><?php echo tp_format_bytes($storageFree); ?></div>
+                    <div class="col-6"><span class="text-secondary d-block">Total</span><?php echo tp_format_bytes($storageTotal); ?></div>
+                  </div>
+                  <?php if ($storageUsedPercent !== null): ?>
+                    <div class="progress mt-3" role="progressbar" aria-label="Storage used" aria-valuenow="<?php echo $storageUsedPercent; ?>" aria-valuemin="0" aria-valuemax="100" style="height:8px;"><div class="progress-bar bg-<?php echo $storageUsedPercent >= 90 ? 'warning' : 'primary'; ?>" style="width:<?php echo $storageUsedPercent; ?>%"></div></div>
+                  <?php endif; ?>
+                </div>
+              </div>
+            </div>
+
+            <?php $webhookMeta = tp_health_status_meta($webhookStatus); ?>
+            <div class="col-md-6">
+              <div class="card glass h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-start mb-3">
+                    <h2 class="h6 mb-0"><i class="bi bi-discord me-2"></i>Discord Webhooks</h2>
+                    <span class="badge text-bg-<?php echo htmlspecialchars($webhookMeta['badge']); ?>"><?php echo htmlspecialchars($webhookMeta['label']); ?></span>
+                  </div>
+                  <p class="small mb-3"><?php echo htmlspecialchars($webhookMessage); ?></p>
+                  <?php if ($healthWebhooks): ?>
+                    <div class="vstack gap-2">
+                      <?php foreach ($healthWebhooks as $healthWebhook):
+                        $hookTestStatus = trim((string)($healthWebhook['last_test_status'] ?? ''));
+                        $hookBadge = $hookTestStatus === 'success' ? 'success' : ($hookTestStatus === 'failed' ? 'danger' : 'secondary');
+                        $hookName = trim((string)($healthWebhook['name'] ?? '')) ?: 'Unnamed webhook';
+                        $hookHost = parse_url((string)($healthWebhook['url'] ?? ''), PHP_URL_HOST) ?: 'Unknown endpoint';
+                      ?>
+                        <div class="border rounded p-2 d-flex justify-content-between align-items-center gap-2 small">
+                          <div><div class="fw-semibold"><?php echo htmlspecialchars($hookName); ?></div><div class="text-secondary"><?php echo htmlspecialchars((string)$hookHost); ?> · <?php echo !empty($healthWebhook['last_tested_at']) ? 'Tested ' . htmlspecialchars((string)$healthWebhook['last_tested_at']) : 'Never tested'; ?></div></div>
+                          <span class="badge text-bg-<?php echo $hookBadge; ?>"><?php echo htmlspecialchars($hookTestStatus !== '' ? ucfirst($hookTestStatus) : 'Untested'); ?></span>
+                        </div>
+                      <?php endforeach; ?>
+                    </div>
+                  <?php endif; ?>
+                  <?php if (tp_is_main_admin()): ?><a class="btn btn-outline-light btn-sm mt-3" href="?view=project_settings#project-settings"><i class="bi bi-sliders me-1"></i>Configure / Test Webhooks</a><?php endif; ?>
+                </div>
+              </div>
+            </div>
+
+            <?php $openAiMeta = tp_health_status_meta($openAiStatus); ?>
+            <div class="col-md-6">
+              <div class="card glass h-100">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between align-items-start mb-3">
+                    <h2 class="h6 mb-0"><i class="bi bi-stars me-2"></i>OpenAI</h2>
+                    <span class="badge text-bg-<?php echo htmlspecialchars($openAiMeta['badge']); ?>"><?php echo htmlspecialchars($openAiMeta['label']); ?></span>
+                  </div>
+                  <p class="small mb-3"><?php echo htmlspecialchars($openAiMessage); ?></p>
+                  <div class="row g-2 small mb-3">
+                    <div class="col-6"><span class="text-secondary d-block">API Key</span><?php echo $openAiKeyConfigured ? 'Configured' : 'Not configured'; ?></div>
+                    <div class="col-6"><span class="text-secondary d-block">Last Live Test</span><?php echo !empty($openAiTest['tested_at']) ? htmlspecialchars((string)$openAiTest['tested_at']) : 'Not run this session'; ?></div>
+                    <?php if (!empty($openAiTest['http_code'])): ?><div class="col-6"><span class="text-secondary d-block">HTTP Status</span><?php echo (int)$openAiTest['http_code']; ?></div><?php endif; ?>
+                  </div>
+                  <form method="post" action="">
+                    <input type="hidden" name="action" value="run_system_health_openai">
+                    <?php csrf_field(); ?>
+                    <button type="submit" class="btn btn-outline-info btn-sm" <?php echo !$openAiKeyConfigured ? 'disabled' : ''; ?>><i class="bi bi-broadcast me-1"></i>Run Live OpenAI Test</button>
+                    <?php if (tp_is_main_admin()): ?><a class="btn btn-outline-light btn-sm" href="?view=project_settings#project-settings">Settings</a><?php endif; ?>
+                  </form>
+                  <div class="small text-secondary mt-2">The live test lists available models; it does not generate content or consume model tokens.</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
     <?php endif; ?>
   <?php endif; ?>
 
