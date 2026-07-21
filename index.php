@@ -765,6 +765,93 @@ function tp_create_user_notification(PDO $pdo, int $userId, string $type, string
     }
     return $html;
   }
+
+  /**
+   * Build the authoritative checklist used before a case can enter review.
+   * Drafts may be incomplete; submission is the point at which every item is required.
+   */
+  function tp_case_readiness(PDO $pdo, array $case): array {
+    $caseId = (int)($case['id'] ?? 0);
+    $tiktokUsernames = trim((string)($case['tiktok_username'] ?? ''));
+    if ($caseId > 0) {
+      $storedUsernames = get_case_tiktok_usernames($pdo, $caseId);
+      if ($storedUsernames !== '') { $tiktokUsernames = $storedUsernames; }
+    }
+
+    $evidenceCount = isset($case['evidence_count']) ? (int)$case['evidence_count'] : 0;
+    if ($caseId > 0 && !isset($case['evidence_count'])) {
+      try {
+        $evidenceStmt = $pdo->prepare('SELECT COUNT(*) FROM evidence WHERE case_id = ?');
+        $evidenceStmt->execute([$caseId]);
+        $evidenceCount = (int)$evidenceStmt->fetchColumn();
+      } catch (Throwable $e) {
+        $evidenceCount = 0;
+      }
+    }
+
+    $tagCount = isset($case['tag_count']) ? (int)$case['tag_count'] : 0;
+    if ($caseId > 0 && !isset($case['tag_count'])) {
+      $tagCount = count(get_case_tags($pdo, $caseId));
+    }
+
+    $summaryLength = mb_strlen(trim((string)($case['initial_summary'] ?? '')), 'UTF-8');
+    $hasSubjectIdentifier = trim((string)($case['person_name'] ?? '')) !== ''
+      || $tiktokUsernames !== ''
+      || trim((string)($case['snapchat_username'] ?? '')) !== ''
+      || trim((string)($case['phone_number'] ?? '')) !== '';
+    $validSensitivity = in_array((string)($case['sensitivity'] ?? ''), ['Standard', 'Restricted', 'Sealed'], true);
+
+    $items = [
+      ['key' => 'case_name', 'label' => 'Case title', 'detail' => 'Give the case a clear, recognisable title.', 'complete' => trim((string)($case['case_name'] ?? '')) !== ''],
+      ['key' => 'subject_identifier', 'label' => 'Subject identifier', 'detail' => 'Add a person name, TikTok username, Snapchat username or phone number.', 'complete' => $hasSubjectIdentifier],
+      ['key' => 'summary', 'label' => 'Meaningful summary', 'detail' => 'Provide at least 80 characters of factual context.', 'complete' => $summaryLength >= 80],
+      ['key' => 'category', 'label' => 'Case category', 'detail' => 'Select at least one relevant case tag.', 'complete' => $tagCount > 0],
+      ['key' => 'sensitivity', 'label' => 'Sensitivity classification', 'detail' => 'Choose Standard, Restricted or Sealed.', 'complete' => $validSensitivity],
+      ['key' => 'evidence', 'label' => 'Supporting evidence', 'detail' => 'Add at least one evidence item or source URL.', 'complete' => $evidenceCount > 0],
+    ];
+
+    $completeCount = count(array_filter($items, static function (array $item): bool {
+      return !empty($item['complete']);
+    }));
+    $missing = [];
+    foreach ($items as $item) {
+      if (empty($item['complete'])) { $missing[] = (string)$item['label']; }
+    }
+
+    return [
+      'items' => $items,
+      'complete_count' => $completeCount,
+      'total_count' => count($items),
+      'percent' => count($items) > 0 ? (int)round(($completeCount / count($items)) * 100) : 0,
+      'is_ready' => $completeCount === count($items),
+      'missing' => $missing,
+      'evidence_count' => $evidenceCount,
+    ];
+  }
+
+  function render_case_readiness_checklist(array $readiness): string {
+    $isReady = !empty($readiness['is_ready']);
+    $percent = max(0, min(100, (int)($readiness['percent'] ?? 0)));
+    $completeCount = (int)($readiness['complete_count'] ?? 0);
+    $totalCount = (int)($readiness['total_count'] ?? 0);
+    $html = '<div class="case-readiness" data-case-readiness="' . ($isReady ? 'ready' : 'incomplete') . '">';
+    $html .= '<div class="d-flex justify-content-between align-items-center gap-3 mb-2">';
+    $html .= '<div><h3 class="h6 mb-1"><i class="bi bi-clipboard-check me-1"></i> Case Readiness</h3>';
+    $html .= '<div class="small text-secondary">' . ($isReady ? 'All review requirements are complete.' : 'Complete every requirement before submitting for review.') . '</div></div>';
+    $html .= '<span class="badge text-bg-' . ($isReady ? 'success' : 'warning') . '">' . $completeCount . '/' . $totalCount . ' complete</span></div>';
+    $html .= '<div class="progress mb-3" role="progressbar" aria-label="Case readiness" aria-valuenow="' . $percent . '" aria-valuemin="0" aria-valuemax="100" style="height: 8px;">';
+    $html .= '<div class="progress-bar bg-' . ($isReady ? 'success' : 'warning') . '" style="width: ' . $percent . '%"></div></div>';
+    $html .= '<div class="row g-2">';
+    foreach (($readiness['items'] ?? []) as $item) {
+      $complete = !empty($item['complete']);
+      $html .= '<div class="col-md-6"><div class="border rounded p-2 h-100 d-flex gap-2">';
+      $html .= '<i class="bi ' . ($complete ? 'bi-check-circle-fill text-success' : 'bi-circle text-warning') . ' mt-1" aria-hidden="true"></i>';
+      $html .= '<div><div class="small fw-semibold">' . htmlspecialchars((string)($item['label'] ?? '')) . '</div>';
+      $html .= '<div class="small text-secondary">' . htmlspecialchars((string)($item['detail'] ?? '')) . '</div></div></div></div>';
+    }
+    $html .= '</div></div>';
+    return $html;
+  }
 $view = $_GET['view'] ?? 'cases';
 function throttle(){
     $now = time();
@@ -3125,7 +3212,7 @@ if (($_POST['action'] ?? '') === 'approve_case') {
     $approvedCase = [];
     try {
         $pdo->beginTransaction();
-        $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, initial_summary, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
+        $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
         $caseStmt->execute([$caseId, $caseCode]);
         $approvedCase = $caseStmt->fetch() ?: [];
         if (!$approvedCase) {
@@ -3135,6 +3222,12 @@ if (($_POST['action'] ?? '') === 'approve_case') {
             $pdo->rollBack();
             flash('error', 'Only pending cases can be approved.');
         } else {
+            $readiness = tp_case_readiness($pdo, $approvedCase);
+            if (empty($readiness['is_ready'])) {
+                $pdo->rollBack();
+                flash('error', 'Case cannot be approved. Complete: ' . implode(', ', $readiness['missing']) . '.');
+                header('Location: ?view=case&code=' . urlencode($caseCode) . '#case-readiness'); exit;
+            }
             $approveStmt = $pdo->prepare("UPDATE cases SET status = 'Verified', rejection_reason = NULL, rejected_at = NULL, rejected_by = NULL WHERE id = ? AND case_code = ? AND status = 'Pending' LIMIT 1");
             $approveStmt->execute([$caseId, $caseCode]);
             if ($approveStmt->rowCount() !== 1) {
@@ -3254,9 +3347,10 @@ if (in_array(($_POST['action'] ?? ''), ['submit_case_for_review', 'resubmit_case
 
     $case_id = (int)($_POST['case_id'] ?? 0);
     $case_code = trim((string)($_POST['case_code'] ?? ''));
+    $submissionRedirect = '?view=pending#pending-review';
     try {
         $pdo->beginTransaction();
-        $caseStmt = $pdo->prepare('SELECT case_name, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
+        $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
         $caseStmt->execute([$case_id, $case_code]);
         $caseToResubmit = $caseStmt->fetch();
         $isOriginalSubmitter = $caseToResubmit && (int)($caseToResubmit['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
@@ -3268,6 +3362,13 @@ if (in_array(($_POST['action'] ?? ''), ['submit_case_for_review', 'resubmit_case
             $pdo->rollBack();
             flash('error', 'Only cases being built or rejected cases can be submitted for review.');
         } else {
+            $readiness = tp_case_readiness($pdo, $caseToResubmit);
+            if (empty($readiness['is_ready'])) {
+                $pdo->rollBack();
+                $submissionRedirect = '?view=case&code=' . urlencode($case_code) . '#case-readiness';
+                flash('error', 'Case not ready for review. Complete: ' . implode(', ', $readiness['missing']) . '.');
+                header('Location: ' . $submissionRedirect); exit;
+            }
             $previousStatus = (string)$caseToResubmit['status'];
             $submissionTimestampSql = $previousStatus === 'Rejected'
                 ? 'resubmitted_at = NOW()'
@@ -3293,7 +3394,7 @@ if (in_array(($_POST['action'] ?? ''), ['submit_case_for_review', 'resubmit_case
         log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to submit case for review.');
     }
-    header('Location: ?view=pending#pending-review'); exit;
+    header('Location: ' . $submissionRedirect); exit;
 }
 
 // Pull a published verified case back into the private Being Built workflow.
@@ -5819,7 +5920,10 @@ document.addEventListener('DOMContentLoaded', function () {
               $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, rejection_reason, rejected_at FROM cases WHERE case_code = ? LIMIT 1');
               $stmt->execute([$case_code_param]);
               $caseRow = $stmt->fetch();
-                if ($caseRow) { $caseRow['tiktok_username'] = get_case_tiktok_usernames($pdo, (int)$caseRow['id']) ?: ($caseRow['tiktok_username'] ?? ''); }
+                if ($caseRow) {
+                  $caseRow['tiktok_username'] = get_case_tiktok_usernames($pdo, (int)$caseRow['id']) ?: ($caseRow['tiktok_username'] ?? '');
+                  $ownerCaseReadiness = tp_case_readiness($pdo, $caseRow);
+                }
           } catch (Throwable $e) { $caseRow = null; }
           if ($caseRow) {
               $ownerCanInline = can_manage_case_submission($pdo, (int)$caseRow['id']);
@@ -5930,8 +6034,8 @@ document.addEventListener('DOMContentLoaded', function () {
                               <?php csrf_field(); ?>
                               <input type="hidden" name="case_id" value="<?php echo (int)$caseRow['id']; ?>">
                               <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseRow['case_code']); ?>">
-                              <button type="submit" class="btn btn-success"><i class="bi <?php echo $ownerCaseIsRejected ? 'bi-arrow-repeat' : 'bi-send'; ?> me-1"></i><?php echo $ownerCaseIsRejected ? 'Resubmit for Review' : 'Submit for Review'; ?></button>
-                              <span class="small text-secondary ms-2">Save your changes before submitting.</span>
+                              <button type="submit" class="btn btn-success" <?php echo empty($ownerCaseReadiness['is_ready']) ? 'disabled title="Complete the readiness checklist first"' : ''; ?>><i class="bi <?php echo $ownerCaseIsRejected ? 'bi-arrow-repeat' : 'bi-send'; ?> me-1"></i><?php echo $ownerCaseIsRejected ? 'Resubmit for Review' : 'Submit for Review'; ?></button>
+                              <span class="small text-secondary ms-2"><?php echo empty($ownerCaseReadiness['is_ready']) ? 'Complete the checklist shown below before submitting.' : 'Save your changes before submitting.'; ?></span>
                             </form>
                           <?php endif; ?>
                         </div>
@@ -6404,7 +6508,8 @@ if ($rs && count($rs) > 0):
           $beingBuiltRows = [];
           try {
             $beingBuiltSql = "
-              SELECT c.id, c.case_code, c.case_name, c.person_name, c.created_by,
+              SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, c.tiktok_username,
+                     c.initial_summary, c.sensitivity, c.created_by,
                      u.display_name AS creator_name,
                      COALESCE(ev.cnt, 0) AS evidence_count,
                      COALESCE(ev.last_added, c.opened_at) AS last_activity
@@ -6450,9 +6555,11 @@ if ($rs && count($rs) > 0):
                     <tbody>
                       <?php foreach ($beingBuiltRows as $builtCase):
                         $builtTags = get_case_tags($pdo, (int)$builtCase['id']);
+                        $builtCase['tag_count'] = count($builtTags);
+                        $builtReadiness = tp_case_readiness($pdo, $builtCase);
                       ?>
                         <tr data-case-review-row>
-                          <td><div class="fw-semibold"><?php echo htmlspecialchars($builtCase['case_name'] ?: $builtCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($builtCase['case_code']); ?></div></td>
+                          <td><div class="fw-semibold"><?php echo htmlspecialchars($builtCase['case_name'] ?: $builtCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($builtCase['case_code']); ?></div><span class="badge text-bg-<?php echo !empty($builtReadiness['is_ready']) ? 'success' : 'warning'; ?> mt-1"><?php echo (int)$builtReadiness['complete_count']; ?>/<?php echo (int)$builtReadiness['total_count']; ?> ready</span></td>
                           <td><?php echo htmlspecialchars(trim((string)($builtCase['creator_name'] ?? '')) ?: '—'); ?></td>
                           <td><?php echo htmlspecialchars(trim((string)($builtCase['person_name'] ?? '')) ?: '—'); ?></td>
                           <td><?php echo render_case_tag_badges($builtTags, '<span class="text-secondary">&mdash;</span>'); ?></td>
@@ -6465,7 +6572,7 @@ if ($rs && count($rs) > 0):
                               <?php csrf_field(); ?>
                               <input type="hidden" name="case_id" value="<?php echo (int)$builtCase['id']; ?>">
                               <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($builtCase['case_code']); ?>">
-                              <button type="submit" class="btn btn-success btn-sm"><i class="bi bi-send me-1"></i>Submit for Review</button>
+                              <button type="submit" class="btn btn-success btn-sm" <?php echo empty($builtReadiness['is_ready']) ? 'disabled title="Open the case and complete its readiness checklist"' : ''; ?>><i class="bi bi-send me-1"></i>Submit for Review</button>
                             </form>
                             <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this case and all evidence? This cannot be undone.');">
                               <input type="hidden" name="action" value="delete_case">
@@ -6498,7 +6605,8 @@ if ($rs && count($rs) > 0):
     $rows = [];
     try {
         $baseSql = "
-          SELECT c.id, c.case_code, c.case_name, c.person_name, c.status, c.created_by, c.resubmitted_at, c.submitted_for_review_at,
+          SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, c.tiktok_username,
+                 c.initial_summary, c.sensitivity, c.status, c.created_by, c.resubmitted_at, c.submitted_for_review_at,
                  u.display_name AS creator_name,
                  COALESCE(ev.cnt, 0) AS evidence_count,
                  GREATEST(COALESCE(ev.last_added, c.opened_at), COALESCE(c.resubmitted_at, c.opened_at), COALESCE(c.submitted_for_review_at, c.opened_at), c.opened_at) AS last_activity
@@ -6557,11 +6665,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       $evc = (int)($r['evidence_count'] ?? 0);
                       $last = $r['last_activity'] ?? '';
                       $creatorName = trim($r['creator_name'] ?? '');
-                        $pendingCaseTags = get_case_tags($pdo, (int)($r['id'] ?? 0));
+                      $pendingCaseTags = get_case_tags($pdo, (int)($r['id'] ?? 0));
+                      $r['tag_count'] = count($pendingCaseTags);
+                      $pendingReadiness = tp_case_readiness($pdo, $r);
                   ?>
                     <tr>
                       <td class="text-nowrap"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($code); ?></span></td>
-                      <td class="fw-semibold text-nowrap"><?php echo htmlspecialchars($name); ?><?php if (!empty($r['resubmitted_at'])): ?><span class="badge text-bg-info ms-1">Resubmitted</span><?php endif; ?></td>
+                      <td class="fw-semibold text-nowrap"><?php echo htmlspecialchars($name); ?><?php if (!empty($r['resubmitted_at'])): ?><span class="badge text-bg-info ms-1">Resubmitted</span><?php endif; ?><div><span class="badge text-bg-<?php echo !empty($pendingReadiness['is_ready']) ? 'success' : 'warning'; ?> mt-1"><?php echo (int)$pendingReadiness['complete_count']; ?>/<?php echo (int)$pendingReadiness['total_count']; ?> ready</span></div></td>
                       <td class="text-nowrap"><?php echo $creatorName !== '' ? htmlspecialchars($creatorName) : '—'; ?></td>
                       <td class="text-nowrap"><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></td>
                       <td><?php echo render_case_tag_badges($pendingCaseTags, '<span class="text-secondary">&mdash;</span>'); ?></td>
@@ -6575,7 +6685,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                             <?php csrf_field(); ?>
                             <input type="hidden" name="case_id" value="<?php echo (int)$r['id']; ?>">
                             <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($code); ?>">
-                            <button type="submit" class="btn btn-success btn-sm"><i class="bi bi-check-circle me-1"></i>Approve</button>
+                            <button type="submit" class="btn btn-success btn-sm" <?php echo empty($pendingReadiness['is_ready']) ? 'disabled title="Open the case and complete its readiness checklist"' : ''; ?>><i class="bi bi-check-circle me-1"></i>Approve</button>
                           </form>
                           <button type="button" class="btn btn-danger btn-sm btn-reject-case" data-bs-toggle="modal" data-bs-target="#rejectCaseModal" data-case-id="<?php echo (int)$r['id']; ?>" data-case-code="<?php echo htmlspecialchars($code); ?>" data-case-name="<?php echo htmlspecialchars($name); ?>"><i class="bi bi-x-circle me-1"></i>Reject</button>
                           <?php endif; ?>
@@ -8223,7 +8333,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
   <?php if ($view === 'case'): ?>
     <?php
       $caseCode = trim($_GET['code'] ?? '');
-      $viewCase = null; $viewCaseId = 0; $viewEv = []; $viewTotalViews = 0; $viewCaseTags = [];
+      $viewCase = null; $viewCaseId = 0; $viewEv = []; $viewTotalViews = 0; $viewCaseTags = []; $viewCaseReadiness = [];
       $viewOwner = []; $viewOriginalSubmitter = []; $viewSubmissionMeta = []; $viewSubmissionGeo = [];
       $viewOwnerCandidates = []; $viewOwnershipHistory = [];
       $viewAnalyticsSummary = [];
@@ -8327,6 +8437,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             $viewEv = $st2->fetchAll();
           } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage()); }
+          if (!empty($viewCase)) {
+            $viewCase['evidence_count'] = count($viewEv);
+            $viewCase['tag_count'] = count($viewCaseTags);
+            $viewCaseReadiness = tp_case_readiness($pdo, $viewCase);
+          }
         }
       }
     ?>
@@ -8426,7 +8541,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <?php csrf_field(); ?>
               <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
               <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
-              <button type="submit" class="btn btn-success btn-sm"><i class="bi bi-send me-1"></i><?php echo ($viewCase['status'] ?? '') === 'Rejected' ? 'Return to Pending Review' : 'Submit for Review'; ?></button>
+              <button type="submit" class="btn btn-success btn-sm" <?php echo empty($viewCaseReadiness['is_ready']) ? 'disabled title="Complete the readiness checklist first"' : ''; ?>><i class="bi bi-send me-1"></i><?php echo ($viewCase['status'] ?? '') === 'Rejected' ? 'Return to Pending Review' : 'Submit for Review'; ?></button>
             </form>
             <?php endif; ?>
             <?php if (($viewCase['status'] ?? '') === 'Pending'): ?>
@@ -8452,6 +8567,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
           </div>
         </div>
+        <?php if ($viewCaseId > 0 && in_array(($viewCase['status'] ?? ''), ['Being Built', 'Pending', 'Rejected'], true) && ($tp_isCaseOwner || can_moderate_cases())): ?>
+        <div class="card glass mb-3" id="case-readiness">
+          <div class="card-body">
+            <?php echo render_case_readiness_checklist($viewCaseReadiness); ?>
+          </div>
+        </div>
+        <?php endif; ?>
         <?php if (is_admin() && $viewCaseId > 0):
           $ownerName = trim((string)($viewOwner['display_name'] ?? ''));
           $ownerEmail = trim((string)($viewOwner['email'] ?? ''));
