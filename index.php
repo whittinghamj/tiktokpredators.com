@@ -1260,12 +1260,31 @@ try {
             ref_evidence_id BIGINT UNSIGNED NULL,
             ref_note_id BIGINT UNSIGNED NULL,
             created_by BIGINT UNSIGNED NULL,
+            public_ip VARCHAR(45) NULL,
+            forwarded_for VARCHAR(255) NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             INDEX idx_case_id_created (case_id, created_at),
             INDEX idx_event_type (event_type),
-            INDEX idx_ref_evidence (ref_evidence_id)
+            INDEX idx_ref_evidence (ref_evidence_id),
+            INDEX idx_case_event_ip (public_ip)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
     ");
+
+    // Safe schema migration for installations created before event IP logging.
+    $caseEventColumns = [
+        'public_ip' => "ALTER TABLE case_events ADD COLUMN public_ip VARCHAR(45) NULL AFTER created_by",
+        'forwarded_for' => "ALTER TABLE case_events ADD COLUMN forwarded_for VARCHAR(255) NULL AFTER public_ip",
+    ];
+    foreach ($caseEventColumns as $columnName => $alterSql) {
+        $column = $pdo->query("SHOW COLUMNS FROM case_events LIKE " . $pdo->quote($columnName));
+        if (!$column || !$column->fetch()) {
+            $pdo->exec($alterSql);
+        }
+    }
+    $caseEventIpIndex = $pdo->query("SHOW INDEX FROM case_events WHERE Key_name = 'idx_case_event_ip'");
+    if (!$caseEventIpIndex || !$caseEventIpIndex->fetch()) {
+        $pdo->exec('ALTER TABLE case_events ADD INDEX idx_case_event_ip (public_ip)');
+    }
 } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
@@ -1561,8 +1580,20 @@ try {
 
 function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = null, ?string $detail = null, ?int $refEvidenceId = null, ?int $refNoteId = null): void {
     try {
-        $stmt = $pdo->prepare("INSERT INTO case_events (case_id, event_type, subject, detail, ref_evidence_id, ref_note_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)");
-        $stmt->execute([$caseId, $type, $subject, $detail, $refEvidenceId, $refNoteId, $_SESSION['user']['id'] ?? null]);
+        [$publicIp, $forwardedFor] = tp_client_ip();
+        $forwardedFor = substr($forwardedFor, 0, 255);
+        $stmt = $pdo->prepare("INSERT INTO case_events (case_id, event_type, subject, detail, ref_evidence_id, ref_note_id, created_by, public_ip, forwarded_for) VALUES (?, ?, ?, ?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))");
+        $stmt->execute([
+            $caseId,
+            $type,
+            $subject,
+            $detail,
+            $refEvidenceId,
+            $refNoteId,
+            $_SESSION['user']['id'] ?? null,
+            $publicIp,
+            $forwardedFor,
+        ]);
     } catch (Throwable $e) {
         $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
     }
