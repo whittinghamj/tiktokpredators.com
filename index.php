@@ -521,7 +521,7 @@ function tp_openai_case_builder_request(string $apiKey, string $model, array $ca
 
 /** Allow the original submitter to build or revise an unpublished case. */
 function can_manage_case_submission(PDO $pdo, int $caseId): bool {
-    if ($caseId <= 0 || empty($_SESSION['user'])) { return false; }
+    if ($caseId <= 0 || empty($_SESSION['user']) || current_user_role() !== 'viewer') { return false; }
     try {
         $s = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
         $s->execute([$caseId]);
@@ -2123,8 +2123,8 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     if (!$row) { http_response_code(404); exit('Not found'); }
     $isReviewCaseOwner = !empty($_SESSION['user']) && (int)($row['case_created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
     $isPrivateReviewStatus = in_array(($row['case_status'] ?? ''), ['Being Built','Pending','Rejected'], true);
-    $isPendingCaseReviewer = can_moderate_cases() && ($row['case_status'] ?? '') === 'Pending';
-    if ($isPrivateReviewStatus && !is_admin() && !$isPendingCaseReviewer && !$isReviewCaseOwner) { http_response_code(404); exit('Not found'); }
+    $isCaseReviewer = can_moderate_cases() && in_array(($row['case_status'] ?? ''), ['Pending', 'Rejected'], true);
+    if ($isPrivateReviewStatus && !is_admin() && !$isCaseReviewer && !$isReviewCaseOwner) { http_response_code(404); exit('Not found'); }
     $rel = $row['filepath'] ?? '';
     $mime = $row['mime_type'] ?? 'application/octet-stream';
     $type = $row['type'] ?? 'other';
@@ -2144,7 +2144,7 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
 
     $isImage = (strpos($mime, 'image/') === 0);
     $isAdmin = is_admin();
-    $canReviewRawEvidence = $isAdmin || $isPendingCaseReviewer;
+    $canReviewRawEvidence = $isAdmin || $isCaseReviewer;
     $isRestricted = ($sens === 'Restricted');
 
     // For restricted cases: non-admins must not get raw images.
@@ -3229,7 +3229,8 @@ if (in_array(($_POST['action'] ?? ''), ['submit_case_for_review', 'resubmit_case
         $caseStmt->execute([$case_id, $case_code]);
         $caseToResubmit = $caseStmt->fetch();
         $isOriginalSubmitter = $caseToResubmit && (int)($caseToResubmit['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
-        if (!$caseToResubmit || (!is_admin() && !$isOriginalSubmitter)) {
+        $viewerCanSubmit = current_user_role() === 'viewer' && $isOriginalSubmitter;
+        if (!$caseToResubmit || (!is_admin() && !$viewerCanSubmit)) {
             $pdo->rollBack();
             flash('error', 'Unauthorized. Only the original submitter or an administrator can submit this case for review.');
         } elseif (!in_array(($caseToResubmit['status'] ?? ''), ['Being Built', 'Rejected'], true)) {
@@ -3286,7 +3287,8 @@ if (($_POST['action'] ?? '') === 'return_published_case_to_building') {
         $isCaseOwner = $caseToBuild
             && (int)($caseToBuild['created_by'] ?? 0) > 0
             && (int)($caseToBuild['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
-        if (!$caseToBuild || (!is_admin() && !$isCaseOwner)) {
+        $viewerCanReturn = current_user_role() === 'viewer' && $isCaseOwner;
+        if (!$caseToBuild || (!is_admin() && !$viewerCanReturn)) {
             $pdo->rollBack();
             flash('error', 'Only the case owner or a site admin can return this case to Being Built.');
         } elseif (($caseToBuild['status'] ?? '') !== 'Verified') {
@@ -3639,7 +3641,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $case_id_check = (int)($_POST['case_id'] ?? 0);
     $isPendingReviewer = is_moderator() && can_review_pending_case($pdo, $case_id_check);
     // Determine if viewer owns this case
-    if (!$isAdminUser && $case_id_check > 0) {
+    if (current_user_role() === 'viewer' && $case_id_check > 0) {
         try {
             $cs = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
             $cs->execute([$case_id_check]);
@@ -3885,7 +3887,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
     $isOwnerViewer = false;
     $case_id_check = (int)($_POST['case_id'] ?? 0);
     $isPendingReviewer = is_moderator() && can_review_pending_case($pdo, $case_id_check);
-    if (!$isAdminUser && $case_id_check > 0) {
+    if (current_user_role() === 'viewer' && $case_id_check > 0) {
         try {
             $cs = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
             $cs->execute([$case_id_check]);
@@ -3997,7 +3999,7 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
         $ps->execute([$evidence_id, $case_id]);
         $prevEv = $ps->fetch() ?: [];
     } catch (Throwable $e) {}
-    $isCaseCreator = !empty($_SESSION['user'])
+    $isCaseCreator = current_user_role() === 'viewer'
         && (int)($prevEv['case_created_by'] ?? 0) > 0
         && (int)($prevEv['case_created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
     $isPendingReviewer = is_moderator() && can_review_pending_case($pdo, $case_id);
@@ -4713,7 +4715,8 @@ if ($view === 'case' && isset($pdo) && $pdo instanceof PDO) {
       $metaCase = $metaStmt->fetch();
       $metaReviewOwner = $metaCase && is_logged_in() && (int)($metaCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
       $metaIsPrivateReview = $metaCase && in_array(($metaCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true);
-      if ($metaCase && (!$metaIsPrivateReview || is_admin() || $metaReviewOwner)) {
+      $metaCanReviewCase = $metaCase && can_moderate_cases() && in_array(($metaCase['status'] ?? ''), ['Pending', 'Rejected'], true);
+      if ($metaCase && (!$metaIsPrivateReview || is_admin() || $metaCanReviewCase || $metaReviewOwner)) {
         $metaCaseCode = (string)($metaCase['case_code'] ?? $metaCaseCode);
         $metaCaseName = trim((string)($metaCase['case_name'] ?? ''));
         $metaPersonName = trim((string)($metaCase['person_name'] ?? ''));
@@ -6564,7 +6567,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
               <div class="d-flex align-items-center justify-content-between mb-3">
                 <div>
                   <h2 class="h5 mb-1"><i class="bi bi-patch-check-fill me-2 text-success"></i>Approved / Verified / Published</h2>
-                  <p class="small text-secondary mb-0"><?php echo is_admin() ? 'Cases that completed review, were verified, and are currently visible on the public site.' : 'Your cases that completed review, were verified, and are currently visible on the public site.'; ?></p>
+                  <p class="small text-secondary mb-0"><?php echo can_moderate_cases() ? 'Cases that completed review, were verified, and are currently visible on the public site.' : 'Your cases that completed review, were verified, and are currently visible on the public site.'; ?></p>
                 </div>
                 <span class="badge text-bg-success">Published</span>
               </div>
@@ -6589,7 +6592,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                     $publishedSql .= " AND EXISTS (SELECT 1 FROM case_tag_links ctl_filter JOIN case_tags ct_filter ON ct_filter.id = ctl_filter.tag_id WHERE ctl_filter.case_id = c.id AND ct_filter.slug = ?)";
                     $publishedParams[] = $pendingTagFilter;
                   }
-                  if (!is_admin()) {
+                  if (!can_moderate_cases()) {
                     $publishedSql .= ' AND c.created_by = ?';
                     $publishedParams[] = (int)($_SESSION['user']['id'] ?? 0);
                   }
@@ -6618,6 +6621,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                           <td class="text-nowrap"><?php echo !empty($publishedCase['updated_at']) ? htmlspecialchars(date('d M Y H:i', strtotime($publishedCase['updated_at']))) : '—'; ?></td>
                           <td class="text-end text-nowrap">
                             <a class="btn btn-outline-light btn-sm" href="?view=case&amp;code=<?php echo urlencode($publishedCase['case_code']); ?>#case-view"><i class="bi bi-eye me-1"></i>View</a>
+                            <?php if (!is_moderator()): ?>
                             <form method="post" action="" class="d-inline" onsubmit="return confirm('Remove this case from public view and return it to Being Built? It must be submitted and approved again before it will be published.');">
                               <input type="hidden" name="action" value="return_published_case_to_building">
                               <?php csrf_field(); ?>
@@ -6625,6 +6629,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                               <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($publishedCase['case_code']); ?>">
                               <button type="submit" class="btn btn-outline-warning btn-sm"><i class="bi bi-tools me-1"></i>Return to Building</button>
                             </form>
+                            <?php endif; ?>
                           </td>
                         </tr>
                       <?php endforeach; ?>
@@ -6641,10 +6646,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           <div class="card glass border-danger">
             <div class="card-body">
               <div class="d-flex align-items-center justify-content-between mb-3">
-                <h2 class="h5 mb-0"><i class="bi bi-x-circle me-2 text-danger"></i><?php echo is_admin() ? 'Rejected Cases' : 'Cases Requiring Changes'; ?></h2>
+                <h2 class="h5 mb-0"><i class="bi bi-x-circle me-2 text-danger"></i><?php echo can_moderate_cases() ? 'Rejected Cases' : 'Cases Requiring Changes'; ?></h2>
                 <span class="badge text-bg-danger">Rejected</span>
               </div>
-              <p class="small text-secondary"><?php echo is_admin() ? 'Monitor rejected submissions, review the reason, and edit case details where needed.' : 'Correct the issues described by the administrator, save your changes, then resubmit the case for review.'; ?></p>
+              <p class="small text-secondary"><?php echo is_admin() ? 'Monitor rejected submissions, review the reason, and edit case details where needed.' : (is_moderator() ? 'Review rejected submissions and the reason recorded for each decision.' : 'Correct the issues described by the administrator, save your changes, then resubmit the case for review.'); ?></p>
               <?php
                 $rejectedRows = [];
                 try {
@@ -6667,7 +6672,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                     $rejectedSql .= " AND EXISTS (SELECT 1 FROM case_tag_links ctl_filter JOIN case_tags ct_filter ON ct_filter.id = ctl_filter.tag_id WHERE ctl_filter.case_id = c.id AND ct_filter.slug = ?)";
                     $rejectedParams[] = $pendingTagFilter;
                   }
-                  if (!is_admin()) {
+                  if (!can_moderate_cases()) {
                     $rejectedSql .= ' AND c.created_by = ?';
                     $rejectedParams[] = (int)($_SESSION['user']['id'] ?? 0);
                   }
@@ -6692,7 +6697,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                           <td class="text-nowrap"><?php echo !empty($rejectedCase['rejected_at']) ? htmlspecialchars(date('d M Y H:i', strtotime($rejectedCase['rejected_at']))) : '—'; ?></td>
                           <td><?php echo (int)($rejectedCase['evidence_count'] ?? 0); ?></td>
                           <td class="text-end text-nowrap">
-                            <a class="btn btn-primary btn-sm" href="?view=case&amp;code=<?php echo urlencode($rejectedCase['case_code']); ?><?php echo is_admin() ? '#case-view' : '#owner-edit'; ?>"><i class="bi bi-pencil-square me-1"></i><?php echo is_admin() ? 'Review / Edit' : 'Fix Case'; ?></a>
+                            <a class="btn btn-primary btn-sm" href="?view=case&amp;code=<?php echo urlencode($rejectedCase['case_code']); ?><?php echo can_moderate_cases() ? '#case-view' : '#owner-edit'; ?>"><i class="bi <?php echo is_moderator() ? 'bi-eye' : 'bi-pencil-square'; ?> me-1"></i><?php echo is_admin() ? 'Review / Edit' : (is_moderator() ? 'View' : 'Fix Case'); ?></a>
+                            <?php if (!is_moderator()): ?>
                             <form method="post" action="" class="d-inline" onsubmit="return confirm('Have all corrections been saved and is this case ready to return to pending review?');">
                                 <input type="hidden" name="action" value="submit_case_for_review">
                                 <?php csrf_field(); ?>
@@ -6700,6 +6706,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                                 <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($rejectedCase['case_code']); ?>">
                                 <button type="submit" class="btn btn-success btn-sm"><i class="bi bi-arrow-repeat me-1"></i><?php echo is_admin() ? 'Return to Pending' : 'Resubmit'; ?></button>
                               </form>
+                            <?php endif; ?>
                           </td>
                         </tr>
                       <?php endforeach; ?>
@@ -8190,8 +8197,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           $viewCase = $st->fetch();
           $viewReviewOwner = $viewCase && is_logged_in() && (int)($viewCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
           $viewIsPrivateReview = $viewCase && in_array(($viewCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true);
-          $viewCanReviewPending = $viewCase && can_moderate_cases() && ($viewCase['status'] ?? '') === 'Pending';
-          if ($viewCase && $viewIsPrivateReview && !is_admin() && !$viewCanReviewPending && !$viewReviewOwner) {
+          $viewCanReviewCase = $viewCase && can_moderate_cases() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true);
+          if ($viewCase && $viewIsPrivateReview && !is_admin() && !$viewCanReviewCase && !$viewReviewOwner) {
             $viewCase = null;
           }
           $viewCaseId = (int)($viewCase['id'] ?? 0);
@@ -8288,7 +8295,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       if (!empty($viewCase)) {
         $tp_isRestrictedForNonAdmin = (($viewCase['sensitivity'] ?? '') === 'Restricted')
           && !is_admin()
-          && !(is_moderator() && ($viewCase['status'] ?? '') === 'Pending');
+          && !(is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true));
       }
       if ($tp_isRestrictedForNonAdmin) {
         echo '<script>document.addEventListener("DOMContentLoaded",function(){document.body.dataset.restricted="1";});</script>';
@@ -8313,13 +8320,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           } elseif (is_moderator() && !empty($viewCase) && ($viewCase['status'] ?? '') === 'Pending') {
               $tp_canAddEvidence = true;
               $tp_canEditCaseEvidence = true;
-          } elseif (!empty($viewCase) && in_array(($viewCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true)) {
+          } elseif (current_user_role() === 'viewer' && !empty($viewCase) && in_array(($viewCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true)) {
               $ownerId = (int)($viewCase['created_by'] ?? 0);
               $tp_canAddEvidence = ($ownerId > 0) && ($ownerId === (int)($_SESSION['user']['id'] ?? 0));
               $tp_canViewAiBuilder = $tp_isCaseOwner;
               $tp_canRunAiBuilder = $tp_isCaseOwner && (($viewCase['status'] ?? '') === 'Being Built');
           }
-          if ($tp_isCaseOwner) { $tp_canEditCaseEvidence = true; }
+          if ($tp_isCaseOwner && current_user_role() === 'viewer') { $tp_canEditCaseEvidence = true; }
       }
       if ($tp_canViewAiBuilder && $viewCaseId > 0) {
         try {
@@ -8356,7 +8363,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           $tp_headerName = trim((string)($viewCase['person_name'] ?? ''));
           if ($tp_headerName === '') { $tp_headerName = trim((string)($viewCase['case_name'] ?? '')); }
           if ($tp_headerName === '') { $tp_headerName = 'Unknown'; }
-          $tp_headerLocation = (is_moderator() && ($viewCase['status'] ?? '') === 'Pending')
+          $tp_headerLocation = (is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true))
             ? trim((string)($viewCase['location'] ?? ''))
             : tp_case_location_for_viewer($viewCase['location'] ?? '');
           if ($tp_headerLocation === '') { $tp_headerLocation = 'Unknown Location'; }
@@ -8623,7 +8630,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         if (($ceRow['event_type'] ?? '') === 'case_rejected' && !$canViewReviewFeedback) {
                             $caseEventDetail = trim((string)($ceRow['subject'] ?? ''));
                         }
-                        $visibleCaseEventDetail = (is_moderator() && ($viewCase['status'] ?? '') === 'Pending')
+                        $visibleCaseEventDetail = (is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true))
                             ? $caseEventDetail
                             : tp_case_event_detail_for_viewer($caseEventDetail);
                         $timelineEvents[] = [
@@ -8821,11 +8828,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Location</div>
-                          <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars((is_moderator() && ($viewCase['status'] ?? '') === 'Pending') ? (string)$viewCase['location'] : tp_case_location_for_viewer($viewCase['location'])) : '<span class="text-secondary">—</span>'; ?></div>
+                          <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars((is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true)) ? (string)$viewCase['location'] : tp_case_location_for_viewer($viewCase['location'])) : '<span class="text-secondary">—</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Phone Number</div>
-                          <div><?php echo ($viewCase['phone_number'] ?? '') !== '' ? htmlspecialchars((is_moderator() && ($viewCase['status'] ?? '') === 'Pending') ? (string)$viewCase['phone_number'] : tp_case_phone_number_for_viewer($viewCase['phone_number'])) : '<span class="text-secondary">&mdash;</span>'; ?></div>
+                          <div><?php echo ($viewCase['phone_number'] ?? '') !== '' ? htmlspecialchars((is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true)) ? (string)$viewCase['phone_number'] : tp_case_phone_number_for_viewer($viewCase['phone_number'])) : '<span class="text-secondary">&mdash;</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Snapchat Username</div>
