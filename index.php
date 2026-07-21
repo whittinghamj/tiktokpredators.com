@@ -4974,6 +4974,78 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     :root {
       --tp-primary: #7c4dff; /* violet */
       --tp-accent: #19c37d;  /* green */
+      --tp-sidebar-width: 17rem;
+      --tp-topbar-height: 3.75rem;
+    }
+    .tp-topbar {
+      min-height: var(--tp-topbar-height);
+      z-index: 1040;
+    }
+    .tp-sidebar {
+      --bs-offcanvas-width: var(--tp-sidebar-width);
+      background: rgba(18, 20, 24, .98);
+      border-right: 1px solid rgba(255,255,255,.12);
+    }
+    .tp-sidebar .offcanvas-body { overflow-y: auto; }
+    .tp-sidebar .tp-menu-label {
+      color: rgba(255,255,255,.46);
+      font-size: .7rem;
+      font-weight: 700;
+      letter-spacing: .09em;
+      text-transform: uppercase;
+    }
+    .tp-sidebar .nav-link {
+      color: rgba(255,255,255,.72);
+      border-radius: .65rem;
+      display: flex;
+      align-items: center;
+      gap: .7rem;
+      margin-bottom: .2rem;
+      padding: .65rem .75rem;
+    }
+    .tp-sidebar .nav-link:hover,
+    .tp-sidebar .nav-link:focus {
+      color: #fff;
+      background: rgba(255,255,255,.08);
+    }
+    .tp-sidebar .nav-link.active {
+      color: #fff;
+      background: rgba(124,77,255,.28);
+      box-shadow: inset 3px 0 0 var(--tp-primary);
+    }
+    .tp-sidebar .nav-link .bi { width: 1.15rem; text-align: center; }
+    .tp-sidebar-notifications {
+      max-height: 22rem;
+      overflow-y: auto;
+      background: rgba(255,255,255,.035);
+    }
+    .tp-sidebar-notifications a { color: inherit; }
+    @media (min-width: 992px) {
+      body.tp-sidebar-layout {
+        box-sizing: border-box;
+        min-height: 100vh;
+        padding-left: var(--tp-sidebar-width);
+        width: 100%;
+      }
+      body.tp-sidebar-layout > .tp-topbar {
+        margin-left: calc(-1 * var(--tp-sidebar-width));
+        width: calc(100% + var(--tp-sidebar-width));
+      }
+      .tp-sidebar.offcanvas-lg {
+        bottom: 0;
+        left: 0;
+        position: fixed;
+        top: var(--tp-topbar-height);
+        transform: none !important;
+        visibility: visible !important;
+        width: var(--tp-sidebar-width);
+        z-index: 1030;
+      }
+      .tp-sidebar .offcanvas-body {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
     }
     .tp-public-watermark {
       position: fixed;
@@ -5131,7 +5203,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     footer a { color: inherit }
   </style>
 </head>
-<body>
+<body class="tp-sidebar-layout">
   <?php if (in_array($view, ['cases', 'case'], true)): ?>
     <div class="tp-public-watermark" aria-hidden="true"></div>
   <?php endif; ?>
@@ -5435,102 +5507,133 @@ document.addEventListener('DOMContentLoaded', function () {
   <?php endif; ?>
   <?php $openAuth = $_SESSION['auth_tab'] ?? ''; unset($_SESSION['auth_tab']); ?>
   <?php $openModal = $_SESSION['open_modal'] ?? ''; unset($_SESSION['open_modal']); $formError = $_SESSION['form_error'] ?? ''; unset($_SESSION['form_error']); ?>
-  <!-- Top Navbar -->
-  <nav class="navbar navbar-expand-lg border-bottom sticky-top bg-body glass">
-    <div class="container-xl">
-      <a class="navbar-brand fw-bold" href="#"><i class="bi bi-shield-lock me-2 text-primary"></i> <?php echo htmlspecialchars($tpSiteTitle); ?></a>
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topNav"><span class="navbar-toggler-icon"></span></button>
-      <div class="collapse navbar-collapse" id="topNav">
-<ul class="navbar-nav me-auto mb-2 mb-lg-0">
-<li class="nav-item"><a class="nav-link <?php echo ($view==='cases')?'active':''; ?>" href="?view=cases#cases">Cases</a></li>
-<?php if (is_logged_in()): ?>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='pending')?'active':''; ?>" href="?view=pending#pending">Case Reviews</a></li>
-<?php endif; ?>
-<?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'viewer'): ?>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='submit_case')?'active':''; ?>" href="?view=submit_case#submit-case">Create Case</a></li>
-<?php endif; ?>
-<?php if (can_moderate_cases()): ?>
-  <li class="nav-item"><a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i>Create Case</a></li>
-<?php endif; ?>
-<?php if (is_admin()): ?>
-  <li class="nav-item"><a class="nav-link <?php echo in_array($view, ['users', 'user_profile'], true) ? 'active' : ''; ?>" href="?view=users#users">Users</a></li>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='viewer_stats')?'active':''; ?>" href="?view=viewer_stats#viewer-stats">Viewer Stats</a></li>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='system_health')?'active':''; ?>" href="?view=system_health#system-health"><i class="bi bi-heart-pulse me-1"></i>System Health</a></li>
-  <?php if (tp_is_main_admin()): ?>
-    <li class="nav-item"><a class="nav-link <?php echo ($view==='project_settings')?'active':''; ?>" href="?view=project_settings#project-settings">Project Settings</a></li>
-  <?php endif; ?>
-  <li class="nav-item">
-    <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#devModal">Dev</a>
-  </li>
-<?php endif; ?>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='faq')?'active':''; ?>" href="?view=faq#faq">FAQ</a></li>
-  <li class="nav-item"><a class="nav-link <?php echo ($view==='scanner')?'active':''; ?>" href="?view=scanner#scanner"><i class="bi bi-camera-fill me-1"></i>Face Scanner</a></li>
-    
-      </ul>
-      <ul class="navbar-nav ms-auto mb-2 mb-lg-0 align-items-center">
+  <!-- Compact top bar: authentication and account controls only -->
+  <nav class="navbar border-bottom sticky-top bg-body glass tp-topbar" id="tpTopbar">
+    <div class="container-fluid px-3">
+      <div class="d-flex align-items-center gap-2">
+        <button class="btn btn-outline-light btn-sm d-lg-none" type="button" data-bs-toggle="offcanvas" data-bs-target="#tpSidebar" aria-controls="tpSidebar" aria-label="Open navigation menu"><i class="bi bi-list fs-5"></i></button>
+        <a class="navbar-brand fw-bold mb-0" href="?view=cases#cases" aria-label="<?php echo htmlspecialchars($tpSiteTitle); ?> home"><i class="bi bi-shield-lock text-primary me-sm-2"></i><span class="d-none d-sm-inline"><?php echo htmlspecialchars($tpSiteTitle); ?></span></a>
+      </div>
+      <ul class="navbar-nav flex-row ms-auto align-items-center gap-2">
         <?php if (is_logged_in()): ?>
-          <li class="nav-item dropdown me-2">
-            <a class="nav-link position-relative" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false" aria-label="Account notifications">
-              <i class="bi bi-bell"></i>
-              <?php if ($tpUnreadNotificationCount > 0): ?>
-                <span class="position-absolute top-0 start-100 translate-middle badge rounded-pill text-bg-danger"><?php echo min(99, $tpUnreadNotificationCount); ?></span>
-              <?php endif; ?>
-            </a>
-            <ul class="dropdown-menu dropdown-menu-end p-0" style="width:min(92vw, 24rem); max-height:28rem; overflow:auto;">
-              <li class="dropdown-header d-flex justify-content-between align-items-center px-3 py-2">
-                <span>Notifications</span>
-                <?php if ($tpUnreadNotificationCount > 0): ?>
-                  <form method="post" action="" class="ms-2">
-                    <input type="hidden" name="action" value="mark_notifications_read">
-                    <?php csrf_field(); ?>
-                    <button type="submit" class="btn btn-link btn-sm p-0">Mark all read</button>
-                  </form>
-                <?php endif; ?>
-              </li>
-              <?php if ($tpUserNotifications): foreach ($tpUserNotifications as $notification): ?>
-                <li><hr class="dropdown-divider m-0"></li>
-                <li>
-                  <a class="dropdown-item text-wrap px-3 py-2<?php echo empty($notification['is_read']) ? ' bg-primary bg-opacity-10' : ''; ?>" href="<?php echo !empty($notification['case_code']) ? '?view=case&amp;code='.urlencode($notification['case_code']).'#case-view' : '?view=pending#pending'; ?>">
-                    <div class="fw-semibold small"><?php echo htmlspecialchars($notification['title'] ?? 'Notification'); ?></div>
-                    <div class="small text-secondary"><?php echo nl2br(htmlspecialchars($notification['message'] ?? '')); ?></div>
-                    <div class="small text-secondary mt-1"><?php echo htmlspecialchars(date('d M Y H:i', strtotime($notification['created_at'] ?? 'now'))); ?></div>
-                  </a>
-                </li>
-              <?php endforeach; else: ?>
-                <li><span class="dropdown-item-text text-secondary small px-3 py-3">No notifications yet.</span></li>
-              <?php endif; ?>
-            </ul>
-          </li>
           <li class="nav-item dropdown">
             <a class="nav-link dropdown-toggle d-flex align-items-center" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
               <i class="bi bi-person-circle me-2"></i>
-              <span class="d-none d-md-inline"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></span>
+              <span class="d-none d-sm-inline"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></span>
             </a>
             <ul class="dropdown-menu dropdown-menu-end">
               <li class="dropdown-header">
                 <div class="fw-semibold"><?php echo htmlspecialchars($_SESSION['user']['display_name'] ?? ($_SESSION['user']['email'] ?? 'User')); ?></div>
+                <div class="small text-secondary"><?php echo htmlspecialchars($_SESSION['user']['email'] ?? ''); ?></div>
                 <div class="small text-secondary">Role: <?php echo htmlspecialchars($_SESSION['user']['role'] ?? 'viewer'); ?></div>
               </li>
-              <?php if (is_admin()): ?>
-              <li><hr class="dropdown-divider"></li>
-              <li><a class="dropdown-item" href="#" data-bs-toggle="modal" data-bs-target="#devModal"><i class="bi bi-tools me-2"></i>Dev</a></li>
-              <?php endif; ?>
               <li><hr class="dropdown-divider"></li>
               <li><a class="dropdown-item" href="?logout=1"><i class="bi bi-box-arrow-right me-2"></i>Logout</a></li>
             </ul>
           </li>
         <?php else: ?>
-          <li class="nav-item me-2">
-            <a class="btn btn-outline-light btn-sm" href="#" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i> Login</a>
-          </li>
-          <li class="nav-item">
-            <a class="btn btn-primary btn-sm" href="#" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i> Register</a>
-          </li>
+          <li class="nav-item"><a class="btn btn-outline-light btn-sm" href="#" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="login"><i class="bi bi-box-arrow-in-right me-1"></i>Login</a></li>
+          <li class="nav-item"><a class="btn btn-primary btn-sm" href="#" data-bs-toggle="modal" data-bs-target="#authModal" data-auth-tab="register"><i class="bi bi-person-plus me-1"></i>Register</a></li>
         <?php endif; ?>
       </ul>
-      </div>
     </div>
   </nav>
+
+  <!-- Responsive left navigation -->
+  <aside class="offcanvas-lg offcanvas-start tp-sidebar" tabindex="-1" id="tpSidebar" aria-labelledby="tpSidebarLabel">
+    <div class="offcanvas-header border-bottom d-lg-none">
+      <h2 class="offcanvas-title h6 mb-0" id="tpSidebarLabel"><i class="bi bi-compass me-2"></i>Navigation</h2>
+      <button type="button" class="btn-close" data-bs-dismiss="offcanvas" data-bs-target="#tpSidebar" aria-label="Close"></button>
+    </div>
+    <div class="offcanvas-body p-3">
+      <div class="tp-menu-label px-2 mb-2">Main Menu</div>
+      <nav class="nav nav-pills flex-column" aria-label="Main navigation">
+        <a class="nav-link <?php echo ($view === 'cases') ? 'active' : ''; ?>" href="?view=cases#cases"><i class="bi bi-collection"></i><span>Cases</span></a>
+        <?php if (is_logged_in()): ?>
+          <a class="nav-link <?php echo ($view === 'pending') ? 'active' : ''; ?>" href="?view=pending#pending"><i class="bi bi-clipboard-check"></i><span>Case Reviews</span></a>
+        <?php endif; ?>
+        <?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'viewer'): ?>
+          <a class="nav-link <?php echo ($view === 'submit_case') ? 'active' : ''; ?>" href="?view=submit_case#submit-case"><i class="bi bi-folder-plus"></i><span>Create Case</span></a>
+        <?php elseif (can_moderate_cases()): ?>
+          <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus"></i><span>Create Case</span></a>
+        <?php endif; ?>
+        <a class="nav-link <?php echo ($view === 'scanner') ? 'active' : ''; ?>" href="?view=scanner#scanner"><i class="bi bi-camera-fill"></i><span>Face Scanner</span></a>
+        <a class="nav-link <?php echo ($view === 'faq') ? 'active' : ''; ?>" href="?view=faq#faq"><i class="bi bi-question-circle"></i><span>FAQ</span></a>
+        <a class="nav-link <?php echo in_array($view, ['removal', 'removal_request'], true) ? 'active' : ''; ?>" href="?view=removal#removal"><i class="bi bi-shield-exclamation"></i><span>Removal Requests</span></a>
+      </nav>
+
+      <?php if (is_logged_in()): ?>
+        <div class="tp-menu-label px-2 mt-4 mb-2">Account</div>
+        <nav class="nav nav-pills flex-column" aria-label="Account navigation">
+          <button class="nav-link border-0 bg-transparent text-start position-relative w-100" type="button" data-bs-toggle="collapse" data-bs-target="#tpSidebarNotifications" aria-expanded="false" aria-controls="tpSidebarNotifications">
+            <i class="bi bi-bell"></i><span>Notifications</span>
+            <?php if ($tpUnreadNotificationCount > 0): ?><span class="badge rounded-pill text-bg-danger ms-auto"><?php echo min(99, $tpUnreadNotificationCount); ?></span><?php endif; ?>
+          </button>
+        </nav>
+        <div class="collapse mt-1" id="tpSidebarNotifications">
+          <div class="tp-sidebar-notifications border rounded">
+            <div class="d-flex justify-content-between align-items-center gap-2 p-2 border-bottom">
+              <span class="small fw-semibold">Recent notifications</span>
+              <?php if ($tpUnreadNotificationCount > 0): ?>
+                <form method="post" action="" class="m-0">
+                  <input type="hidden" name="action" value="mark_notifications_read">
+                  <?php csrf_field(); ?>
+                  <button type="submit" class="btn btn-link btn-sm p-0">Mark read</button>
+                </form>
+              <?php endif; ?>
+            </div>
+            <?php if ($tpUserNotifications): foreach ($tpUserNotifications as $notification): ?>
+              <a class="d-block text-decoration-none p-2 border-bottom<?php echo empty($notification['is_read']) ? ' bg-primary bg-opacity-10' : ''; ?>" href="<?php echo !empty($notification['case_code']) ? '?view=case&amp;code=' . urlencode($notification['case_code']) . '#case-view' : '?view=pending#pending'; ?>">
+                <div class="fw-semibold small"><?php echo htmlspecialchars($notification['title'] ?? 'Notification'); ?></div>
+                <div class="small text-secondary"><?php echo nl2br(htmlspecialchars($notification['message'] ?? '')); ?></div>
+                <div class="small text-secondary mt-1"><?php echo htmlspecialchars(date('d M Y H:i', strtotime($notification['created_at'] ?? 'now'))); ?></div>
+              </a>
+            <?php endforeach; else: ?>
+              <div class="text-secondary small p-3">No notifications yet.</div>
+            <?php endif; ?>
+          </div>
+        </div>
+      <?php endif; ?>
+
+      <?php if (is_admin()): ?>
+        <div class="tp-menu-label px-2 mt-4 mb-2">Administration</div>
+        <nav class="nav nav-pills flex-column" aria-label="Administration navigation">
+          <a class="nav-link <?php echo in_array($view, ['users', 'user_profile'], true) ? 'active' : ''; ?>" href="?view=users#users"><i class="bi bi-people"></i><span>Users</span></a>
+          <a class="nav-link <?php echo ($view === 'viewer_stats') ? 'active' : ''; ?>" href="?view=viewer_stats#viewer-stats"><i class="bi bi-bar-chart"></i><span>Viewer Stats</span></a>
+          <a class="nav-link <?php echo ($view === 'system_health') ? 'active' : ''; ?>" href="?view=system_health#system-health"><i class="bi bi-heart-pulse"></i><span>System Health</span></a>
+          <?php if (tp_is_main_admin()): ?>
+            <a class="nav-link <?php echo ($view === 'project_settings') ? 'active' : ''; ?>" href="?view=project_settings#project-settings"><i class="bi bi-sliders"></i><span>Project Settings</span></a>
+          <?php endif; ?>
+          <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#devModal"><i class="bi bi-tools"></i><span>Developer Tools</span></a>
+        </nav>
+      <?php endif; ?>
+    </div>
+  </aside>
+  <script>
+  (function () {
+    var topbar = document.getElementById('tpTopbar');
+    var sidebar = document.getElementById('tpSidebar');
+    if (!topbar || !sidebar) return;
+    var framePending = false;
+    function syncDesktopSidebar() {
+      framePending = false;
+      if (window.innerWidth < 992) {
+        sidebar.style.removeProperty('top');
+        return;
+      }
+      var topbarBottom = Math.max(0, Math.round(topbar.getBoundingClientRect().bottom));
+      sidebar.style.top = topbarBottom + 'px';
+    }
+    function requestSync() {
+      if (framePending) return;
+      framePending = true;
+      window.requestAnimationFrame(syncDesktopSidebar);
+    }
+    syncDesktopSidebar();
+    window.addEventListener('resize', requestSync, {passive: true});
+    window.addEventListener('scroll', requestSync, {passive: true});
+  })();
+  </script>
 
   <?php if (($view ?? '') === 'removal_request'): ?>
   <?php
