@@ -4547,7 +4547,7 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                 imagedestroy($queryImg);
 
                 $uploadsRoot = realpath(__DIR__ . '/uploads');
-                $sensFilter  = is_admin() ? '' : "AND c.sensitivity != 'Sealed'";
+                $sensFilter  = can_moderate_cases() ? '' : "AND c.sensitivity != 'Sealed'";
                 $scored      = [];
 
                 // ── Scoring formula (weights sum to 1.0) ──────────────────────
@@ -4559,7 +4559,7 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
 
                 // ── 1. Score person profile photos ────────────────────────────
                 try {
-                    $sensWhere2 = is_admin()
+                    $sensWhere2 = can_moderate_cases()
                         ? "WHERE c.status = 'Verified'"
                         : "WHERE c.status = 'Verified' AND c.sensitivity != 'Sealed'";
                     $pq = $pdo->query(
