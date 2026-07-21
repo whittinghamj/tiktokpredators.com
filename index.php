@@ -4820,6 +4820,29 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
       --tp-primary: #7c4dff; /* violet */
       --tp-accent: #19c37d;  /* green */
     }
+    .tp-public-watermark {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      z-index: 2147483647;
+      color: rgba(255, 255, 255, .11);
+      font-size: clamp(1.5rem, 6vw, 5rem);
+      font-weight: 800;
+      letter-spacing: .06em;
+      line-height: 1;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, .2);
+      white-space: nowrap;
+      pointer-events: none;
+      user-select: none;
+      transform: translate(-50%, -50%) rotate(-28deg);
+    }
+    @media print {
+      .tp-public-watermark {
+        color: rgba(0, 0, 0, .14);
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+      }
+    }
     .navbar-brand span { color: var(--tp-primary); }
     .hero {
       background: radial-gradient(1200px 600px at 80% -10%, rgba(124,77,255,.2), transparent),
@@ -4954,6 +4977,10 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
   </style>
 </head>
 <body>
+  <?php if (in_array($view, ['cases', 'case'], true)): ?>
+    <div class="tp-public-watermark" aria-hidden="true">tiktokpredators.com</div>
+  <?php endif; ?>
+
   <!-- Ownership banner -->
   <div role="banner" style="background:#3a0f4a;color:#ffffff;font-weight:700;text-align:center;padding:10px 12px;">
     <?php echo htmlspecialchars($tpSiteTitle); ?> is owned and operated by Jamie Whittingham | <a href="https://www.tiktok.com/@jamiewhittinghamofficial" target="_blank" rel="noopener noreferrer" style="color:#ffffff;text-decoration:underline;">Mouldy Sausage</a>
