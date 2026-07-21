@@ -519,9 +519,9 @@ function tp_openai_case_builder_request(string $apiKey, string $model, array $ca
   return [true, $result, ''];
 }
 
-/** Allow the original submitter to build or revise an unpublished case. */
+/** Allow the original viewer or moderator to build or revise an unpublished case. */
 function can_manage_case_submission(PDO $pdo, int $caseId): bool {
-    if ($caseId <= 0 || empty($_SESSION['user']) || current_user_role() !== 'viewer') { return false; }
+    if ($caseId <= 0 || empty($_SESSION['user']) || !in_array(current_user_role(), ['viewer', 'moderator'], true)) { return false; }
     try {
         $s = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
         $s->execute([$caseId]);
@@ -3010,12 +3010,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     }
 }
 
-// Handle create case POST (admin only)
+// Handle create case POST (moderator or admin)
 if (($_POST['action'] ?? '') === 'create_case') {
     throttle();
     if (!check_csrf()) { flash('error', 'Security check failed. Please refresh and try again.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) {
-        flash('error', 'Unauthorized. Admins only.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    if (!can_moderate_cases()) {
+        flash('error', 'Unauthorized. Moderators or admins only.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
 
     // Collect & validate inputs
@@ -3260,8 +3260,8 @@ if (in_array(($_POST['action'] ?? ''), ['submit_case_for_review', 'resubmit_case
         $caseStmt->execute([$case_id, $case_code]);
         $caseToResubmit = $caseStmt->fetch();
         $isOriginalSubmitter = $caseToResubmit && (int)($caseToResubmit['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
-        $viewerCanSubmit = current_user_role() === 'viewer' && $isOriginalSubmitter;
-        if (!$caseToResubmit || (!is_admin() && !$viewerCanSubmit)) {
+        $ownerCanSubmit = in_array(current_user_role(), ['viewer', 'moderator'], true) && $isOriginalSubmitter;
+        if (!$caseToResubmit || (!is_admin() && !$ownerCanSubmit)) {
             $pdo->rollBack();
             flash('error', 'Unauthorized. Only the original submitter or an administrator can submit this case for review.');
         } elseif (!in_array(($caseToResubmit['status'] ?? ''), ['Being Built', 'Rejected'], true)) {
@@ -3668,21 +3668,11 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
     if (empty($_SESSION['user'])) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
     $isAdminUser = (($_SESSION['user']['role'] ?? '') === 'admin');
-    $isOwnerViewer = false;
+    $isCaseOwner = false;
     $case_id_check = (int)($_POST['case_id'] ?? 0);
     $isPendingReviewer = is_moderator() && can_review_pending_case($pdo, $case_id_check);
-    // Determine if viewer owns this case
-    if (current_user_role() === 'viewer' && $case_id_check > 0) {
-        try {
-            $cs = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
-            $cs->execute([$case_id_check]);
-            $crow = $cs->fetch();
-            if ($crow && (int)($crow['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && in_array(($crow['status'] ?? ''), ['Being Built','Pending','Rejected'], true)) {
-                $isOwnerViewer = true;
-            }
-        } catch (Throwable $e) {}
-    }
-    if (!$isAdminUser && !$isPendingReviewer && !$isOwnerViewer) {
+    $isCaseOwner = can_manage_case_submission($pdo, $case_id_check);
+    if (!$isAdminUser && !$isPendingReviewer && !$isCaseOwner) {
         flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
 
@@ -3915,20 +3905,11 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
     if (!check_csrf()) { echo json_encode(['ok'=>false,'error'=>'Security check failed.']); exit; }
     if (empty($_SESSION['user'])) { echo json_encode(['ok'=>false,'error'=>'Unauthorized.']); exit; }
     $isAdminUser = (($_SESSION['user']['role'] ?? '') === 'admin');
-    $isOwnerViewer = false;
+    $isCaseOwner = false;
     $case_id_check = (int)($_POST['case_id'] ?? 0);
     $isPendingReviewer = is_moderator() && can_review_pending_case($pdo, $case_id_check);
-    if (current_user_role() === 'viewer' && $case_id_check > 0) {
-        try {
-            $cs = $pdo->prepare('SELECT created_by, status FROM cases WHERE id = ? LIMIT 1');
-            $cs->execute([$case_id_check]);
-            $crow = $cs->fetch();
-            if ($crow && (int)($crow['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0) && in_array(($crow['status'] ?? ''), ['Being Built','Pending','Rejected'], true)) {
-                $isOwnerViewer = true;
-            }
-        } catch (Throwable $e) {}
-    }
-    if (!$isAdminUser && !$isPendingReviewer && !$isOwnerViewer) { echo json_encode(['ok'=>false,'error'=>'Unauthorized.']); exit; }
+    $isCaseOwner = can_manage_case_submission($pdo, $case_id_check);
+    if (!$isAdminUser && !$isPendingReviewer && !$isCaseOwner) { echo json_encode(['ok'=>false,'error'=>'Unauthorized.']); exit; }
 
     $case_id  = (int)($_POST['case_id'] ?? 0);
     $title    = trim($_POST['title'] ?? '');
@@ -4030,9 +4011,7 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
         $ps->execute([$evidence_id, $case_id]);
         $prevEv = $ps->fetch() ?: [];
     } catch (Throwable $e) {}
-    $isCaseCreator = current_user_role() === 'viewer'
-        && (int)($prevEv['case_created_by'] ?? 0) > 0
-        && (int)($prevEv['case_created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
+    $isCaseCreator = can_manage_case_submission($pdo, $case_id);
     $isPendingReviewer = is_moderator() && can_review_pending_case($pdo, $case_id);
     $canFullyEditEvidence = is_admin() || $isPendingReviewer;
     if (!$prevEv || empty($_SESSION['user']) || (!$canFullyEditEvidence && !$isCaseCreator)) {
@@ -5288,6 +5267,9 @@ document.addEventListener('DOMContentLoaded', function () {
 <?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'viewer'): ?>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='submit_case')?'active':''; ?>" href="?view=submit_case#submit-case">Create Case</a></li>
 <?php endif; ?>
+<?php if (can_moderate_cases()): ?>
+  <li class="nav-item"><a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i>Create Case</a></li>
+<?php endif; ?>
 <?php if (is_admin()): ?>
   <li class="nav-item"><a class="nav-link <?php echo in_array($view, ['users', 'user_profile'], true) ? 'active' : ''; ?>" href="?view=users#users">Users</a></li>
   <li class="nav-item"><a class="nav-link <?php echo ($view==='viewer_stats')?'active':''; ?>" href="?view=viewer_stats#viewer-stats">Viewer Stats</a></li>
@@ -5903,7 +5885,7 @@ document.addEventListener('DOMContentLoaded', function () {
                             </div>
                             <div class="row">
                               <div class="col-md-6 mb-3">
-                                <input type="hidden" name="sensitivity" value="Standard">
+                                <input type="hidden" name="sensitivity" value="<?php echo htmlspecialchars($caseRow['sensitivity'] ?? 'Standard'); ?>">
                               </div>
                               <div class="col-md-6 mb-3">
                                 <input type="hidden" name="status" value="<?php echo htmlspecialchars($caseRow['status'] ?? 'Pending'); ?>">
@@ -6092,7 +6074,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 <button type="submit" class="btn btn-outline-light btn-sm ms-1"><i class="bi bi-search"></i></button>
               </form>
               <div class="btn-group">
-                <?php if (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'admin'): ?>
+                <?php if (can_moderate_cases()): ?>
                   <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus me-1"></i> Add Case</button>
                 <?php elseif (!empty($_SESSION['user']) && ($_SESSION['user']['role'] ?? '') === 'viewer'): ?>
                   <a class="btn btn-primary btn-sm" href="?view=submit_case#submit-case"><i class="bi bi-folder-plus me-1"></i> Submit Case</a>
@@ -8351,13 +8333,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           } elseif (is_moderator() && !empty($viewCase) && ($viewCase['status'] ?? '') === 'Pending') {
               $tp_canAddEvidence = true;
               $tp_canEditCaseEvidence = true;
-          } elseif (current_user_role() === 'viewer' && !empty($viewCase) && in_array(($viewCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true)) {
+          } elseif (in_array(current_user_role(), ['viewer', 'moderator'], true) && !empty($viewCase) && in_array(($viewCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true)) {
               $ownerId = (int)($viewCase['created_by'] ?? 0);
               $tp_canAddEvidence = ($ownerId > 0) && ($ownerId === (int)($_SESSION['user']['id'] ?? 0));
               $tp_canViewAiBuilder = $tp_isCaseOwner;
               $tp_canRunAiBuilder = $tp_isCaseOwner && (($viewCase['status'] ?? '') === 'Being Built');
           }
-          if ($tp_isCaseOwner && current_user_role() === 'viewer') { $tp_canEditCaseEvidence = true; }
+          if ($tp_isCaseOwner && in_array(current_user_role(), ['viewer', 'moderator'], true)) { $tp_canEditCaseEvidence = true; }
       }
       if ($tp_canViewAiBuilder && $viewCaseId > 0) {
         try {
@@ -10218,8 +10200,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
     </div>
   </div>
 
-  <?php if (is_admin()): ?>
-  <!-- Create Case Modal (Admin) -->
+  <?php if (can_moderate_cases()): ?>
+  <!-- Create Case Modal (Moderator or Admin) -->
   <div class="modal fade" id="createCaseModal" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered">
       <div class="modal-content">
@@ -10228,6 +10210,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
+          <?php if (!empty($formError)): ?>
+            <div class="alert alert-danger"><?php echo htmlspecialchars($formError); ?></div>
+          <?php endif; ?>
           <form method="post" action="" id="createCaseForm" enctype="multipart/form-data">
             <input type="hidden" name="action" value="create_case">
             <?php csrf_field(); ?>
@@ -10301,6 +10286,16 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       </div>
     </div>
   </div>
+  <?php if ($openModal === 'createCase'): ?>
+  <script>
+  document.addEventListener('DOMContentLoaded', function () {
+    var createCaseModal = document.getElementById('createCaseModal');
+    if (createCaseModal) {
+      bootstrap.Modal.getOrCreateInstance(createCaseModal).show();
+    }
+  });
+  </script>
+  <?php endif; ?>
   <?php endif; ?>
 
   <!-- Auth Modal -->
