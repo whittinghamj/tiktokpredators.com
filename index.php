@@ -2123,7 +2123,7 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     if (!$row) { http_response_code(404); exit('Not found'); }
     $isReviewCaseOwner = !empty($_SESSION['user']) && (int)($row['case_created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
     $isPrivateReviewStatus = in_array(($row['case_status'] ?? ''), ['Being Built','Pending','Rejected'], true);
-    $isCaseReviewer = can_moderate_cases() && in_array(($row['case_status'] ?? ''), ['Pending', 'Rejected'], true);
+    $isCaseReviewer = can_moderate_cases() && in_array(($row['case_status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true);
     if ($isPrivateReviewStatus && !is_admin() && !$isCaseReviewer && !$isReviewCaseOwner) { http_response_code(404); exit('Not found'); }
     $rel = $row['filepath'] ?? '';
     $mime = $row['mime_type'] ?? 'application/octet-stream';
@@ -4715,7 +4715,7 @@ if ($view === 'case' && isset($pdo) && $pdo instanceof PDO) {
       $metaCase = $metaStmt->fetch();
       $metaReviewOwner = $metaCase && is_logged_in() && (int)($metaCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
       $metaIsPrivateReview = $metaCase && in_array(($metaCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true);
-      $metaCanReviewCase = $metaCase && can_moderate_cases() && in_array(($metaCase['status'] ?? ''), ['Pending', 'Rejected'], true);
+      $metaCanReviewCase = $metaCase && can_moderate_cases() && in_array(($metaCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true);
       if ($metaCase && (!$metaIsPrivateReview || is_admin() || $metaCanReviewCase || $metaReviewOwner)) {
         $metaCaseCode = (string)($metaCase['case_code'] ?? $metaCaseCode);
         $metaCaseName = trim((string)($metaCase['case_name'] ?? ''));
@@ -7052,7 +7052,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                         <?php endif; ?>
                         <?php if (!empty($res['location'])): ?>
                         <div class="col">
-                          <i class="bi bi-geo-alt me-1"></i><?php echo htmlspecialchars(tp_case_location_for_viewer($res['location'])); ?>
+                          <i class="bi bi-geo-alt me-1"></i><?php echo htmlspecialchars(can_moderate_cases() ? (string)$res['location'] : tp_case_location_for_viewer($res['location'])); ?>
                         </div>
                         <?php endif; ?>
                         <div class="col">
@@ -8197,7 +8197,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           $viewCase = $st->fetch();
           $viewReviewOwner = $viewCase && is_logged_in() && (int)($viewCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
           $viewIsPrivateReview = $viewCase && in_array(($viewCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true);
-          $viewCanReviewCase = $viewCase && can_moderate_cases() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true);
+          $viewCanReviewCase = $viewCase && can_moderate_cases() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true);
           if ($viewCase && $viewIsPrivateReview && !is_admin() && !$viewCanReviewCase && !$viewReviewOwner) {
             $viewCase = null;
           }
@@ -8295,7 +8295,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       if (!empty($viewCase)) {
         $tp_isRestrictedForNonAdmin = (($viewCase['sensitivity'] ?? '') === 'Restricted')
           && !is_admin()
-          && !(is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true));
+          && !(is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true));
       }
       if ($tp_isRestrictedForNonAdmin) {
         echo '<script>document.addEventListener("DOMContentLoaded",function(){document.body.dataset.restricted="1";});</script>';
@@ -8363,7 +8363,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           $tp_headerName = trim((string)($viewCase['person_name'] ?? ''));
           if ($tp_headerName === '') { $tp_headerName = trim((string)($viewCase['case_name'] ?? '')); }
           if ($tp_headerName === '') { $tp_headerName = 'Unknown'; }
-          $tp_headerLocation = (is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true))
+          $tp_headerLocation = (is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true))
             ? trim((string)($viewCase['location'] ?? ''))
             : tp_case_location_for_viewer($viewCase['location'] ?? '');
           if ($tp_headerLocation === '') { $tp_headerLocation = 'Unknown Location'; }
@@ -8630,7 +8630,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         if (($ceRow['event_type'] ?? '') === 'case_rejected' && !$canViewReviewFeedback) {
                             $caseEventDetail = trim((string)($ceRow['subject'] ?? ''));
                         }
-                        $visibleCaseEventDetail = (is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true))
+                        $visibleCaseEventDetail = (is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true))
                             ? $caseEventDetail
                             : tp_case_event_detail_for_viewer($caseEventDetail);
                         $timelineEvents[] = [
@@ -8828,11 +8828,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Location</div>
-                          <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars((is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true)) ? (string)$viewCase['location'] : tp_case_location_for_viewer($viewCase['location'])) : '<span class="text-secondary">—</span>'; ?></div>
+                          <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars((is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true)) ? (string)$viewCase['location'] : tp_case_location_for_viewer($viewCase['location'])) : '<span class="text-secondary">—</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Phone Number</div>
-                          <div><?php echo ($viewCase['phone_number'] ?? '') !== '' ? htmlspecialchars((is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected'], true)) ? (string)$viewCase['phone_number'] : tp_case_phone_number_for_viewer($viewCase['phone_number'])) : '<span class="text-secondary">&mdash;</span>'; ?></div>
+                          <div><?php echo ($viewCase['phone_number'] ?? '') !== '' ? htmlspecialchars((is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true)) ? (string)$viewCase['phone_number'] : tp_case_phone_number_for_viewer($viewCase['phone_number'])) : '<span class="text-secondary">&mdash;</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Snapchat Username</div>
