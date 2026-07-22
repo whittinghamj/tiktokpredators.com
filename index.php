@@ -5208,11 +5208,6 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     <div class="tp-public-watermark" aria-hidden="true"></div>
   <?php endif; ?>
 
-  <!-- Ownership banner -->
-  <div role="banner" style="background:#3a0f4a;color:#ffffff;font-weight:700;text-align:center;padding:10px 12px;">
-    <?php echo htmlspecialchars($tpSiteTitle); ?> is owned and operated by Jamie Whittingham | <a href="https://www.tiktok.com/@jamiewhittinghamofficial" target="_blank" rel="noopener noreferrer" style="color:#ffffff;text-decoration:underline;">Mouldy Sausage</a>
-  </div>
-
   <?php if ($msg = flash('success')): ?>
     <div class="alert alert-success border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
   <?php endif; ?>
@@ -11268,14 +11263,19 @@ document.addEventListener('click', function (ev) {
 
 <!-- Global Footer -->
 <footer class="border-top glass mt-5 py-3">
-  <div class="container-xl d-flex flex-column flex-md-row justify-content-between align-items-center gap-2">
-    <div class="small text-secondary">
-      &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($tpSiteTitle); ?>. All rights reserved.
+  <div class="container-xl">
+    <div class="small fw-semibold text-center mb-2">
+      <?php echo htmlspecialchars($tpSiteTitle); ?> is owned and operated by Jamie Whittingham <span class="text-secondary mx-1">|</span> <a href="https://www.tiktok.com/@jamiewhittinghamofficial" target="_blank" rel="noopener noreferrer" class="link-light">Mouldy Sausage</a>
     </div>
-    <div class="d-flex gap-3 small">
-      <a href="?view=removal#removal" class="link-light text-decoration-none">Removal Requests</a>
-      <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#privacyModal">Privacy</a>
-      <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#termsModal">Terms</a>
+    <div class="d-flex flex-column flex-md-row justify-content-between align-items-center gap-2 pt-2 border-top">
+      <div class="small text-secondary">
+        &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($tpSiteTitle); ?>. All rights reserved.
+      </div>
+      <div class="d-flex gap-3 small">
+        <a href="?view=removal#removal" class="link-light text-decoration-none">Removal Requests</a>
+        <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#privacyModal">Privacy</a>
+        <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#termsModal">Terms</a>
+      </div>
     </div>
   </div>
 </footer>
