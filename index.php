@@ -5208,9 +5208,15 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     <div class="tp-public-watermark" aria-hidden="true"></div>
   <?php endif; ?>
 
-  <?php if ($msg = flash('success')): ?>
-    <div class="alert alert-success border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
-  <?php endif; ?>
+  <?php
+    $tpFlashSuccess = flash('success');
+    $tpFlashError = flash('error');
+    $tpSqlError = '';
+    if (is_admin() && !empty($_SESSION['sql_error'])) {
+      $tpSqlError = (string)$_SESSION['sql_error'];
+      unset($_SESSION['sql_error']);
+    }
+  ?>
 
 
 <!-- Auth Modal -->
@@ -5489,17 +5495,6 @@ document.addEventListener('DOMContentLoaded', function () {
   });
   </script>
   <?php endif; ?>
-  <?php if ($msg = flash('error')): ?>
-    <div class="alert alert-danger border-0 rounded-0 mb-0 text-center"><?php echo $msg; ?></div>
-  <?php endif; ?>
-  <?php if (is_admin() && !empty($_SESSION['sql_error'])): ?>
-    <div class="alert alert-warning border-0 rounded-0 mb-0 text-center">
-      <div><strong>SQL hint:</strong> <?php echo htmlspecialchars($_SESSION['sql_error']); unset($_SESSION['sql_error']); ?></div>
-      <div class="small">If this mentions an ENUM issue on <code>evidence.type</code>, run:
-        <code>ALTER TABLE evidence MODIFY COLUMN type ENUM('image','video','audio','pdf','doc','url','other') NOT NULL DEFAULT 'other';</code>
-      </div>
-    </div>
-  <?php endif; ?>
   <?php $openAuth = $_SESSION['auth_tab'] ?? ''; unset($_SESSION['auth_tab']); ?>
   <?php $openModal = $_SESSION['open_modal'] ?? ''; unset($_SESSION['open_modal']); $formError = $_SESSION['form_error'] ?? ''; unset($_SESSION['form_error']); ?>
   <!-- Compact top bar: authentication and account controls only -->
@@ -5533,6 +5528,32 @@ document.addEventListener('DOMContentLoaded', function () {
       </ul>
     </div>
   </nav>
+
+  <?php if ($tpFlashSuccess !== '' || $tpFlashError !== '' || $tpSqlError !== ''): ?>
+  <div id="tpGlobalAlerts" aria-live="polite">
+    <?php if ($tpFlashSuccess !== ''): ?>
+      <div class="alert alert-success alert-dismissible fade show border-0 rounded-0 mb-0 text-center" role="status">
+        <?php echo $tpFlashSuccess; ?>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Dismiss success message"></button>
+      </div>
+    <?php endif; ?>
+    <?php if ($tpFlashError !== ''): ?>
+      <div class="alert alert-danger alert-dismissible fade show border-0 rounded-0 mb-0 text-center" role="alert">
+        <?php echo $tpFlashError; ?>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Dismiss error message"></button>
+      </div>
+    <?php endif; ?>
+    <?php if ($tpSqlError !== ''): ?>
+      <div class="alert alert-warning alert-dismissible fade show border-0 rounded-0 mb-0 text-center" role="alert">
+        <div><strong>SQL hint:</strong> <?php echo htmlspecialchars($tpSqlError); ?></div>
+        <div class="small">If this mentions an ENUM issue on <code>evidence.type</code>, run:
+          <code>ALTER TABLE evidence MODIFY COLUMN type ENUM('image','video','audio','pdf','doc','url','other') NOT NULL DEFAULT 'other';</code>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Dismiss database message"></button>
+      </div>
+    <?php endif; ?>
+  </div>
+  <?php endif; ?>
 
   <!-- Responsive left navigation -->
   <aside class="offcanvas-lg offcanvas-start tp-sidebar" tabindex="-1" id="tpSidebar" aria-labelledby="tpSidebarLabel">
