@@ -195,18 +195,16 @@ function tp_case_phone_number_for_viewer(?string $phoneNumber): string {
 }
 function tp_mask_case_location_house_number(?string $location): string {
   $location = trim((string)$location);
-  return (string)preg_replace_callback(
-    '/^(\d+[A-Za-z]?(?:\s*[-–—\/]\s*\d+[A-Za-z]?)*)(?=\s|,|$)/u',
-    static function (array $match): string {
-      return (string)preg_replace('/\d/', '*', $match[1]);
-    },
+  return (string)preg_replace(
+    '/^\d+[A-Za-z]?(?:\s*[-–—\/]\s*\d+[A-Za-z]?)*(?=\s|,|$)/u',
+    '***',
     $location,
     1
   );
 }
 function tp_case_location_for_viewer(?string $location): string {
   $location = trim((string)$location);
-  return is_admin() ? $location : tp_mask_case_location_house_number($location);
+  return can_moderate_cases() ? $location : tp_mask_case_location_house_number($location);
 }
 function tp_mask_case_event_field_values(string $detail, string $fieldName, callable $maskValue): string {
   return (string)preg_replace_callback(
@@ -223,11 +221,10 @@ function tp_mask_case_event_field_values(string $detail, string $fieldName, call
   );
 }
 function tp_case_event_detail_for_viewer(string $detail): string {
-  if (is_admin()) { return $detail; }
-  if (stripos($detail, 'phone_number:') !== false) {
+  if (!is_admin() && stripos($detail, 'phone_number:') !== false) {
     $detail = tp_mask_case_event_field_values($detail, 'phone_number', 'tp_mask_case_phone_number');
   }
-  if (stripos($detail, 'location:') !== false) {
+  if (!can_moderate_cases() && stripos($detail, 'location:') !== false) {
     $detail = tp_mask_case_event_field_values($detail, 'location', 'tp_mask_case_location_house_number');
   }
   return $detail;
@@ -8692,9 +8689,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           $tp_headerName = trim((string)($viewCase['person_name'] ?? ''));
           if ($tp_headerName === '') { $tp_headerName = trim((string)($viewCase['case_name'] ?? '')); }
           if ($tp_headerName === '') { $tp_headerName = 'Unknown'; }
-          $tp_headerLocation = (is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true))
-            ? trim((string)($viewCase['location'] ?? ''))
-            : tp_case_location_for_viewer($viewCase['location'] ?? '');
+          $tp_headerLocation = tp_case_location_for_viewer($viewCase['location'] ?? '');
           if ($tp_headerLocation === '') { $tp_headerLocation = 'Unknown Location'; }
         ?>
         <div class="d-flex align-items-center justify-content-between mb-3">
@@ -9164,7 +9159,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Location</div>
-                          <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars((is_moderator() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true)) ? (string)$viewCase['location'] : tp_case_location_for_viewer($viewCase['location'])) : '<span class="text-secondary">—</span>'; ?></div>
+                          <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars(tp_case_location_for_viewer($viewCase['location'])) : '<span class="text-secondary">—</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Phone Number</div>
@@ -9301,7 +9296,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                               $decisionBadge = $suggestionDecision === 'Approved' ? 'success' : ($suggestionDecision === 'Rejected' ? 'danger' : 'warning');
                               $beforeValue = (string)($tpSuggestion['current_value'] ?? '');
                               $afterValue = (string)($tpSuggestion['suggested_value'] ?? '');
-                              if (!is_admin() && $fieldName === 'location') {
+                              if (!can_moderate_cases() && $fieldName === 'location') {
                                 $beforeValue = tp_mask_case_location_house_number($beforeValue);
                                 $afterValue = tp_mask_case_location_house_number($afterValue);
                               }
