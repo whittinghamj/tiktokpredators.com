@@ -9550,7 +9550,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <div class="card glass">
                 <div class="card-body">
                   <div class="d-flex align-items-center justify-content-between mb-2">
-                    <h3 class="h6 mb-0">Evidence</h3>
+                    <h3 class="h6 mb-0">Evidence (<?php echo count($viewEv); ?>)</h3>
+                    <?php if (is_admin() && $viewEv): ?>
+                      <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteAllCaseViewEvidenceModal">
+                        <i class="bi bi-trash3 me-1"></i>Delete All Evidence
+                      </button>
+                    <?php endif; ?>
                   </div>
                   <div class="table-responsive">
                     <table class="table table-sm align-middle">
@@ -9660,6 +9665,31 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 </div>
               </div>
             </div>
+            <?php if (is_admin() && $viewEv): ?>
+            <div class="modal fade" id="deleteAllCaseViewEvidenceModal" tabindex="-1" aria-labelledby="deleteAllCaseViewEvidenceModalLabel" aria-hidden="true">
+              <div class="modal-dialog modal-dialog-centered">
+                <div class="modal-content">
+                  <div class="modal-header">
+                    <h2 class="modal-title fs-5" id="deleteAllCaseViewEvidenceModalLabel"><i class="bi bi-exclamation-triangle text-danger me-2"></i>Delete All Evidence?</h2>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                  </div>
+                  <div class="modal-body">
+                    This will permanently delete all <?php echo count($viewEv); ?> evidence item<?php echo count($viewEv) === 1 ? '' : 's'; ?> from this case, including uploaded files, URLs, and evidence notes. This cannot be undone.
+                  </div>
+                  <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+                    <form method="post" action="">
+                      <input type="hidden" name="action" value="delete_all_evidence">
+                      <?php csrf_field(); ?>
+                      <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                      <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                      <button type="submit" class="btn btn-danger"><i class="bi bi-trash3 me-1"></i>Delete All Evidence</button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <?php endif; ?>
           </div>
 <?php if ((is_admin() || (is_moderator() && ($viewCase['status'] ?? '') === 'Pending')) && $viewCase): ?>
   <div class="modal fade" id="editCaseModal" tabindex="-1" aria-hidden="true">
