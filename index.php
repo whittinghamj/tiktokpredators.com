@@ -4275,6 +4275,88 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     if($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
 }
 
+// Handle bulk evidence deletion. Admins remove every item; case owners remove their own uploads.
+if (($_POST['action'] ?? '') === 'delete_all_evidence') {
+    throttle();
+    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
+
+    $case_id = (int)($_POST['case_id'] ?? 0);
+    $ru = tp_post_string('redirect_url');
+    $ownerCan = can_manage_case_submission($pdo, $case_id);
+    $isAdminUser = is_admin();
+    if (empty($_SESSION['user']) || (!$isAdminUser && !$ownerCan)) {
+        flash('error', 'Unauthorized.');
+        if ($ru !== '') { header('Location: '.$ru); exit; }
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if ($case_id <= 0) {
+        flash('error', 'Invalid case.');
+        if ($ru !== '') { header('Location: '.$ru); exit; }
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+
+    $files = [];
+    $deletedCount = 0;
+    try {
+        $pdo->beginTransaction();
+        if ($isAdminUser) {
+            $selectEvidence = $pdo->prepare('SELECT id, filepath FROM evidence WHERE case_id = ? FOR UPDATE');
+            $selectEvidence->execute([$case_id]);
+        } else {
+            $selectEvidence = $pdo->prepare('SELECT id, filepath FROM evidence WHERE case_id = ? AND uploaded_by = ? FOR UPDATE');
+            $selectEvidence->execute([$case_id, (int)($_SESSION['user']['id'] ?? 0)]);
+        }
+        $files = $selectEvidence->fetchAll() ?: [];
+
+        if ($isAdminUser) {
+            $deleteEvidence = $pdo->prepare('DELETE FROM evidence WHERE case_id = ?');
+            $deleteEvidence->execute([$case_id]);
+        } else {
+            $deleteEvidence = $pdo->prepare('DELETE FROM evidence WHERE case_id = ? AND uploaded_by = ?');
+            $deleteEvidence->execute([$case_id, (int)($_SESSION['user']['id'] ?? 0)]);
+        }
+        $deletedCount = $deleteEvidence->rowCount();
+        log_case_event(
+            $pdo,
+            $case_id,
+            'evidence_deleted',
+            $isAdminUser ? 'All evidence' : 'All uploader evidence',
+            $deletedCount.' evidence item'.($deletedCount === 1 ? '' : 's').' deleted in bulk.'
+        );
+        $pdo->commit();
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
+        $_SESSION['sql_error'] = $e->getMessage();
+        log_console('ERROR', 'SQL: ' . $e->getMessage());
+        flash('error', 'Unable to delete all evidence.');
+        if ($ru !== '') { header('Location: '.$ru); exit; }
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+
+    // Remove uploaded files and redaction masks only after the database commit succeeds.
+    $uploadsRoot = realpath(__DIR__ . '/uploads');
+    foreach ($files as $row) {
+        $rel = (string)($row['filepath'] ?? '');
+        if ($rel !== '' && $uploadsRoot) {
+            $absReal = @realpath(__DIR__ . '/' . ltrim($rel, '/'));
+            $uploadsPrefix = $uploadsRoot . DIRECTORY_SEPARATOR;
+            if ($absReal && strncmp($absReal, $uploadsPrefix, strlen($uploadsPrefix)) === 0 && is_file($absReal)) {
+                @unlink($absReal);
+            }
+        }
+        $maskFile = __DIR__ . '/uploads/masks/mask_' . (int)($row['id'] ?? 0) . '.json';
+        if ((int)($row['id'] ?? 0) > 0 && is_file($maskFile)) { @unlink($maskFile); }
+    }
+
+    if ($deletedCount > 0) {
+        flash('success', $deletedCount.' evidence item'.($deletedCount === 1 ? '' : 's').' deleted.');
+    } else {
+        flash('success', 'There was no evidence to delete.');
+    }
+    if ($ru !== '') { header('Location: '.$ru); exit; }
+    header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+}
+
 // Handle delete case (admin only)
 if (($_POST['action'] ?? '') === 'delete_case') {
     throttle();
@@ -6225,6 +6307,9 @@ document.addEventListener('DOMContentLoaded', function () {
                         <div class="card-body">
                           <div class="d-flex align-items-center justify-content-between mb-2">
                             <h2 class="h6 mb-0"><i class="bi bi-collection me-2"></i>Your Evidence</h2>
+                            <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteAllOwnerEvidenceModal">
+                              <i class="bi bi-trash3 me-1"></i>Delete All Evidence
+                            </button>
                           </div>
                           <div class="table-responsive">
                             <table class="table table-sm align-middle mb-0">
@@ -6331,6 +6416,29 @@ document.addEventListener('DOMContentLoaded', function () {
                                 <?php endforeach; ?>
                               </tbody>
                             </table>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="modal fade" id="deleteAllOwnerEvidenceModal" tabindex="-1" aria-labelledby="deleteAllOwnerEvidenceModalLabel" aria-hidden="true">
+                        <div class="modal-dialog modal-dialog-centered">
+                          <div class="modal-content">
+                            <div class="modal-header">
+                              <h2 class="modal-title fs-5" id="deleteAllOwnerEvidenceModalLabel"><i class="bi bi-exclamation-triangle text-danger me-2"></i>Delete All Evidence?</h2>
+                              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                            </div>
+                            <div class="modal-body">
+                              This will permanently delete all <?php echo count($myEvidence); ?> evidence item<?php echo count($myEvidence) === 1 ? '' : 's'; ?> you uploaded to this case, including the stored files. This cannot be undone.
+                            </div>
+                            <div class="modal-footer">
+                              <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+                              <form method="post" action="">
+                                <input type="hidden" name="action" value="delete_all_evidence">
+                                <?php csrf_field(); ?>
+                                <input type="hidden" name="case_id" value="<?php echo (int)$caseRow['id']; ?>">
+                                <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseRow['case_code']); ?>#case-view">
+                                <button type="submit" class="btn btn-danger"><i class="bi bi-trash3 me-1"></i>Delete All Evidence</button>
+                              </form>
+                            </div>
                           </div>
                         </div>
                       </div>
@@ -9705,11 +9813,15 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       }
       // Fetch evidence
       $ev = [];
+      $evTotalCount = 0;
       if ($caseId > 0) {
           try {
               $evi = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC LIMIT 100');
               $evi->execute([$caseId]);
               $ev = $evi->fetchAll();
+              $evidenceCountQuery = $pdo->prepare('SELECT COUNT(*) FROM evidence WHERE case_id = ?');
+              $evidenceCountQuery->execute([$caseId]);
+              $evTotalCount = (int)$evidenceCountQuery->fetchColumn();
           } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       }
@@ -9818,6 +9930,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             <!-- Multi-file uploader (admin panel) -->
             <input type="hidden" id="adminEvCaseId" value="<?php echo (int)$caseId; ?>">
             <input type="hidden" id="adminEvCsrf" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
+            <div class="d-flex align-items-center justify-content-between mb-3">
+              <h3 class="h6 mb-0"><i class="bi bi-collection me-2"></i>Evidence (<?php echo $evTotalCount; ?>)</h3>
+              <?php if ($evTotalCount > 0): ?>
+                <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteAllAdminEvidenceModal">
+                  <i class="bi bi-trash3 me-1"></i>Delete All Evidence
+                </button>
+              <?php endif; ?>
+            </div>
             <div class="dropzone mb-3 position-relative" id="adminEvDropzone" style="cursor:pointer;" onclick="document.getElementById('adminEvFileInput').click()">
               <i class="bi bi-cloud-upload d-block mb-1 text-primary" style="font-size:2rem;"></i>
               <p class="mb-1 fw-semibold">Drag &amp; drop files here, or click to browse</p>
@@ -9992,6 +10112,31 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         </div>
       </div>
     </div>
+      <?php if ($evTotalCount > 0): ?>
+      <div class="modal fade" id="deleteAllAdminEvidenceModal" tabindex="-1" aria-labelledby="deleteAllAdminEvidenceModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h2 class="modal-title fs-5" id="deleteAllAdminEvidenceModalLabel"><i class="bi bi-exclamation-triangle text-danger me-2"></i>Delete All Evidence?</h2>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              This will permanently delete all <?php echo $evTotalCount; ?> evidence item<?php echo $evTotalCount === 1 ? '' : 's'; ?> from this case, including uploaded files, URLs, and evidence notes. This cannot be undone.
+            </div>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
+              <form method="post" action="">
+                <input type="hidden" name="action" value="delete_all_evidence">
+                <?php csrf_field(); ?>
+                <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+                <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
+                <button type="submit" class="btn btn-danger"><i class="bi bi-trash3 me-1"></i>Delete All Evidence</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+      <?php endif; ?>
       <!-- Edit Case Modal (Admin) -->
       <div class="modal fade" id="editCaseModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-lg modal-dialog-centered">
