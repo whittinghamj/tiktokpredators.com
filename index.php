@@ -701,8 +701,13 @@ function tp_create_user_notification(PDO $pdo, int $userId, string $type, string
     $rawTags = is_array($input) ? $input : preg_split('/[,\s]+/', (string)$input);
     $allowed = tp_case_tag_options();
     $tags = [];
-    foreach (($rawTags ?: []) as $rawTag) {
-      $slug = strtolower(trim((string)$rawTag));
+    foreach (($rawTags ?: []) as $rawKey => $rawTag) {
+      // Database reads return tags as slug => label, while form submissions
+      // return a numeric list of slugs. Accept both representations.
+      $candidate = is_string($rawKey) && isset($allowed[strtolower(trim($rawKey))])
+        ? $rawKey
+        : $rawTag;
+      $slug = strtolower(trim((string)$candidate));
       if ($slug === '' || !isset($allowed[$slug]) || isset($tags[$slug])) { continue; }
       $tags[$slug] = $allowed[$slug];
     }
