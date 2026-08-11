@@ -3912,7 +3912,8 @@ if (($_POST['action'] ?? '') === 'rotate_person_photo') {
     $case_id = (is_string($caseIdRaw) || is_int($caseIdRaw)) && ctype_digit((string)$caseIdRaw) ? (int)$caseIdRaw : 0;
     $direction = tp_post_string('direction');
     $requestedRedirect = tp_post_string('redirect_url');
-    if ($case_id <= 0 || !in_array($direction, ['left', 'right'], true) || empty($_SESSION['user'])) {
+    $rotationDirections = ['left' => 270, 'half' => 180, 'right' => 90];
+    if ($case_id <= 0 || !array_key_exists($direction, $rotationDirections) || empty($_SESSION['user'])) {
         flash('error', empty($_SESSION['user']) ? 'Unauthorized.' : 'Invalid photo rotation request.');
         header('Location: ' . $fallbackRedirect); exit;
     }
@@ -3959,7 +3960,8 @@ if (($_POST['action'] ?? '') === 'rotate_person_photo') {
         'modified' => @filemtime($photoAbsolutePath) ?: 0,
     ];
 
-    $rotationDegrees = $direction === 'right' ? 90 : 270;
+    $rotationDegrees = $rotationDirections[$direction];
+    $rotationDescription = $direction === 'left' ? '90° left' : ($direction === 'right' ? '90° right' : '180°');
     $detectedMime = null;
     $rotationError = '';
     $rotatedPhoto = tp_load_evidence_display_image($photoAbsolutePath, $rotationDegrees, $detectedMime, $rotationError);
@@ -4012,18 +4014,17 @@ if (($_POST['action'] ?? '') === 'rotate_person_photo') {
         header('Location: ' . $redirectUrl); exit;
     }
     clearstatcache(true, $photoAbsolutePath);
-    $directionLabel = $direction === 'right' ? 'right' : 'left';
     $caseName = trim((string)($photoCase['case_name'] ?? ''));
     log_case_event(
         $pdo,
         $case_id,
         'person_photo_rotated',
         $caseName !== '' ? $caseName : $caseCodeForRedirect,
-        'Person photo rotated 90° ' . $directionLabel . '.',
+        'Person photo rotated ' . $rotationDescription . '.',
         null,
         null
     );
-    flash('success', 'Person photo rotated 90° ' . $directionLabel . '.');
+    flash('success', 'Person photo rotated ' . $rotationDescription . '.');
     header('Location: ' . $redirectUrl); exit;
 }
 
@@ -4697,7 +4698,8 @@ if (($_POST['action'] ?? '') === 'rotate_evidence_image') {
     $case_id = (is_string($caseIdRaw) || is_int($caseIdRaw)) && ctype_digit((string)$caseIdRaw) ? (int)$caseIdRaw : 0;
     $direction = tp_post_string('direction');
     $requestedRedirect = tp_post_string('redirect_url');
-    if ($evidence_id <= 0 || $case_id <= 0 || !in_array($direction, ['left', 'right'], true)) {
+    $rotationDirections = ['left' => 270, 'half' => 180, 'right' => 90];
+    if ($evidence_id <= 0 || $case_id <= 0 || !array_key_exists($direction, $rotationDirections)) {
         flash('error', 'Invalid image rotation request.');
         header('Location: ' . $fallbackRedirect); exit;
     }
@@ -4752,7 +4754,8 @@ if (($_POST['action'] ?? '') === 'rotate_evidence_image') {
 
     $currentRotation = (int)($evidence['rotation_degrees'] ?? 0);
     if (!in_array($currentRotation, [0, 90, 180, 270], true)) { $currentRotation = 0; }
-    $rotationDelta = ($direction === 'right') ? 90 : 270;
+    $rotationDelta = $rotationDirections[$direction];
+    $rotationDescription = $direction === 'left' ? '90° left' : ($direction === 'right' ? '90° right' : '180°');
     $candidateRotation = ($currentRotation + $rotationDelta) % 360;
     $detectedMime = null;
     $rotationError = '';
@@ -4779,19 +4782,18 @@ if (($_POST['action'] ?? '') === 'rotate_evidence_image') {
         $updateRotation = $pdo->prepare('UPDATE evidence SET rotation_degrees = ?, mime_type = ? WHERE id = ? AND case_id = ? LIMIT 1');
         $updateRotation->execute([$newRotation, $detectedMime, $evidence_id, $case_id]);
 
-        $directionLabel = $direction === 'right' ? 'right' : 'left';
         $eventTitle = trim((string)($lockedEvidence['title'] ?? ''));
         log_case_event(
             $pdo,
             $case_id,
             'evidence_rotated',
             $eventTitle !== '' ? $eventTitle : 'Evidence #' . $evidence_id,
-            'Display rotated 90° ' . $directionLabel . '. Original uploaded file retained unchanged. Current display rotation: ' . $newRotation . '° clockwise.',
+            'Display rotated ' . $rotationDescription . '. Original uploaded file retained unchanged. Current display rotation: ' . $newRotation . '° clockwise.',
             $evidence_id,
             null
         );
         $pdo->commit();
-        flash('success', 'Evidence image rotated 90° ' . $directionLabel . '.');
+        flash('success', 'Evidence image rotated ' . $rotationDescription . '.');
     } catch (Throwable $e) {
         if ($pdo->inTransaction()) { $pdo->rollBack(); }
         log_console('ERROR', 'Evidence rotation #' . $evidence_id . ': ' . $e->getMessage());
@@ -10518,18 +10520,17 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <img src="<?php echo htmlspecialchars($viewPersonPhoto); ?>" alt="Current person photo" class="rounded" style="width: 112px; height: 112px; object-fit: cover;">
               <div class="flex-grow-1">
                 <h6 class="mb-1">Person Photo Orientation</h6>
-                <p class="small text-secondary mb-2">Rotate the current uploaded photo in 90° steps.</p>
-                <form method="post" action="" class="d-flex flex-wrap gap-2">
+                <p class="small text-secondary mb-2">Rotate the current uploaded photo by 90° or 180°.</p>
+                <form method="post" action="">
                   <input type="hidden" name="action" value="rotate_person_photo">
                   <?php csrf_field(); ?>
                   <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
                   <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
-                  <button class="btn btn-sm btn-outline-light" type="submit" name="direction" value="left">
-                    <i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i> 90° Left
-                  </button>
-                  <button class="btn btn-sm btn-outline-light" type="submit" name="direction" value="right">
-                    <i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i> 90° Right
-                  </button>
+                  <div class="row g-2">
+                    <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="left"><i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i>90° Left</button></div>
+                    <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="half"><i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>180°</button></div>
+                    <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="right"><i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i>90° Right</button></div>
+                  </div>
                 </form>
               </div>
             </div>
@@ -11029,18 +11030,17 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <img src="<?php echo htmlspecialchars($adminPersonPhoto); ?>" alt="Current person photo" class="rounded" style="width: 112px; height: 112px; object-fit: cover;">
                   <div class="flex-grow-1">
                     <h6 class="mb-1">Person Photo Orientation</h6>
-                    <p class="small text-secondary mb-2">Rotate the current uploaded photo in 90° steps.</p>
-                    <form method="post" action="" class="d-flex flex-wrap gap-2">
+                    <p class="small text-secondary mb-2">Rotate the current uploaded photo by 90° or 180°.</p>
+                    <form method="post" action="">
                       <input type="hidden" name="action" value="rotate_person_photo">
                       <?php csrf_field(); ?>
                       <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
                       <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
-                      <button class="btn btn-sm btn-outline-light" type="submit" name="direction" value="left">
-                        <i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i> 90° Left
-                      </button>
-                      <button class="btn btn-sm btn-outline-light" type="submit" name="direction" value="right">
-                        <i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i> 90° Right
-                      </button>
+                      <div class="row g-2">
+                        <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="left"><i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i>90° Left</button></div>
+                        <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="half"><i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>180°</button></div>
+                        <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="right"><i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i>90° Right</button></div>
+                      </div>
                     </form>
                   </div>
                 </div>
@@ -11671,20 +11671,17 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <?php if ($tp_showEvidenceRotator): ?>
                   <div class="mt-3 pt-3 border-top d-none" id="evRotatePanel">
                     <h6 class="mb-2">Image Orientation</h6>
-                    <p class="small text-secondary mb-2">Rotate the displayed image in 90° steps. The original upload remains unchanged.</p>
+                    <p class="small text-secondary mb-2">Rotate the displayed image by 90° or 180°. The original upload remains unchanged.</p>
                     <form method="post" action="" id="evRotateForm">
                       <input type="hidden" name="action" value="rotate_evidence_image">
                       <?php csrf_field(); ?>
                       <input type="hidden" name="evidence_id" id="evRotateId">
                       <input type="hidden" name="case_id" id="evRotateCaseId">
                       <input type="hidden" name="redirect_url" value="<?php echo htmlspecialchars($tp_evidenceEditRedirect); ?>">
-                      <div class="d-grid gap-2">
-                        <button class="btn btn-outline-light" type="submit" name="direction" value="left">
-                          <i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i> 90° Left
-                        </button>
-                        <button class="btn btn-outline-light" type="submit" name="direction" value="right">
-                          <i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i> 90° Right
-                        </button>
+                      <div class="row g-2">
+                        <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="left"><i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i>90° Left</button></div>
+                        <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="half"><i class="bi bi-arrow-repeat me-1" aria-hidden="true"></i>180°</button></div>
+                        <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="right"><i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i>90° Right</button></div>
                       </div>
                     </form>
                   </div>
