@@ -941,7 +941,8 @@ function tp_person_photo_display_url(string $caseCode): string {
     $modified = @filemtime($absolute) ?: 0;
     $size = @filesize($absolute) ?: 0;
     $inode = @fileinode($absolute) ?: 0;
-    return $relative . '?v=' . rawurlencode($modified . '-' . $size . '-' . $inode);
+    $version = substr(hash('sha256', $modified . '|' . $size . '|' . $inode), 0, 16);
+    return $relative . '?v=' . $version;
 }
 
 function tp_request_scheme(): string {
