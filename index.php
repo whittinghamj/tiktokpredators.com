@@ -227,6 +227,12 @@ function tp_case_event_detail_for_viewer(string $detail): string {
   if (!can_moderate_cases() && stripos($detail, 'location:') !== false) {
     $detail = tp_mask_case_event_field_values($detail, 'location', 'tp_mask_case_location_house_number');
   }
+  if (!can_moderate_cases() && stripos($detail, 'date_of_birth:') !== false) {
+    $detail = tp_mask_case_event_field_values($detail, 'date_of_birth', static function ($value): string {
+      $value = trim((string)$value);
+      return ($value === '' || strtolower($value) === 'null') ? $value : '[redacted]';
+    });
+  }
   return $detail;
 }
 function tp_is_main_admin(): bool {
@@ -633,6 +639,38 @@ function tp_create_user_notification(PDO $pdo, int $userId, string $type, string
     return trim((string)$name);
   }
 
+  function normalize_discord_username($input): string {
+    if (is_array($input)) { return ''; }
+    $name = ltrim(trim((string)$input), '@');
+    return mb_substr(trim($name), 0, 255, 'UTF-8');
+  }
+
+  /** Accept native-input ISO or manually entered UK dates and return ISO for storage. */
+  function tp_normalize_date_of_birth($value): string {
+    if (!is_string($value)) { return ''; }
+    $value = trim($value);
+    if ($value === '') { return ''; }
+    foreach (['Y-m-d', 'd/m/Y'] as $format) {
+      $date = DateTimeImmutable::createFromFormat('!' . $format, $value);
+      $errors = DateTimeImmutable::getLastErrors();
+      if (!$date || ($errors !== false && ($errors['warning_count'] > 0 || $errors['error_count'] > 0))) { continue; }
+      if ($date->format($format) !== $value) { continue; }
+      if ($date < new DateTimeImmutable('1000-01-01') || $date > new DateTimeImmutable('today')) { continue; }
+      return $date->format('Y-m-d');
+    }
+    return '';
+  }
+
+  function tp_is_valid_date_of_birth(string $value): bool {
+    return $value !== '' && tp_normalize_date_of_birth($value) !== '';
+  }
+
+  function tp_format_date_of_birth_uk($value): string {
+    $normalized = tp_normalize_date_of_birth($value);
+    if ($normalized === '') { return ''; }
+    return DateTimeImmutable::createFromFormat('!Y-m-d', $normalized)->format('d/m/Y');
+  }
+
   function get_case_tiktok_usernames(PDO $pdo, int $caseId): string {
     if ($caseId <= 0) { return ''; }
     try {
@@ -820,12 +858,13 @@ function tp_create_user_notification(PDO $pdo, int $userId, string $type, string
     $hasSubjectIdentifier = trim((string)($case['person_name'] ?? '')) !== ''
       || $tiktokUsernames !== ''
       || trim((string)($case['snapchat_username'] ?? '')) !== ''
+      || trim((string)($case['discord_username'] ?? '')) !== ''
       || trim((string)($case['phone_number'] ?? '')) !== '';
     $validSensitivity = in_array((string)($case['sensitivity'] ?? ''), ['Standard', 'Restricted', 'Sealed'], true);
 
     $items = [
       ['key' => 'case_name', 'label' => 'Case title', 'detail' => 'Give the case a clear, recognisable title.', 'complete' => trim((string)($case['case_name'] ?? '')) !== ''],
-      ['key' => 'subject_identifier', 'label' => 'Subject identifier', 'detail' => 'Add a person name, TikTok username, Snapchat username or phone number.', 'complete' => $hasSubjectIdentifier],
+      ['key' => 'subject_identifier', 'label' => 'Subject identifier', 'detail' => 'Add a person name, TikTok username, Snapchat username, Discord username or phone number.', 'complete' => $hasSubjectIdentifier],
       ['key' => 'summary', 'label' => 'Meaningful summary', 'detail' => 'Provide at least 80 characters of factual context.', 'complete' => $summaryLength >= 80],
       ['key' => 'category', 'label' => 'Case category', 'detail' => 'Select at least one relevant case tag.', 'complete' => $tagCount > 0],
       ['key' => 'sensitivity', 'label' => 'Sensitivity classification', 'detail' => 'Choose Standard, Restricted or Sealed.', 'complete' => $validSensitivity],
@@ -892,6 +931,17 @@ function find_person_photo_url(string $caseCode): string {
         }
     }
     return '';
+}
+
+/** Person-photo URL with a file-version suffix so rotations appear immediately. */
+function tp_person_photo_display_url(string $caseCode): string {
+    $relative = find_person_photo_url($caseCode);
+    if ($relative === '') { return ''; }
+    $absolute = __DIR__ . '/' . $relative;
+    $modified = @filemtime($absolute) ?: 0;
+    $size = @filesize($absolute) ?: 0;
+    $inode = @fileinode($absolute) ?: 0;
+    return $relative . '?v=' . rawurlencode($modified . '-' . $size . '-' . $inode);
 }
 
 function tp_request_scheme(): string {
@@ -1153,6 +1203,248 @@ function tp_scanner_load_image(string $path): ?GdImage {
     return ($img instanceof GdImage) ? $img : null;
 }
 
+/** Convert a PHP ini byte value (for example, 128M) to bytes. */
+function tp_evidence_ini_bytes(string $value): int {
+    $value = strtolower(trim($value));
+    if ($value === '' || $value === '-1') { return -1; }
+    $number = (float)$value;
+    $suffix = substr($value, -1);
+    if ($suffix === 'g') { $number *= 1024; }
+    if ($suffix === 'g' || $suffix === 'm') { $number *= 1024; }
+    if (in_array($suffix, ['g', 'm', 'k'], true)) { $number *= 1024; }
+    return (int)round($number);
+}
+
+/** Read a 16-bit TIFF integer used by the JPEG EXIF orientation fallback. */
+function tp_evidence_tiff_u16(string $data, int $offset, bool $littleEndian): ?int {
+    if ($offset < 0 || $offset + 2 > strlen($data)) { return null; }
+    $a = ord($data[$offset]);
+    $b = ord($data[$offset + 1]);
+    return $littleEndian ? ($a | ($b << 8)) : (($a << 8) | $b);
+}
+
+/** Read a 32-bit TIFF integer used by the JPEG EXIF orientation fallback. */
+function tp_evidence_tiff_u32(string $data, int $offset, bool $littleEndian): ?int {
+    if ($offset < 0 || $offset + 4 > strlen($data)) { return null; }
+    $a = ord($data[$offset]);
+    $b = ord($data[$offset + 1]);
+    $c = ord($data[$offset + 2]);
+    $d = ord($data[$offset + 3]);
+    return $littleEndian
+        ? ($a + ($b * 256) + ($c * 65536) + ($d * 16777216))
+        : (($a * 16777216) + ($b * 65536) + ($c * 256) + $d);
+}
+
+/** Resolve JPEG EXIF orientation, including when the EXIF PHP extension is absent. */
+function tp_evidence_jpeg_orientation(string $path, array $imageMetadata): int {
+    if (function_exists('exif_read_data')) {
+        $exif = @exif_read_data($path, 'IFD0', true, false);
+        $orientation = (int)($exif['IFD0']['Orientation'] ?? $exif['Orientation'] ?? 0);
+        if ($orientation >= 1 && $orientation <= 8) { return $orientation; }
+    }
+
+    $app1 = $imageMetadata['APP1'] ?? '';
+    if (!is_string($app1) || substr($app1, 0, 6) !== "Exif\0\0") { return 1; }
+    $tiff = substr($app1, 6);
+    $byteOrder = substr($tiff, 0, 2);
+    if ($byteOrder !== 'II' && $byteOrder !== 'MM') { return 1; }
+    $littleEndian = ($byteOrder === 'II');
+    if (tp_evidence_tiff_u16($tiff, 2, $littleEndian) !== 42) { return 1; }
+    $ifdOffset = tp_evidence_tiff_u32($tiff, 4, $littleEndian);
+    if ($ifdOffset === null) { return 1; }
+    $entryCount = tp_evidence_tiff_u16($tiff, $ifdOffset, $littleEndian);
+    if ($entryCount === null || $entryCount > 256) { return 1; }
+    for ($i = 0; $i < $entryCount; $i++) {
+        $entryOffset = $ifdOffset + 2 + ($i * 12);
+        $tag = tp_evidence_tiff_u16($tiff, $entryOffset, $littleEndian);
+        if ($tag !== 0x0112) { continue; }
+        $type = tp_evidence_tiff_u16($tiff, $entryOffset + 2, $littleEndian);
+        $count = tp_evidence_tiff_u32($tiff, $entryOffset + 4, $littleEndian);
+        if ($type !== 3 || $count === null || $count < 1) { return 1; }
+        $orientation = tp_evidence_tiff_u16($tiff, $entryOffset + 8, $littleEndian);
+        return ($orientation !== null && $orientation >= 1 && $orientation <= 8) ? $orientation : 1;
+    }
+    return 1;
+}
+
+/** Detect animated PNG/WebP files, which GD would otherwise flatten to one frame. */
+function tp_evidence_image_is_animated(string $data, string $mime): bool {
+    $length = strlen($data);
+    if ($mime === 'image/png' && substr($data, 0, 8) === "\x89PNG\r\n\x1a\n") {
+        for ($offset = 8; $offset + 12 <= $length;) {
+            $unpacked = unpack('Nlength', substr($data, $offset, 4));
+            $chunkLength = (int)($unpacked['length'] ?? 0);
+            if ($chunkLength < 0 || $offset + 12 + $chunkLength > $length) { break; }
+            if (substr($data, $offset + 4, 4) === 'acTL') { return true; }
+            $offset += 12 + $chunkLength;
+        }
+    }
+    if ($mime === 'image/webp' && substr($data, 0, 4) === 'RIFF' && substr($data, 8, 4) === 'WEBP') {
+        for ($offset = 12; $offset + 8 <= $length;) {
+            $chunkType = substr($data, $offset, 4);
+            $unpacked = unpack('Vlength', substr($data, $offset + 4, 4));
+            $chunkLength = (int)($unpacked['length'] ?? 0);
+            if ($chunkLength < 0 || $offset + 8 + $chunkLength > $length) { break; }
+            if ($chunkType === 'ANIM' || $chunkType === 'ANMF') { return true; }
+            $offset += 8 + $chunkLength + ($chunkLength % 2);
+        }
+    }
+    return false;
+}
+
+/** Rotate a GD image clockwise in a way that retains PNG/WebP transparency. */
+function tp_evidence_rotate_gd(GdImage $image, int $clockwiseDegrees, string &$error): ?GdImage {
+    $clockwiseDegrees = (($clockwiseDegrees % 360) + 360) % 360;
+    if ($clockwiseDegrees === 0) { return $image; }
+    if (!in_array($clockwiseDegrees, [90, 180, 270], true) || !function_exists('imagerotate')) {
+        $error = 'Image rotation is not available on this server.';
+        return null;
+    }
+    $transparent = imagecolorallocatealpha($image, 0, 0, 0, 127);
+    $rotated = @imagerotate($image, -$clockwiseDegrees, $transparent === false ? 0 : $transparent);
+    if (!($rotated instanceof GdImage)) {
+        $error = 'The image could not be rotated.';
+        return null;
+    }
+    imagealphablending($rotated, false);
+    imagesavealpha($rotated, true);
+    $image = null;
+    return $rotated;
+}
+
+/**
+ * Decode a safe static raster, normalize its EXIF orientation, then apply the
+ * stored clockwise display rotation. The original uploaded bytes are untouched.
+ */
+function tp_load_evidence_display_image(string $path, int $clockwiseDegrees, ?string &$detectedMime, string &$error): ?GdImage {
+    $detectedMime = null;
+    $error = '';
+    if (!function_exists('getimagesize') || !function_exists('imagecreatefromstring') || !function_exists('imagerotate')) {
+        $error = 'Image rotation is not available on this server.';
+        return null;
+    }
+    if (!is_file($path) || !is_readable($path)) {
+        $error = 'The uploaded image could not be found.';
+        return null;
+    }
+    $fileSize = @filesize($path);
+    if ($fileSize === false || $fileSize <= 0 || $fileSize > 25 * 1024 * 1024) {
+        $error = 'The image is empty or too large to rotate safely.';
+        return null;
+    }
+
+    $imageMetadata = [];
+    $info = @getimagesize($path, $imageMetadata);
+    $mime = strtolower((string)($info['mime'] ?? ''));
+    $width = (int)($info[0] ?? 0);
+    $height = (int)($info[1] ?? 0);
+    $encoders = [
+        'image/jpeg' => 'imagejpeg',
+        'image/png' => 'imagepng',
+        'image/webp' => 'imagewebp',
+    ];
+    if ($width <= 0 || $height <= 0 || !isset($encoders[$mime]) || !function_exists($encoders[$mime])) {
+        $error = 'Only static JPEG, PNG, and WebP images can be rotated.';
+        return null;
+    }
+    $maxPixels = 20000000;
+    if ($width > 20000 || $height > 20000 || $width > intdiv($maxPixels, $height)) {
+        $error = 'The image dimensions are too large to rotate safely.';
+        return null;
+    }
+
+    $data = @file_get_contents($path);
+    if ($data === false || $data === '') {
+        $error = 'The uploaded image could not be read.';
+        return null;
+    }
+    if (tp_evidence_image_is_animated($data, $mime)) {
+        $error = 'Animated images cannot be rotated without losing frames.';
+        return null;
+    }
+
+    $pixels = $width * $height;
+    $memoryLimit = tp_evidence_ini_bytes((string)ini_get('memory_limit'));
+    if ($memoryLimit > 0) {
+        $available = max(0, $memoryLimit - memory_get_usage(true));
+        $estimatedPeak = max(($pixels * 8) + (8 * 1024 * 1024), ($pixels * 4) + (strlen($data) * 2) + (8 * 1024 * 1024));
+        if ($estimatedPeak > $available) {
+            $error = 'The image dimensions are too large to rotate with the server memory available.';
+            return null;
+        }
+    }
+
+    $image = @imagecreatefromstring($data);
+    unset($data);
+    if (!($image instanceof GdImage)) {
+        $error = 'The uploaded file is not a readable image.';
+        return null;
+    }
+    imagealphablending($image, false);
+    imagesavealpha($image, true);
+
+    if ($mime === 'image/jpeg') {
+        $orientation = tp_evidence_jpeg_orientation($path, $imageMetadata);
+        if (in_array($orientation, [2, 4, 5, 7], true) && !function_exists('imageflip')) {
+            $image = null;
+            $error = 'This photo needs EXIF support that is unavailable on the server.';
+            return null;
+        }
+        if ($orientation === 2 || $orientation === 5 || $orientation === 7) {
+            if (!@imageflip($image, IMG_FLIP_HORIZONTAL)) {
+                $image = null;
+                $error = 'The photo orientation could not be normalized.';
+                return null;
+            }
+        } elseif ($orientation === 4) {
+            if (!@imageflip($image, IMG_FLIP_VERTICAL)) {
+                $image = null;
+                $error = 'The photo orientation could not be normalized.';
+                return null;
+            }
+        }
+        $orientationRotation = [3 => 180, 5 => 270, 6 => 90, 7 => 90, 8 => 270][$orientation] ?? 0;
+        if ($orientationRotation !== 0) {
+            $oriented = tp_evidence_rotate_gd($image, $orientationRotation, $error);
+            if (!($oriented instanceof GdImage)) {
+                $image = null;
+                return null;
+            }
+            $image = $oriented;
+        }
+    }
+
+    $rotated = tp_evidence_rotate_gd($image, $clockwiseDegrees, $error);
+    if (!($rotated instanceof GdImage)) {
+        $image = null;
+        return null;
+    }
+    $detectedMime = $mime;
+    return $rotated;
+}
+
+/** Encode a dynamically oriented image back to its safe source format. */
+function tp_output_evidence_display_image(GdImage $image, string $mime): bool {
+    if ($mime === 'image/jpeg') {
+        @imageinterlace($image, true);
+        return @imagejpeg($image, null, 92);
+    }
+    if ($mime === 'image/png') { return @imagepng($image, null, 6); }
+    if ($mime === 'image/webp') { return @imagewebp($image, null, 90); }
+    return false;
+}
+
+/** Save a normalized/rotated image atomically prepared by the caller. */
+function tp_save_rotated_display_image(GdImage $image, string $mime, string $destination): bool {
+    if ($mime === 'image/jpeg') {
+        @imageinterlace($image, true);
+        return @imagejpeg($image, $destination, 92);
+    }
+    if ($mime === 'image/png') { return @imagepng($image, $destination, 6); }
+    if ($mime === 'image/webp') { return @imagewebp($image, $destination, 90); }
+    return false;
+}
+
 // Generate a unique case code like CASE-2025-AB12CD34 (random, collision-checked)
 function generate_case_code(PDO $pdo): string {
     $year = date('Y');
@@ -1276,8 +1568,12 @@ SQL
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
-  // --- Cases schema safety: ensure location column exists and username field can hold multiple values ---
+  // --- Cases schema safety: ensure profile fields exist and username fields have suitable storage ---
   try {
+    $dateOfBirthCol = $pdo->query("SHOW COLUMNS FROM cases LIKE 'date_of_birth'");
+    if (!$dateOfBirthCol || !$dateOfBirthCol->fetch()) {
+      $pdo->exec("ALTER TABLE cases ADD COLUMN date_of_birth DATE NULL AFTER person_name");
+    }
     $col = $pdo->query("SHOW COLUMNS FROM cases LIKE 'location'");
     if (!$col || !$col->fetch()) {
       $pdo->exec("ALTER TABLE cases ADD COLUMN location VARCHAR(255) NULL AFTER person_name");
@@ -1289,6 +1585,10 @@ SQL
     $snapCol = $pdo->query("SHOW COLUMNS FROM cases LIKE 'snapchat_username'");
     if (!$snapCol || !$snapCol->fetch()) {
       $pdo->exec("ALTER TABLE cases ADD COLUMN snapchat_username VARCHAR(255) NULL AFTER phone_number");
+    }
+    $discordCol = $pdo->query("SHOW COLUMNS FROM cases LIKE 'discord_username'");
+    if (!$discordCol || !$discordCol->fetch()) {
+      $pdo->exec("ALTER TABLE cases ADD COLUMN discord_username VARCHAR(255) NULL AFTER snapchat_username");
     }
     $userCol = $pdo->query("SHOW COLUMNS FROM cases LIKE 'tiktok_username'");
     $userInfo = $userCol ? $userCol->fetch() : null;
@@ -1317,6 +1617,17 @@ SQL
   } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
   }
+// --- Evidence image display orientation (keeps the original upload immutable) ---
+$tp_evidence_rotation_ready = false;
+try {
+  $evidenceRotationCol = $pdo->query("SHOW COLUMNS FROM evidence LIKE 'rotation_degrees'");
+  if (!$evidenceRotationCol || !$evidenceRotationCol->fetch()) {
+    $pdo->exec("ALTER TABLE evidence ADD COLUMN rotation_degrees SMALLINT UNSIGNED NOT NULL DEFAULT 0 AFTER size_bytes");
+  }
+  $tp_evidence_rotation_ready = true;
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
 // --- Case TikTok usernames relationship setup and legacy backfill ---
 try {
     $pdo->exec("\n        CREATE TABLE IF NOT EXISTS case_tiktok_usernames (\n            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,\n            case_id BIGINT UNSIGNED NOT NULL,\n            username VARCHAR(255) NOT NULL,\n            username_key VARCHAR(255) NOT NULL,\n            sort_order INT UNSIGNED NOT NULL DEFAULT 0,\n            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,\n            UNIQUE KEY uq_case_username (case_id, username_key),\n            INDEX idx_case_sort (case_id, sort_order, id),\n            INDEX idx_username_key (username_key)\n        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n    ");
@@ -2254,7 +2565,8 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     $eid = (int)($_GET['id'] ?? 0);
     if ($eid <= 0) { http_response_code(400); exit('Bad request'); }
     try {
-        $q = $pdo->prepare('SELECT e.id, e.filepath, e.mime_type, e.type, e.case_id, c.sensitivity, c.status AS case_status, c.created_by AS case_created_by FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? LIMIT 1');
+        $rotationSelect = !empty($tp_evidence_rotation_ready) ? 'e.rotation_degrees' : '0 AS rotation_degrees';
+        $q = $pdo->prepare('SELECT e.id, e.filepath, e.mime_type, e.type, e.case_id, ' . $rotationSelect . ', c.sensitivity, c.status AS case_status, c.created_by AS case_created_by FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? LIMIT 1');
         $q->execute([$eid]);
         $row = $q->fetch();
     } catch (Throwable $e) {
@@ -2272,39 +2584,55 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     $abs  = __DIR__ . '/' . ltrim($rel, '/');
     $uploadsRoot = realpath(__DIR__ . '/uploads');
     $absReal = @realpath($abs);
-    // Basic path safety
-    if (!$absReal || !$uploadsRoot || strncmp($absReal, $uploadsRoot, strlen($uploadsRoot)) !== 0) {
+    $uploadsPrefix = $uploadsRoot ? rtrim($uploadsRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : '';
+    // Require a real file within uploads; a similarly prefixed sibling directory is not enough.
+    if (!$absReal || $uploadsPrefix === '' || strncmp($absReal, $uploadsPrefix, strlen($uploadsPrefix)) !== 0) {
         http_response_code(403); exit('Forbidden');
     }
     if (!is_file($absReal)) { http_response_code(404); exit('Not found'); }
 
     // Send restrictive headers
     header('X-Content-Type-Options: nosniff');
-    header('Cache-Control: private, no-transform');
+    header('Cache-Control: private, no-store, no-cache, must-revalidate, no-transform');
+    header('Pragma: no-cache');
+    header('Expires: 0');
 
-    $isImage = (strpos($mime, 'image/') === 0);
+    $isImage = ($type === 'image') || (strpos($mime, 'image/') === 0);
     $isAdmin = is_admin();
     $canReviewRawEvidence = $isAdmin || $isCaseReviewer;
     $isRestricted = ($sens === 'Restricted');
+    $rotationDegrees = (int)($row['rotation_degrees'] ?? 0);
+    if (!in_array($rotationDegrees, [0, 90, 180, 270], true)) { $rotationDegrees = 0; }
 
     // For restricted cases: non-admins must not get raw images.
-    if ($isRestricted && !$canReviewRawEvidence) {
-        if ($isImage) {
-            // Render a blurred, reduced version server-side using GD
-            $data = @file_get_contents($absReal);
-            if ($data === false) { http_response_code(404); exit('Not found'); }
-            $img = @imagecreatefromstring($data);
-            if (!$img) { http_response_code(415); exit('Unsupported media'); }
+    if ($isRestricted && !$canReviewRawEvidence && !$isImage) {
+        http_response_code(403); exit('Restricted');
+    }
 
+    // Rotated images and restricted previews are rendered from the immutable original.
+    if ($isImage && ($rotationDegrees !== 0 || ($isRestricted && !$canReviewRawEvidence))) {
+        $renderMime = null;
+        $renderError = '';
+        $img = tp_load_evidence_display_image($absReal, $rotationDegrees, $renderMime, $renderError);
+        if (!($img instanceof GdImage) || $renderMime === null) {
+            http_response_code(415); exit('Unsupported media');
+        }
+
+        if ($isRestricted && !$canReviewRawEvidence) {
             // Downscale to max width 640 (keeping aspect)
             $w = imagesx($img); $h = imagesy($img);
             $maxW = 640;
             if ($w > $maxW) {
                 $nw = $maxW; $nh = (int)round($h * ($maxW / $w));
                 $small = imagecreatetruecolor($nw, $nh);
-                imagecopyresampled($small, $img, 0, 0, 0, 0, $nw, $nh, $w, $h);
-                imagedestroy($img);
+                if (!($small instanceof GdImage) || !imagecopyresampled($small, $img, 0, 0, 0, 0, $nw, $nh, $w, $h)) {
+                    $small = null;
+                    $img = null;
+                    http_response_code(500); exit('Unable to render image');
+                }
+                $img = null;
                 $img = $small;
+                $small = null;
             }
             // Apply heavy gaussian blur
             for ($i = 0; $i < 8; $i++) { @imagefilter($img, IMG_FILTER_GAUSSIAN_BLUR); }
@@ -2313,15 +2641,20 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
             // Prevent download as "real" with generic filename
             header('Content-Disposition: inline; filename="restricted.jpg"');
             imagejpeg($img, null, 60);
-            imagedestroy($img);
+            $img = null;
             exit;
-        } else {
-            // For non-images in restricted cases, block direct access
-            http_response_code(403); exit('Restricted');
         }
+
+        $extension = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'][$renderMime] ?? 'img';
+        header('Content-Type: ' . $renderMime);
+        header('Content-Disposition: inline; filename="evidence-' . $eid . '.' . $extension . '"');
+        $outputOk = tp_output_evidence_display_image($img, $renderMime);
+        $img = null;
+        if (!$outputOk) { log_console('ERROR', 'Unable to encode rotated evidence #' . $eid); }
+        exit;
     }
 
-    // Non-restricted OR admin: stream raw file
+    // Unrotated, unrestricted evidence is streamed byte-for-byte as uploaded.
     $size = @filesize($absReal);
     header('Content-Type: ' . $mime);
     if ($size) { header('Content-Length: ' . $size); }
@@ -3087,9 +3420,13 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
     // Collect & validate basic inputs
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
+    $dateOfBirthMalformed = array_key_exists('date_of_birth', $_POST) && !is_string($_POST['date_of_birth']);
+    $date_of_birth = tp_post_string('date_of_birth');
     $location = trim($_POST['location'] ?? '');
     $phone_number = trim($_POST['phone_number'] ?? '');
     $snapchat_username = normalize_social_username($_POST['snapchat_username'] ?? '');
+    $discordUsernameMalformed = array_key_exists('discord_username', $_POST) && !is_string($_POST['discord_username']);
+    $discord_username = normalize_discord_username($_POST['discord_username'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $case_tags = tp_normalize_case_tags($_POST['case_tags'] ?? []);
     $initial_summary = trim($_POST['initial_summary'] ?? '');
@@ -3100,17 +3437,30 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
         $_SESSION['form_error'] = 'Case name and summary are required.';
         header('Location: ?view=submit_case#submit-case'); exit;
     }
+    if ($dateOfBirthMalformed || ($date_of_birth !== '' && !tp_is_valid_date_of_birth($date_of_birth))) {
+        flash('error', 'Enter a valid date of birth in DD/MM/YYYY format. Future dates are not allowed.');
+        $_SESSION['form_error'] = 'Enter a valid date of birth in DD/MM/YYYY format. Future dates are not allowed.';
+        header('Location: ?view=submit_case#submit-case'); exit;
+    }
+    if ($discordUsernameMalformed) {
+        flash('error', 'Enter a valid Discord username.');
+        $_SESSION['form_error'] = 'Enter a valid Discord username.';
+        header('Location: ?view=submit_case#submit-case'); exit;
+    }
+    if ($date_of_birth !== '') { $date_of_birth = tp_normalize_date_of_birth($date_of_birth); }
 
     try {
         $case_code = generate_case_code($pdo);
-        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, date_of_birth, location, phone_number, snapchat_username, discord_username, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
         $stmt->execute([
             $case_code,
             $case_name,
             ($person_name !== '' ? $person_name : null),
-          ($location !== '' ? $location : null),
+            ($date_of_birth !== '' ? $date_of_birth : null),
+            ($location !== '' ? $location : null),
             ($phone_number !== '' ? $phone_number : null),
             ($snapchat_username !== '' ? $snapchat_username : null),
+            ($discord_username !== '' ? $discord_username : null),
             ($tiktok_username !== '' ? $tiktok_username : null),
             $initial_summary,
             'Standard',
@@ -3164,9 +3514,13 @@ if (($_POST['action'] ?? '') === 'create_case') {
     // Collect & validate inputs
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
+    $dateOfBirthMalformed = array_key_exists('date_of_birth', $_POST) && !is_string($_POST['date_of_birth']);
+    $date_of_birth = tp_post_string('date_of_birth');
     $location = trim($_POST['location'] ?? '');
     $phone_number = trim($_POST['phone_number'] ?? '');
     $snapchat_username = normalize_social_username($_POST['snapchat_username'] ?? '');
+    $discordUsernameMalformed = array_key_exists('discord_username', $_POST) && !is_string($_POST['discord_username']);
+    $discord_username = normalize_discord_username($_POST['discord_username'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $case_tags = tp_normalize_case_tags($_POST['case_tags'] ?? []);
     $initial_summary = trim($_POST['initial_summary'] ?? '');
@@ -3181,6 +3535,19 @@ if (($_POST['action'] ?? '') === 'create_case') {
         $_SESSION['form_error'] = 'Case name and initial summary are required.';
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
+    if ($dateOfBirthMalformed || ($date_of_birth !== '' && !tp_is_valid_date_of_birth($date_of_birth))) {
+        flash('error', 'Enter a valid date of birth in DD/MM/YYYY format. Future dates are not allowed.');
+        $_SESSION['open_modal'] = 'createCase';
+        $_SESSION['form_error'] = 'Enter a valid date of birth in DD/MM/YYYY format. Future dates are not allowed.';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
+    if ($date_of_birth !== '') { $date_of_birth = tp_normalize_date_of_birth($date_of_birth); }
+    if ($discordUsernameMalformed) {
+        flash('error', 'Enter a valid Discord username.');
+        $_SESSION['open_modal'] = 'createCase';
+        $_SESSION['form_error'] = 'Enter a valid Discord username.';
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
     if (!in_array($sensitivity, $allowed_sensitivity, true)) {
         flash('error', 'Invalid sensitivity.');
         $_SESSION['open_modal'] = 'createCase';
@@ -3190,14 +3557,16 @@ if (($_POST['action'] ?? '') === 'create_case') {
 
     try {
         $case_code = generate_case_code($pdo);
-        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+        $stmt = $pdo->prepare('INSERT INTO cases (case_code, case_name, person_name, date_of_birth, location, phone_number, snapchat_username, discord_username, tiktok_username, initial_summary, sensitivity, status, created_by, opened_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
         $stmt->execute([
             $case_code,
             $case_name,
             ($person_name !== '' ? $person_name : null),
-          ($location !== '' ? $location : null),
+            ($date_of_birth !== '' ? $date_of_birth : null),
+            ($location !== '' ? $location : null),
             ($phone_number !== '' ? $phone_number : null),
             ($snapchat_username !== '' ? $snapchat_username : null),
+            ($discord_username !== '' ? $discord_username : null),
             ($tiktok_username !== '' ? $tiktok_username : null),
             $initial_summary,
             $sensitivity,
@@ -3268,7 +3637,7 @@ if (($_POST['action'] ?? '') === 'approve_case') {
     $approvedCase = [];
     try {
         $pdo->beginTransaction();
-        $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
+        $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, discord_username, tiktok_username, initial_summary, sensitivity, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
         $caseStmt->execute([$caseId, $caseCode]);
         $approvedCase = $caseStmt->fetch() ?: [];
         if (!$approvedCase) {
@@ -3307,7 +3676,7 @@ if (($_POST['action'] ?? '') === 'approve_case') {
                     trim((string)($approvedCase['person_name'] ?? '')),
                     trim((string)($approvedCase['location'] ?? '')),
                     trim((string)($approvedCase['initial_summary'] ?? '')),
-                    find_person_photo_url($caseCode)
+                    tp_person_photo_display_url($caseCode)
                 );
                 flash('success', 'Case approved and published.');
                 log_console('SUCCESS', 'Case approved: ' . $caseCode . ' by user_id ' . (int)($_SESSION['user']['id'] ?? 0));
@@ -3406,7 +3775,7 @@ if (in_array(($_POST['action'] ?? ''), ['submit_case_for_review', 'resubmit_case
     $submissionRedirect = '?view=pending#pending-review';
     try {
         $pdo->beginTransaction();
-        $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
+        $caseStmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, phone_number, snapchat_username, discord_username, tiktok_username, initial_summary, sensitivity, status, created_by FROM cases WHERE id = ? AND case_code = ? LIMIT 1 FOR UPDATE');
         $caseStmt->execute([$case_id, $case_code]);
         $caseToResubmit = $caseStmt->fetch();
         $isOriginalSubmitter = $caseToResubmit && (int)($caseToResubmit['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
@@ -3530,6 +3899,133 @@ if (($_POST['action'] ?? '') === 'mark_notifications_read') {
     header('Location: ?view=pending#pending'); exit;
 }
 
+// Rotate the case's primary person photo. Unlike evidence, this is a display asset.
+if (($_POST['action'] ?? '') === 'rotate_person_photo') {
+    throttle();
+    $fallbackRedirect = strtok((string)($_SERVER['REQUEST_URI'] ?? '/'), '?') ?: '/';
+    if (!check_csrf()) {
+        flash('error', 'Security check failed.');
+        header('Location: ' . $fallbackRedirect); exit;
+    }
+    $caseIdRaw = $_POST['case_id'] ?? '';
+    $case_id = (is_string($caseIdRaw) || is_int($caseIdRaw)) && ctype_digit((string)$caseIdRaw) ? (int)$caseIdRaw : 0;
+    $direction = tp_post_string('direction');
+    $requestedRedirect = tp_post_string('redirect_url');
+    if ($case_id <= 0 || !in_array($direction, ['left', 'right'], true) || empty($_SESSION['user'])) {
+        flash('error', empty($_SESSION['user']) ? 'Unauthorized.' : 'Invalid photo rotation request.');
+        header('Location: ' . $fallbackRedirect); exit;
+    }
+
+    try {
+        $casePhotoQuery = $pdo->prepare('SELECT id, case_code, case_name, status FROM cases WHERE id = ? LIMIT 1');
+        $casePhotoQuery->execute([$case_id]);
+        $photoCase = $casePhotoQuery->fetch();
+    } catch (Throwable $e) {
+        $photoCase = false;
+    }
+    if (!$photoCase) {
+        flash('error', 'Case not found.');
+        header('Location: ' . $fallbackRedirect); exit;
+    }
+
+    $caseCodeForRedirect = trim((string)($photoCase['case_code'] ?? ''));
+    $redirectUrl = '?view=case&code=' . rawurlencode($caseCodeForRedirect) . '#case-view';
+    if (is_admin() && $requestedRedirect !== '') {
+        $requestedQuery = parse_url($requestedRedirect, PHP_URL_QUERY);
+        $requestedParams = [];
+        if (is_string($requestedQuery)) { parse_str($requestedQuery, $requestedParams); }
+        if (isset($requestedParams['admin_case']) && is_string($requestedParams['admin_case'])) {
+            $redirectUrl = '?admin_case=' . rawurlencode($caseCodeForRedirect) . '#admin-case';
+        }
+    }
+    $canRotatePhoto = is_admin() || (is_moderator() && ($photoCase['status'] ?? '') === 'Pending');
+    if (!$canRotatePhoto) {
+        flash('error', 'Unauthorized. Moderators may rotate photos only while reviewing a Pending case.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+
+    $photoRelativePath = find_person_photo_url($caseCodeForRedirect);
+    $peopleRoot = realpath(__DIR__ . '/uploads/people');
+    $peoplePrefix = $peopleRoot ? rtrim($peopleRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : '';
+    $photoAbsolutePath = $photoRelativePath !== '' ? @realpath(__DIR__ . '/' . $photoRelativePath) : false;
+    if (!$photoAbsolutePath || $peoplePrefix === '' || strncmp($photoAbsolutePath, $peoplePrefix, strlen($peoplePrefix)) !== 0 || !is_file($photoAbsolutePath)) {
+        flash('error', 'This case does not have a person photo to rotate.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+    $photoIdentity = [
+        'inode' => @fileinode($photoAbsolutePath) ?: 0,
+        'size' => @filesize($photoAbsolutePath) ?: 0,
+        'modified' => @filemtime($photoAbsolutePath) ?: 0,
+    ];
+
+    $rotationDegrees = $direction === 'right' ? 90 : 270;
+    $detectedMime = null;
+    $rotationError = '';
+    $rotatedPhoto = tp_load_evidence_display_image($photoAbsolutePath, $rotationDegrees, $detectedMime, $rotationError);
+    if (!($rotatedPhoto instanceof GdImage) || $detectedMime === null) {
+        $rotatedPhoto = null;
+        flash('error', $rotationError !== '' ? $rotationError : 'This photo cannot be rotated.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+
+    $temporaryPhoto = @tempnam($peopleRoot, '.rotate-');
+    $saved = is_string($temporaryPhoto) && $temporaryPhoto !== ''
+        && tp_save_rotated_display_image($rotatedPhoto, $detectedMime, $temporaryPhoto);
+    $rotatedPhoto = null;
+    $savedInfo = $saved ? @getimagesize($temporaryPhoto) : false;
+    $savedMime = strtolower((string)($savedInfo['mime'] ?? ''));
+    if (!$saved || $savedMime !== $detectedMime || @filesize($temporaryPhoto) <= 0) {
+        if (is_string($temporaryPhoto) && is_file($temporaryPhoto)) { @unlink($temporaryPhoto); }
+        flash('error', 'The rotated photo could not be saved. The original was not changed.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+
+    if (is_moderator()) {
+        try {
+            $statusCheck = $pdo->prepare('SELECT status FROM cases WHERE id = ? LIMIT 1');
+            $statusCheck->execute([$case_id]);
+            $currentCaseStatus = (string)($statusCheck->fetchColumn() ?: '');
+        } catch (Throwable $e) {
+            $currentCaseStatus = '';
+        }
+        if ($currentCaseStatus !== 'Pending') {
+            @unlink($temporaryPhoto);
+            flash('error', 'The case is no longer Pending, so its photo was not rotated.');
+            header('Location: ' . $redirectUrl); exit;
+        }
+    }
+    clearstatcache(true, $photoAbsolutePath);
+    $photoChanged = (@fileinode($photoAbsolutePath) ?: 0) !== $photoIdentity['inode']
+        || (@filesize($photoAbsolutePath) ?: 0) !== $photoIdentity['size']
+        || (@filemtime($photoAbsolutePath) ?: 0) !== $photoIdentity['modified'];
+    if ($photoChanged) {
+        @unlink($temporaryPhoto);
+        flash('error', 'The person photo changed while it was being rotated. Please try again.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+
+    @chmod($temporaryPhoto, 0644);
+    if (!@rename($temporaryPhoto, $photoAbsolutePath)) {
+        if (is_file($temporaryPhoto)) { @unlink($temporaryPhoto); }
+        flash('error', 'The rotated photo could not replace the current photo. The original was not changed.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+    clearstatcache(true, $photoAbsolutePath);
+    $directionLabel = $direction === 'right' ? 'right' : 'left';
+    $caseName = trim((string)($photoCase['case_name'] ?? ''));
+    log_case_event(
+        $pdo,
+        $case_id,
+        'person_photo_rotated',
+        $caseName !== '' ? $caseName : $caseCodeForRedirect,
+        'Person photo rotated 90° ' . $directionLabel . '.',
+        null,
+        null
+    );
+    flash('success', 'Person photo rotated 90° ' . $directionLabel . '.');
+    header('Location: ' . $redirectUrl); exit;
+}
+
 // Handle case updates from admins, pending-case moderators, or the case owner.
 if (($_POST['action'] ?? '') === 'update_case') {
     throttle();
@@ -3545,9 +4041,15 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $case_code = trim($_POST['case_code'] ?? '');
     $case_name = trim($_POST['case_name'] ?? '');
     $person_name = trim($_POST['person_name'] ?? '');
+    $dateOfBirthWasSubmitted = array_key_exists('date_of_birth', $_POST);
+    $dateOfBirthMalformed = $dateOfBirthWasSubmitted && !is_string($_POST['date_of_birth']);
+    $date_of_birth = tp_post_string('date_of_birth');
     $location = trim($_POST['location'] ?? '');
     $phone_number = trim($_POST['phone_number'] ?? '');
     $snapchat_username = normalize_social_username($_POST['snapchat_username'] ?? '');
+    $discordUsernameWasSubmitted = array_key_exists('discord_username', $_POST);
+    $discordUsernameMalformed = $discordUsernameWasSubmitted && !is_string($_POST['discord_username']);
+    $discord_username = normalize_discord_username($_POST['discord_username'] ?? '');
     $tiktok_username = normalize_tiktok_usernames($_POST['tiktok_username'] ?? '');
     $case_tags = tp_normalize_case_tags($_POST['case_tags'] ?? []);
     $initial_summary = trim($_POST['initial_summary'] ?? '');
@@ -3575,10 +4077,21 @@ if (($_POST['action'] ?? '') === 'update_case') {
 
     // Fetch current values to compute diffs
     $prev = [];
-    try { $ps = $pdo->prepare('SELECT case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); $prev['case_tags'] = implode(', ', get_case_tags($pdo, $case_id)); } catch (Throwable $e) {}
+    try { $ps = $pdo->prepare('SELECT case_code, case_name, person_name, date_of_birth, location, phone_number, snapchat_username, discord_username, tiktok_username, initial_summary, sensitivity, status FROM cases WHERE id = ? LIMIT 1'); $ps->execute([$case_id]); $prev = $ps->fetch() ?: []; $prev['tiktok_username'] = get_case_tiktok_usernames($pdo, $case_id) ?: ($prev['tiktok_username'] ?? ''); $prev['case_tags'] = implode(', ', get_case_tags($pdo, $case_id)); } catch (Throwable $e) {}
     if (!$prev || !hash_equals((string)($prev['case_code'] ?? ''), $case_code)) {
         flash('error', 'Case not found or the case reference did not match.');
         header('Location: ?view=pending#pending-review'); exit;
+    }
+    if (!$dateOfBirthWasSubmitted) { $date_of_birth = trim((string)($prev['date_of_birth'] ?? '')); }
+    if (!$discordUsernameWasSubmitted) { $discord_username = trim((string)($prev['discord_username'] ?? '')); }
+    if ($dateOfBirthMalformed || ($date_of_birth !== '' && !tp_is_valid_date_of_birth($date_of_birth))) {
+        flash('error', 'Enter a valid date of birth in DD/MM/YYYY format. Future dates are not allowed.');
+        header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
+    }
+    if ($date_of_birth !== '') { $date_of_birth = tp_normalize_date_of_birth($date_of_birth); }
+    if ($discordUsernameMalformed) {
+        flash('error', 'Enter a valid Discord username.');
+        header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
     }
 
     if (is_admin() && in_array(($prev['status'] ?? ''), ['Being Built', 'Rejected'], true) && $status !== ($prev['status'] ?? '')) {
@@ -3638,13 +4151,15 @@ if (($_POST['action'] ?? '') === 'update_case') {
     }
 
     try {
-        $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, location = ?, phone_number = ?, snapchat_username = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
+        $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, date_of_birth = ?, location = ?, phone_number = ?, snapchat_username = ?, discord_username = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
         $u->execute([
             $case_name,
             ($person_name !== '' ? $person_name : null),
-          ($location !== '' ? $location : null),
+            ($date_of_birth !== '' ? $date_of_birth : null),
+            ($location !== '' ? $location : null),
             ($phone_number !== '' ? $phone_number : null),
             ($snapchat_username !== '' ? $snapchat_username : null),
+            ($discord_username !== '' ? $discord_username : null),
             ($tiktok_username !== '' ? $tiktok_username : null),
             $initial_summary,
             $sensitivity,
@@ -3655,13 +4170,15 @@ if (($_POST['action'] ?? '') === 'update_case') {
         $savedCaseTags = save_case_tags($pdo, $case_id, array_keys($case_tags));
         // Build diff summary
         $changes = [];
-        $fields = ['case_name','person_name','location','phone_number','snapchat_username','tiktok_username','case_tags','initial_summary','sensitivity','status'];
+        $fields = ['case_name','person_name','date_of_birth','location','phone_number','snapchat_username','discord_username','tiktok_username','case_tags','initial_summary','sensitivity','status'];
         $newVals = [
             'case_name' => $case_name,
             'person_name' => ($person_name !== '' ? $person_name : null),
-          'location' => ($location !== '' ? $location : null),
+            'date_of_birth' => ($date_of_birth !== '' ? $date_of_birth : null),
+            'location' => ($location !== '' ? $location : null),
             'phone_number' => ($phone_number !== '' ? $phone_number : null),
             'snapchat_username' => ($snapchat_username !== '' ? $snapchat_username : null),
+            'discord_username' => ($discord_username !== '' ? $discord_username : null),
             'tiktok_username' => ($tiktok_username !== '' ? $tiktok_username : null),
             'case_tags' => implode(', ', $savedCaseTags),
             'initial_summary' => $initial_summary,
@@ -3671,8 +4188,16 @@ if (($_POST['action'] ?? '') === 'update_case') {
         foreach ($fields as $f) {
             $old = $prev[$f] ?? null; $new = $newVals[$f] ?? null;
             if ($old !== $new) {
-                $shortOld = is_string($old) ? mb_strimwidth($old,0,60,'…','UTF-8') : (is_null($old)?'null':(string)$old);
-                $shortNew = is_string($new) ? mb_strimwidth($new,0,60,'…','UTF-8') : (is_null($new)?'null':(string)$new);
+                $logOld = $old;
+                $logNew = $new;
+                if ($f === 'date_of_birth') {
+                    $formattedOld = tp_format_date_of_birth_uk($old);
+                    $formattedNew = tp_format_date_of_birth_uk($new);
+                    if ($formattedOld !== '') { $logOld = $formattedOld; }
+                    if ($formattedNew !== '') { $logNew = $formattedNew; }
+                }
+                $shortOld = is_string($logOld) ? mb_strimwidth($logOld,0,60,'…','UTF-8') : (is_null($logOld)?'null':(string)$logOld);
+                $shortNew = is_string($logNew) ? mb_strimwidth($logNew,0,60,'…','UTF-8') : (is_null($logNew)?'null':(string)$logNew);
                 $changes[] = "$f: {$shortOld} → {$shortNew}";
             }
         }
@@ -3693,7 +4218,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
                 );
                 log_console('INFO', 'Case published without Discord announcement: ' . $case_code);
             } else {
-                $photoRel = find_person_photo_url($case_code);
+                $photoRel = tp_person_photo_display_url($case_code);
                 notify_discord_case_verified(
                     $case_code,
                     $case_name,
@@ -4152,6 +4677,128 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
     }
 }
 
+// Rotate an evidence image's display orientation without rewriting the uploaded file.
+if (($_POST['action'] ?? '') === 'rotate_evidence_image') {
+    throttle();
+    $fallbackRedirect = strtok((string)($_SERVER['REQUEST_URI'] ?? '/'), '?') ?: '/';
+    if (!check_csrf()) {
+        flash('error', 'Security check failed.');
+        header('Location: ' . $fallbackRedirect); exit;
+    }
+    if (empty($_SESSION['user']) || empty($tp_evidence_rotation_ready)) {
+        flash('error', empty($_SESSION['user']) ? 'Unauthorized.' : 'Image rotation is not available right now.');
+        header('Location: ' . $fallbackRedirect); exit;
+    }
+
+    $evidenceIdRaw = $_POST['evidence_id'] ?? '';
+    $caseIdRaw = $_POST['case_id'] ?? '';
+    $evidence_id = (is_string($evidenceIdRaw) || is_int($evidenceIdRaw)) && ctype_digit((string)$evidenceIdRaw) ? (int)$evidenceIdRaw : 0;
+    $case_id = (is_string($caseIdRaw) || is_int($caseIdRaw)) && ctype_digit((string)$caseIdRaw) ? (int)$caseIdRaw : 0;
+    $direction = tp_post_string('direction');
+    $requestedRedirect = tp_post_string('redirect_url');
+    if ($evidence_id <= 0 || $case_id <= 0 || !in_array($direction, ['left', 'right'], true)) {
+        flash('error', 'Invalid image rotation request.');
+        header('Location: ' . $fallbackRedirect); exit;
+    }
+
+    try {
+        $select = $pdo->prepare('SELECT e.id, e.case_id, e.title, e.filepath, e.mime_type, e.rotation_degrees, c.status AS case_status, c.case_code FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? AND e.case_id = ? LIMIT 1');
+        $select->execute([$evidence_id, $case_id]);
+        $evidence = $select->fetch();
+    } catch (Throwable $e) {
+        $evidence = false;
+    }
+    if (!$evidence) {
+        flash('error', 'Evidence image not found.');
+        header('Location: ' . $fallbackRedirect); exit;
+    }
+
+    $canRotate = is_admin() || (is_moderator() && ($evidence['case_status'] ?? '') === 'Pending');
+    $caseCodeForRedirect = trim((string)($evidence['case_code'] ?? ''));
+    $redirectUrl = '?view=case&code=' . rawurlencode($caseCodeForRedirect) . '#case-view';
+    if (is_admin() && $requestedRedirect !== '') {
+        $requestedQuery = parse_url($requestedRedirect, PHP_URL_QUERY);
+        $requestedParams = [];
+        if (is_string($requestedQuery)) { parse_str($requestedQuery, $requestedParams); }
+        if (isset($requestedParams['admin_case']) && is_string($requestedParams['admin_case'])) {
+            $redirectUrl = '?admin_case=' . rawurlencode($caseCodeForRedirect) . '#admin-case';
+        }
+    }
+    if (!$canRotate) {
+        flash('error', 'Unauthorized. Moderators may rotate images only while reviewing a Pending case.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+
+    $uploadsRoot = realpath(__DIR__ . '/uploads');
+    $uploadsPrefix = $uploadsRoot ? rtrim($uploadsRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : '';
+    $absolutePath = @realpath(__DIR__ . '/' . ltrim((string)($evidence['filepath'] ?? ''), '/'));
+    if (!$absolutePath || $uploadsPrefix === '' || strncmp($absolutePath, $uploadsPrefix, strlen($uploadsPrefix)) !== 0 || !is_file($absolutePath)) {
+        flash('error', 'The uploaded image could not be found safely.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+
+    // Existing redaction coordinates are tied to the current orientation.
+    $redactionMasks = [
+        __DIR__ . '/uploads/redactions/mask_' . $evidence_id . '.json',
+        __DIR__ . '/uploads/masks/mask_' . $evidence_id . '.json',
+    ];
+    foreach ($redactionMasks as $redactionMask) {
+        if (is_file($redactionMask)) {
+            flash('error', 'Remove or recreate this image\'s redactions before changing its orientation.');
+            header('Location: ' . $redirectUrl); exit;
+        }
+    }
+
+    $currentRotation = (int)($evidence['rotation_degrees'] ?? 0);
+    if (!in_array($currentRotation, [0, 90, 180, 270], true)) { $currentRotation = 0; }
+    $rotationDelta = ($direction === 'right') ? 90 : 270;
+    $candidateRotation = ($currentRotation + $rotationDelta) % 360;
+    $detectedMime = null;
+    $rotationError = '';
+    $testImage = tp_load_evidence_display_image($absolutePath, $candidateRotation, $detectedMime, $rotationError);
+    if (!($testImage instanceof GdImage) || $detectedMime === null) {
+        $testImage = null;
+        flash('error', $rotationError !== '' ? $rotationError : 'This upload cannot be rotated.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+    $testImage = null;
+
+    try {
+        $pdo->beginTransaction();
+        $lock = $pdo->prepare('SELECT e.title, e.filepath, e.rotation_degrees, c.status AS case_status FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? AND e.case_id = ? FOR UPDATE');
+        $lock->execute([$evidence_id, $case_id]);
+        $lockedEvidence = $lock->fetch();
+        $stillAuthorized = $lockedEvidence && (is_admin() || (is_moderator() && ($lockedEvidence['case_status'] ?? '') === 'Pending'));
+        if (!$stillAuthorized || (string)($lockedEvidence['filepath'] ?? '') !== (string)($evidence['filepath'] ?? '')) {
+            throw new RuntimeException('Evidence or permission changed during rotation.');
+        }
+        $lockedRotation = (int)($lockedEvidence['rotation_degrees'] ?? 0);
+        if (!in_array($lockedRotation, [0, 90, 180, 270], true)) { $lockedRotation = 0; }
+        $newRotation = ($lockedRotation + $rotationDelta) % 360;
+        $updateRotation = $pdo->prepare('UPDATE evidence SET rotation_degrees = ?, mime_type = ? WHERE id = ? AND case_id = ? LIMIT 1');
+        $updateRotation->execute([$newRotation, $detectedMime, $evidence_id, $case_id]);
+
+        $directionLabel = $direction === 'right' ? 'right' : 'left';
+        $eventTitle = trim((string)($lockedEvidence['title'] ?? ''));
+        log_case_event(
+            $pdo,
+            $case_id,
+            'evidence_rotated',
+            $eventTitle !== '' ? $eventTitle : 'Evidence #' . $evidence_id,
+            'Display rotated 90° ' . $directionLabel . '. Original uploaded file retained unchanged. Current display rotation: ' . $newRotation . '° clockwise.',
+            $evidence_id,
+            null
+        );
+        $pdo->commit();
+        flash('success', 'Evidence image rotated 90° ' . $directionLabel . '.');
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
+        log_console('ERROR', 'Evidence rotation #' . $evidence_id . ': ' . $e->getMessage());
+        flash('error', 'Unable to rotate the evidence image. Please try again.');
+    }
+    header('Location: ' . $redirectUrl); exit;
+}
+
 // Handle evidence updates. Pending-case moderators and admins may edit full metadata.
 if (($_POST['action'] ?? '') === 'update_evidence') {
     throttle();
@@ -4177,6 +4824,7 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
     $title = trim($_POST['title'] ?? '');
+    $titleOnly = (string)($_POST['title_only'] ?? '') === '1';
     $type = $_POST['type'] ?? 'other';
     $allowedTypes = ['image','video','audio','pdf','doc','url','other'];
     if (!in_array($type, $allowedTypes, true)) $type = 'other';
@@ -4973,7 +5621,7 @@ if ($view === 'case' && isset($pdo) && $pdo instanceof PDO) {
         $tpMetaDescription = tp_social_summary((string)($metaCase['initial_summary'] ?? ''), $tpMetaDescription);
         $tpMetaUrl = tp_absolute_url('/?view=case&code=' . rawurlencode($metaCaseCode));
         $tpMetaType = 'article';
-        $metaPhoto = find_person_photo_url($metaCaseCode);
+        $metaPhoto = tp_person_photo_display_url($metaCaseCode);
         if ($metaPhoto !== '') {
           $tpMetaImage = tp_absolute_url($metaPhoto);
         }
@@ -5008,7 +5656,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
 }
 ?>
 <!DOCTYPE html>
-<html lang="en" data-bs-theme="dark">
+<html lang="en-GB" data-bs-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -6175,7 +6823,7 @@ document.addEventListener('DOMContentLoaded', function () {
       $case_code_param = trim($_GET['code'] ?? '');
       if ($case_code_param !== '') {
           try {
-              $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, sensitivity, status, rejection_reason, rejected_at FROM cases WHERE case_code = ? LIMIT 1');
+              $stmt = $pdo->prepare('SELECT id, case_code, case_name, person_name, date_of_birth, location, phone_number, snapchat_username, discord_username, tiktok_username, initial_summary, sensitivity, status, rejection_reason, rejected_at FROM cases WHERE case_code = ? LIMIT 1');
               $stmt->execute([$case_code_param]);
               $caseRow = $stmt->fetch();
                 if ($caseRow) {
@@ -6233,12 +6881,26 @@ document.addEventListener('DOMContentLoaded', function () {
                             </div>
                             <div class="row">
                               <div class="col-md-6 mb-3">
+                                <label class="form-label" for="ownerDateOfBirth">Date of Birth</label>
+                                <input type="date" name="date_of_birth" id="ownerDateOfBirth" class="form-control" value="<?php echo htmlspecialchars($caseRow['date_of_birth'] ?? ''); ?>" min="1000-01-01" max="<?php echo date('Y-m-d'); ?>" lang="en-GB" aria-describedby="ownerDateOfBirthHelp">
+                                <div class="form-text" id="ownerDateOfBirthHelp">UK date format: DD/MM/YYYY. Redacted from public case details.</div>
+                              </div>
+                              <div class="col-md-6 mb-3">
                                 <label class="form-label">Location</label>
                                 <input type="text" name="location" class="form-control" value="<?php echo htmlspecialchars(tp_case_location_for_viewer($caseRow['location'] ?? '')); ?>" placeholder="City, region, or country">
                               </div>
+                            </div>
+                            <div class="row">
                               <div class="col-md-6 mb-3">
                                 <label class="form-label">Phone Number</label>
                                 <input type="text" name="phone_number" class="form-control" value="<?php echo htmlspecialchars(tp_case_phone_number_for_viewer($caseRow['phone_number'] ?? '')); ?>" inputmode="tel">
+                              </div>
+                              <div class="col-md-6 mb-3">
+                                <label class="form-label">Discord Username</label>
+                                <div class="input-group">
+                                  <span class="input-group-text">@</span>
+                                  <input type="text" name="discord_username" class="form-control" value="<?php echo htmlspecialchars($caseRow['discord_username'] ?? ''); ?>" placeholder="username" maxlength="255" autocomplete="off">
+                                </div>
                               </div>
                             </div>
                             <div class="row">
@@ -6518,8 +7180,8 @@ try {
   $queryParams = [];
   if ($search !== '') {
     $like = '%' . $search . '%';
-    $whereParts[] = "(c.case_name LIKE ? OR c.person_name LIKE ? OR c.phone_number LIKE ? OR c.snapchat_username LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ? OR EXISTS (SELECT 1 FROM case_tiktok_usernames ctu WHERE ctu.case_id = c.id AND ctu.username LIKE ?) OR EXISTS (SELECT 1 FROM case_tag_links ctl JOIN case_tags ct ON ct.id = ctl.tag_id WHERE ctl.case_id = c.id AND (ct.label LIKE ? OR ct.slug LIKE ?)))";
-    array_push($queryParams, $like, $like, $like, $like, $like, $like, $like, $like, $like);
+    $whereParts[] = "(c.case_name LIKE ? OR c.person_name LIKE ? OR c.phone_number LIKE ? OR c.snapchat_username LIKE ? OR c.discord_username LIKE ? OR c.tiktok_username LIKE ? OR c.initial_summary LIKE ? OR EXISTS (SELECT 1 FROM case_tiktok_usernames ctu WHERE ctu.case_id = c.id AND ctu.username LIKE ?) OR EXISTS (SELECT 1 FROM case_tag_links ctl JOIN case_tags ct ON ct.id = ctl.tag_id WHERE ctl.case_id = c.id AND (ct.label LIKE ? OR ct.slug LIKE ?)))";
+    array_push($queryParams, $like, $like, $like, $like, $like, $like, $like, $like, $like, $like);
   }
   if ($tagFilter !== '') {
     $whereParts[] = "EXISTS (SELECT 1 FROM case_tag_links ctl_filter JOIN case_tags ct_filter ON ct_filter.id = ctl_filter.tag_id WHERE ctl_filter.case_id = c.id AND ct_filter.slug = ?)";
@@ -6573,7 +7235,7 @@ if ($rs && count($rs) > 0):
     $opened= $row['opened_at'] ?? '';
     $last  = $row['last_activity'] ?? $opened;
     $photoUrl = '';
-    $photoPath = find_person_photo_url($code);
+    $photoPath = tp_person_photo_display_url($code);
     if ($photoPath !== '') { $photoUrl = $photoPath; }
 ?>
   <div class="col">
@@ -6689,11 +7351,16 @@ if ($rs && count($rs) > 0):
                       <input type="text" name="person_name" class="form-control">
                     </div>
                     <div class="col-md-6 mb-3">
-                      <label class="form-label">Location</label>
-                      <input type="text" name="location" class="form-control" placeholder="City, region, or country">
+                      <label class="form-label" for="viewerDateOfBirth">Date of Birth</label>
+                      <input type="date" name="date_of_birth" id="viewerDateOfBirth" class="form-control" min="1000-01-01" max="<?php echo date('Y-m-d'); ?>" lang="en-GB" aria-describedby="viewerDateOfBirthHelp">
+                      <div class="form-text" id="viewerDateOfBirthHelp">UK date format: DD/MM/YYYY. Redacted from public case details.</div>
                     </div>
                   </div>
                   <div class="row">
+                    <div class="col-md-6 mb-3">
+                      <label class="form-label">Location</label>
+                      <input type="text" name="location" class="form-control" placeholder="City, region, or country">
+                    </div>
                     <div class="col-md-6 mb-3">
                       <label class="form-label">Phone Number</label>
                       <input type="text" name="phone_number" class="form-control" inputmode="tel">
@@ -6705,8 +7372,13 @@ if ($rs && count($rs) > 0):
                         <input type="text" name="snapchat_username" class="form-control" placeholder="username (optional)">
                       </div>
                     </div>
-                  </div>
-                  <div class="row">
+                    <div class="col-md-6 mb-3">
+                      <label class="form-label">Discord Username</label>
+                      <div class="input-group">
+                        <span class="input-group-text">@</span>
+                        <input type="text" name="discord_username" class="form-control" placeholder="username (optional)" maxlength="255" autocomplete="off">
+                      </div>
+                    </div>
                     <div class="col-md-6 mb-3">
                       <label class="form-label">TikTok Usernames</label>
                       <input type="text" name="tiktok_username" class="form-control" placeholder="username1, username2 (optional)">
@@ -6792,7 +7464,7 @@ if ($rs && count($rs) > 0):
           $beingBuiltRows = [];
           try {
             $beingBuiltSql = "
-              SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, c.tiktok_username,
+              SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, c.discord_username, c.tiktok_username,
                      c.initial_summary, c.sensitivity, c.created_by,
                      u.display_name AS creator_name,
                      COALESCE(ev.cnt, 0) AS evidence_count,
@@ -6845,7 +7517,10 @@ if ($rs && count($rs) > 0):
                         <tr data-case-review-row>
                           <td><div class="fw-semibold"><?php echo htmlspecialchars($builtCase['case_name'] ?: $builtCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($builtCase['case_code']); ?></div><span class="badge text-bg-<?php echo !empty($builtReadiness['is_ready']) ? 'success' : 'warning'; ?> mt-1"><?php echo (int)$builtReadiness['complete_count']; ?>/<?php echo (int)$builtReadiness['total_count']; ?> ready</span></td>
                           <td><?php echo htmlspecialchars(trim((string)($builtCase['creator_name'] ?? '')) ?: '—'); ?></td>
-                          <td><?php echo htmlspecialchars(trim((string)($builtCase['person_name'] ?? '')) ?: '—'); ?></td>
+                          <td>
+                            <div><?php echo htmlspecialchars(trim((string)($builtCase['person_name'] ?? '')) ?: '—'); ?></div>
+                            <?php if (trim((string)($builtCase['discord_username'] ?? '')) !== ''): ?><div class="small text-secondary"><i class="bi bi-discord me-1"></i>@<?php echo htmlspecialchars($builtCase['discord_username']); ?></div><?php endif; ?>
+                          </td>
                           <td><?php echo render_case_tag_badges($builtTags, '<span class="text-secondary">&mdash;</span>'); ?></td>
                           <td><?php echo (int)($builtCase['evidence_count'] ?? 0); ?></td>
                           <td class="text-nowrap"><?php echo !empty($builtCase['last_activity']) ? htmlspecialchars(date('d M Y H:i', strtotime($builtCase['last_activity']))) : '—'; ?></td>
@@ -6889,7 +7564,7 @@ if ($rs && count($rs) > 0):
     $rows = [];
     try {
         $baseSql = "
-          SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, c.tiktok_username,
+          SELECT c.id, c.case_code, c.case_name, c.person_name, c.phone_number, c.snapchat_username, c.discord_username, c.tiktok_username,
                  c.initial_summary, c.sensitivity, c.status, c.created_by, c.resubmitted_at, c.submitted_for_review_at,
                  u.display_name AS creator_name,
                  COALESCE(ev.cnt, 0) AS evidence_count,
@@ -6930,7 +7605,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
               <div class="table-responsive">
                 <table class="table table-sm align-middle mb-0">
                   <thead>
-                    <tr data-case-review-row>
+                    <tr>
                       <th style="width: 12rem;" class="text-nowrap">Case Code</th>
                       <th class="text-nowrap">Case Name</th>
                       <th class="text-nowrap">Submitted By</th>
@@ -6953,11 +7628,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                       $r['tag_count'] = count($pendingCaseTags);
                       $pendingReadiness = tp_case_readiness($pdo, $r);
                   ?>
-                    <tr>
+                    <tr data-case-review-row>
                       <td class="text-nowrap"><span class="badge text-bg-dark border"><?php echo htmlspecialchars($code); ?></span></td>
                       <td class="fw-semibold text-nowrap"><?php echo htmlspecialchars($name); ?><?php if (!empty($r['resubmitted_at'])): ?><span class="badge text-bg-info ms-1">Resubmitted</span><?php endif; ?><div><span class="badge text-bg-<?php echo !empty($pendingReadiness['is_ready']) ? 'success' : 'warning'; ?> mt-1"><?php echo (int)$pendingReadiness['complete_count']; ?>/<?php echo (int)$pendingReadiness['total_count']; ?> ready</span></div></td>
                       <td class="text-nowrap"><?php echo $creatorName !== '' ? htmlspecialchars($creatorName) : '—'; ?></td>
-                      <td class="text-nowrap"><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></td>
+                      <td class="text-nowrap"><div><?php echo htmlspecialchars($person !== '' ? $person : '—'); ?></div><?php if (trim((string)($r['discord_username'] ?? '')) !== ''): ?><div class="small text-secondary"><i class="bi bi-discord me-1"></i>@<?php echo htmlspecialchars($r['discord_username']); ?></div><?php endif; ?></td>
                       <td><?php echo render_case_tag_badges($pendingCaseTags, '<span class="text-secondary">&mdash;</span>'); ?></td>
                       <td class="text-nowrap"><?php echo $evc; ?></td>
                       <td class="text-nowrap"><?php echo htmlspecialchars($last ? date('d M Y H:i', strtotime($last)) : '—'); ?></td>
@@ -7009,7 +7684,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 $publishedRows = [];
                 try {
                   $publishedSql = "
-                    SELECT c.id, c.case_code, c.case_name, c.person_name, c.created_by, c.updated_at,
+                    SELECT c.id, c.case_code, c.case_name, c.person_name, c.discord_username, c.created_by, c.updated_at,
                            u.display_name AS creator_name,
                            COALESCE(ev.cnt, 0) AS evidence_count,
                            COALESCE(ev.last_added, c.updated_at, c.opened_at) AS last_activity
@@ -7049,7 +7724,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                         <tr data-case-review-row>
                           <td><div class="fw-semibold"><?php echo htmlspecialchars($publishedCase['case_name'] ?: $publishedCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($publishedCase['case_code']); ?></div></td>
                           <td><?php echo htmlspecialchars(trim((string)($publishedCase['creator_name'] ?? '')) ?: '—'); ?></td>
-                          <td><?php echo htmlspecialchars(trim((string)($publishedCase['person_name'] ?? '')) ?: '—'); ?></td>
+                          <td><div><?php echo htmlspecialchars(trim((string)($publishedCase['person_name'] ?? '')) ?: '—'); ?></div><?php if (trim((string)($publishedCase['discord_username'] ?? '')) !== ''): ?><div class="small text-secondary"><i class="bi bi-discord me-1"></i>@<?php echo htmlspecialchars($publishedCase['discord_username']); ?></div><?php endif; ?></td>
                           <td><?php echo render_case_tag_badges($publishedTags, '<span class="text-secondary">&mdash;</span>'); ?></td>
                           <td><?php echo (int)($publishedCase['evidence_count'] ?? 0); ?></td>
                           <td class="text-nowrap"><?php echo !empty($publishedCase['updated_at']) ? htmlspecialchars(date('d M Y H:i', strtotime($publishedCase['updated_at']))) : '—'; ?></td>
@@ -7088,7 +7763,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 $rejectedRows = [];
                 try {
                   $rejectedSql = "
-                    SELECT c.id, c.case_code, c.case_name, c.person_name, c.created_by,
+                    SELECT c.id, c.case_code, c.case_name, c.person_name, c.discord_username, c.created_by,
                            c.rejection_reason, c.rejected_at,
                            u.display_name AS creator_name,
                            COALESCE(ev.cnt, 0) AS evidence_count,
@@ -7125,7 +7800,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                     <tbody>
                       <?php foreach ($rejectedRows as $rejectedCase): ?>
                         <tr data-case-review-row>
-                          <td><div class="fw-semibold"><?php echo htmlspecialchars($rejectedCase['case_name'] ?: $rejectedCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($rejectedCase['case_code']); ?></div></td>
+                          <td><div class="fw-semibold"><?php echo htmlspecialchars($rejectedCase['case_name'] ?: $rejectedCase['case_code']); ?></div><div class="small text-secondary"><?php echo htmlspecialchars($rejectedCase['case_code']); ?></div><?php if (trim((string)($rejectedCase['discord_username'] ?? '')) !== ''): ?><div class="small text-secondary"><i class="bi bi-discord me-1"></i>@<?php echo htmlspecialchars($rejectedCase['discord_username']); ?></div><?php endif; ?></td>
                           <td><?php echo htmlspecialchars(trim((string)($rejectedCase['creator_name'] ?? '')) ?: '—'); ?></td>
                           <td style="min-width:18rem; max-width:32rem;"><div class="text-wrap"><?php echo nl2br(htmlspecialchars($rejectedCase['rejection_reason'] ?? 'No reason recorded.')); ?></div></td>
                           <td class="text-nowrap"><?php echo !empty($rejectedCase['rejected_at']) ? htmlspecialchars(date('d M Y H:i', strtotime($rejectedCase['rejected_at']))) : '—'; ?></td>
@@ -8626,7 +9301,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       $viewAnalyticsRecentRisk = [];
       if ($caseCode !== '') {
         try {
-          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, rejection_reason, rejected_at, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
+          $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, date_of_birth, location, phone_number, snapchat_username, discord_username, tiktok_username, initial_summary, status, sensitivity, rejection_reason, rejected_at, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
           $viewReviewOwner = $viewCase && is_logged_in() && (int)($viewCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
@@ -9063,8 +9738,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                             'case_resubmitted' => 'Case resubmitted',
                             'case_submitted_for_review' => 'Submitted for review',
                             'case_returned_to_building' => 'Returned to Being Built',
+                            'person_photo_rotated' => 'Person photo rotated',
                             'evidence_added' => 'Evidence added',
                             'evidence_updated' => 'Evidence updated',
+                            'evidence_rotated' => 'Evidence image rotated',
                             'evidence_deleted' => 'Evidence deleted',
                             'note_added' => 'Case note added',
                             'redactions_saved' => 'Redactions saved'
@@ -9247,7 +9924,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   </div>
                   <div class="row g-3 align-items-start">
                     <?php
-                      $casePhoto = find_person_photo_url($caseCode);
+                      $casePhoto = tp_person_photo_display_url($caseCode);
                       if ($casePhoto !== '') {
                     ?>
                       <div class="col-auto d-flex align-items-start">
@@ -9271,6 +9948,21 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                           <div><?php echo htmlspecialchars($viewCase['person_name'] ?? ''); ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Date of Birth</div>
+                          <div>
+                            <?php
+                              $formattedDateOfBirth = tp_format_date_of_birth_uk($viewCase['date_of_birth'] ?? '');
+                              if ($formattedDateOfBirth === '') {
+                                echo '<span class="text-secondary">&mdash;</span>';
+                              } elseif (can_moderate_cases() || $tp_isCaseOwner) {
+                                echo htmlspecialchars($formattedDateOfBirth);
+                              } else {
+                                echo '<span class="text-secondary">Redacted</span>';
+                              }
+                            ?>
+                          </div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Location</div>
                           <div><?php echo ($viewCase['location'] ?? '') !== '' ? htmlspecialchars(tp_case_location_for_viewer($viewCase['location'])) : '<span class="text-secondary">—</span>'; ?></div>
                         </div>
@@ -9281,6 +9973,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">Snapchat Username</div>
                           <div><?php echo ($viewCase['snapchat_username'] ?? '') !== '' ? '@'.htmlspecialchars($viewCase['snapchat_username']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
+                        </div>
+                        <div class="col-sm-6 col-lg-3 mb-0">
+                          <div class="small text-secondary">Discord Username</div>
+                          <div><?php echo ($viewCase['discord_username'] ?? '') !== '' ? '@'.htmlspecialchars($viewCase['discord_username']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
                         </div>
                         <div class="col-sm-6 col-lg-3 mb-0">
                           <div class="small text-secondary">TikTok Usernames</div>
@@ -9735,6 +10431,20 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             </div>
             <div class="row g-2 mt-2">
               <div class="col-md-6">
+                <label class="form-label" for="reviewDateOfBirth">Date of Birth</label>
+                <input type="date" name="date_of_birth" id="reviewDateOfBirth" class="form-control" value="<?php echo htmlspecialchars($viewCase['date_of_birth'] ?? ''); ?>" min="1000-01-01" max="<?php echo date('Y-m-d'); ?>" lang="en-GB" aria-describedby="reviewDateOfBirthHelp">
+                <div class="form-text" id="reviewDateOfBirthHelp">UK date format: DD/MM/YYYY. Redacted from public case details.</div>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Discord Username</label>
+                <div class="input-group">
+                  <span class="input-group-text">@</span>
+                  <input type="text" name="discord_username" class="form-control" value="<?php echo htmlspecialchars($viewCase['discord_username'] ?? ''); ?>" placeholder="username" maxlength="255" autocomplete="off">
+                </div>
+              </div>
+            </div>
+            <div class="row g-2 mt-2">
+              <div class="col-md-6">
                 <label class="form-label">Phone Number</label>
                 <input type="text" name="phone_number" class="form-control" value="<?php echo htmlspecialchars($viewCase['phone_number'] ?? ''); ?>" inputmode="tel">
               </div>
@@ -9801,6 +10511,29 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <textarea name="initial_summary" class="form-control" rows="4" required><?php echo htmlspecialchars($viewCase['initial_summary'] ?? ''); ?></textarea>
             </div>
           </form>
+          <?php $viewPersonPhoto = tp_person_photo_display_url($caseCode); if ($viewPersonPhoto !== ''): ?>
+          <div class="card glass mt-3">
+            <div class="card-body d-flex flex-column flex-sm-row align-items-sm-center gap-3">
+              <img src="<?php echo htmlspecialchars($viewPersonPhoto); ?>" alt="Current person photo" class="rounded" style="width: 112px; height: 112px; object-fit: cover;">
+              <div class="flex-grow-1">
+                <h6 class="mb-1">Person Photo Orientation</h6>
+                <p class="small text-secondary mb-2">Rotate the current uploaded photo in 90° steps.</p>
+                <form method="post" action="" class="d-flex flex-wrap gap-2">
+                  <input type="hidden" name="action" value="rotate_person_photo">
+                  <?php csrf_field(); ?>
+                  <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                  <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                  <button class="btn btn-sm btn-outline-light" type="submit" name="direction" value="left">
+                    <i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i> 90° Left
+                  </button>
+                  <button class="btn btn-sm btn-outline-light" type="submit" name="direction" value="right">
+                    <i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i> 90° Right
+                  </button>
+                </form>
+              </div>
+            </div>
+          </div>
+          <?php endif; ?>
         </div>
         <div class="modal-footer">
           <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
@@ -9823,7 +10556,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       // Fetch case meta
       $caseRow = null; $caseId = 0; $adminCaseTotalViews = 0; $adminCaseTags = [];
       try {
-          $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, location, phone_number, snapchat_username, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
+          $s = $pdo->prepare('SELECT id, case_code, case_name, person_name, date_of_birth, location, phone_number, snapchat_username, discord_username, tiktok_username, initial_summary, status, sensitivity, opened_at FROM cases WHERE case_code = ? LIMIT 1');
           $s->execute([$adminCaseCode]);
           $caseRow = $s->fetch();
           $caseId = (int)($caseRow['id'] ?? 0);
@@ -9889,7 +10622,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                     <h3 class="h6 mb-0">Case Details</h3>
                     <button class="btn btn-sm btn-outline-light" data-bs-toggle="modal" data-bs-target="#editCaseModal"><i class="bi bi-pencil me-1"></i> Edit</button>
                   </div>
-                  <?php $adminCasePhoto = find_person_photo_url($caseRow['case_code'] ?? ''); if ($adminCasePhoto !== '') { ?>
+                  <?php $adminCasePhoto = tp_person_photo_display_url($caseRow['case_code'] ?? ''); if ($adminCasePhoto !== '') { ?>
                     <div class="mb-3">
                       <img src="<?php echo htmlspecialchars($adminCasePhoto); ?>" alt="" class="rounded" style="width:96px;height:96px;object-fit:cover;">
                     </div>
@@ -9898,12 +10631,16 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <div class="mb-2"><?php echo htmlspecialchars($caseRow['case_name'] ?? ''); ?></div>
                   <div class="small text-secondary">Person Name</div>
                   <div class="mb-2"><?php echo htmlspecialchars($caseRow['person_name'] ?? ''); ?></div>
+                  <div class="small text-secondary">Date of Birth</div>
+                  <div class="mb-2"><?php $adminDateOfBirth = tp_format_date_of_birth_uk($caseRow['date_of_birth'] ?? ''); echo $adminDateOfBirth !== '' ? htmlspecialchars($adminDateOfBirth) : '<span class="text-secondary">&mdash;</span>'; ?></div>
                   <div class="small text-secondary">Location</div>
                   <div class="mb-2"><?php echo ($caseRow['location'] ?? '') !== '' ? htmlspecialchars($caseRow['location']) : '<span class="text-secondary">—</span>'; ?></div>
                   <div class="small text-secondary">Phone Number</div>
                   <div class="mb-2"><?php echo ($caseRow['phone_number'] ?? '') !== '' ? htmlspecialchars($caseRow['phone_number']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
                   <div class="small text-secondary">Snapchat Username</div>
                   <div class="mb-2"><?php echo ($caseRow['snapchat_username'] ?? '') !== '' ? '@'.htmlspecialchars($caseRow['snapchat_username']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
+                  <div class="small text-secondary">Discord Username</div>
+                  <div class="mb-2"><?php echo ($caseRow['discord_username'] ?? '') !== '' ? '@'.htmlspecialchars($caseRow['discord_username']) : '<span class="text-secondary">&mdash;</span>'; ?></div>
                   <div class="small text-secondary">TikTok Usernames</div>
                   <div class="mb-2"><?php echo render_tiktok_usernames_lines($caseRow['tiktok_username'] ?? ''); ?></div>
                   <div class="small text-secondary">Status</div>
@@ -10211,6 +10948,20 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 </div>
                 <div class="row g-2 mt-2">
                   <div class="col-md-6">
+                    <label class="form-label" for="adminDateOfBirth">Date of Birth</label>
+                    <input type="date" name="date_of_birth" id="adminDateOfBirth" class="form-control" value="<?php echo htmlspecialchars($caseRow['date_of_birth'] ?? ''); ?>" min="1000-01-01" max="<?php echo date('Y-m-d'); ?>" lang="en-GB" aria-describedby="adminDateOfBirthHelp">
+                    <div class="form-text" id="adminDateOfBirthHelp">UK date format: DD/MM/YYYY. Redacted from public case details.</div>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Discord Username</label>
+                    <div class="input-group">
+                      <span class="input-group-text">@</span>
+                      <input type="text" name="discord_username" class="form-control" value="<?php echo htmlspecialchars($caseRow['discord_username'] ?? ''); ?>" placeholder="username" maxlength="255" autocomplete="off">
+                    </div>
+                  </div>
+                </div>
+                <div class="row g-2 mt-2">
+                  <div class="col-md-6">
                     <label class="form-label">Phone Number</label>
                     <input type="text" name="phone_number" class="form-control" value="<?php echo htmlspecialchars($caseRow['phone_number'] ?? ''); ?>" inputmode="tel">
                   </div>
@@ -10271,6 +11022,29 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <textarea name="initial_summary" class="form-control" rows="4" required><?php echo htmlspecialchars($caseRow['initial_summary'] ?? ''); ?></textarea>
                 </div>
               </form>
+              <?php $adminPersonPhoto = tp_person_photo_display_url($adminCaseCode); if ($adminPersonPhoto !== ''): ?>
+              <div class="card glass mt-3">
+                <div class="card-body d-flex flex-column flex-sm-row align-items-sm-center gap-3">
+                  <img src="<?php echo htmlspecialchars($adminPersonPhoto); ?>" alt="Current person photo" class="rounded" style="width: 112px; height: 112px; object-fit: cover;">
+                  <div class="flex-grow-1">
+                    <h6 class="mb-1">Person Photo Orientation</h6>
+                    <p class="small text-secondary mb-2">Rotate the current uploaded photo in 90° steps.</p>
+                    <form method="post" action="" class="d-flex flex-wrap gap-2">
+                      <input type="hidden" name="action" value="rotate_person_photo">
+                      <?php csrf_field(); ?>
+                      <input type="hidden" name="case_id" value="<?php echo (int)$caseId; ?>">
+                      <input type="hidden" name="redirect_url" value="?admin_case=<?php echo urlencode($adminCaseCode); ?>#admin-case">
+                      <button class="btn btn-sm btn-outline-light" type="submit" name="direction" value="left">
+                        <i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i> 90° Left
+                      </button>
+                      <button class="btn btn-sm btn-outline-light" type="submit" name="direction" value="right">
+                        <i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i> 90° Right
+                      </button>
+                    </form>
+                  </div>
+                </div>
+              </div>
+              <?php endif; ?>
             </div>
             <div class="modal-footer">
               <button class="btn btn-outline-light" data-bs-dismiss="modal">Cancel</button>
@@ -10849,6 +11623,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
   <?php
     $tp_showEvidenceEditor = is_admin() || (($view ?? '') === 'case' && !empty($tp_canEditCaseEvidence));
+    $tp_showEvidenceRotator = !empty($tp_evidence_rotation_ready) && (
+      is_admin()
+      || (is_moderator() && ($view ?? '') === 'case' && ($viewCase['status'] ?? '') === 'Pending')
+    );
     $tp_evidenceEditRedirect = (($view ?? '') === 'case' && !empty($caseCode))
       ? ('?view=case&code=' . rawurlencode($caseCode) . '#case-view')
       : (string)($_SERVER['REQUEST_URI'] ?? '/');
@@ -10889,6 +11667,27 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       <button class="btn btn-primary" type="submit"><i class="bi bi-save me-1"></i> Save Title</button>
                     </div>
                   </form>
+                  <?php if ($tp_showEvidenceRotator): ?>
+                  <div class="mt-3 pt-3 border-top d-none" id="evRotatePanel">
+                    <h6 class="mb-2">Image Orientation</h6>
+                    <p class="small text-secondary mb-2">Rotate the displayed image in 90° steps. The original upload remains unchanged.</p>
+                    <form method="post" action="" id="evRotateForm">
+                      <input type="hidden" name="action" value="rotate_evidence_image">
+                      <?php csrf_field(); ?>
+                      <input type="hidden" name="evidence_id" id="evRotateId">
+                      <input type="hidden" name="case_id" id="evRotateCaseId">
+                      <input type="hidden" name="redirect_url" value="<?php echo htmlspecialchars($tp_evidenceEditRedirect); ?>">
+                      <div class="d-grid gap-2">
+                        <button class="btn btn-outline-light" type="submit" name="direction" value="left">
+                          <i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i> 90° Left
+                        </button>
+                        <button class="btn btn-outline-light" type="submit" name="direction" value="right">
+                          <i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i> 90° Right
+                        </button>
+                      </div>
+                    </form>
+                  </div>
+                  <?php endif; ?>
                 </div>
               </div>
             </div>
@@ -10930,12 +11729,26 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             </div>
             <div class="row g-2 mt-2">
               <div class="col-md-6">
+                <label class="form-label" for="createDateOfBirth">Date of Birth</label>
+                <input type="date" name="date_of_birth" id="createDateOfBirth" class="form-control" min="1000-01-01" max="<?php echo date('Y-m-d'); ?>" lang="en-GB" aria-describedby="createDateOfBirthHelp">
+                <div class="form-text" id="createDateOfBirthHelp">UK date format: DD/MM/YYYY. Redacted from public case details.</div>
+              </div>
+              <div class="col-md-6">
                 <label class="form-label">Location</label>
                 <input type="text" name="location" class="form-control" placeholder="City, region, or country">
               </div>
+            </div>
+            <div class="row g-2 mt-2">
               <div class="col-md-6">
                 <label class="form-label">Phone Number</label>
                 <input type="text" name="phone_number" class="form-control" inputmode="tel">
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Discord Username</label>
+                <div class="input-group">
+                  <span class="input-group-text">@</span>
+                  <input type="text" name="discord_username" class="form-control" placeholder="username (optional)" maxlength="255" autocomplete="off">
+                </div>
               </div>
             </div>
             <div class="row g-2 mt-2">
@@ -11299,6 +12112,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         var id = btn.getAttribute('data-id') || '';
         var caseId = btn.getAttribute('data-case-id') || '';
         var isEditMode = btn.classList.contains('btn-edit-evidence');
+        var isImageEvidence = type === 'image' || mime.toLowerCase().indexOf('image/') === 0;
         var showEvidenceTitles = <?php echo is_logged_in() ? 'true' : 'false'; ?>;
   
         // Fallbacks
@@ -11315,11 +12129,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         // Viewing is evidence-only. Editing is a separate creator/admin action.
         var previewColumn = document.getElementById('evPreviewColumn');
         var editPanel = document.getElementById('evEditPanel');
+        var rotatePanel = document.getElementById('evRotatePanel');
         if (previewColumn) {
           previewColumn.classList.toggle('col-lg-8', isEditMode && !!editPanel);
           previewColumn.classList.toggle('col-12', !isEditMode || !editPanel);
         }
         if (editPanel) editPanel.classList.toggle('d-none', !isEditMode);
+        if (rotatePanel) rotatePanel.classList.toggle('d-none', !isEditMode || !isImageEvidence);
   
         // Render preview
         var preview = document.getElementById('evPreview');
@@ -11327,9 +12143,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           preview.classList.add('ratio','ratio-16x9');
           preview.innerHTML = '';
           var safeSrc = src;
-          if (type === 'image' || (mime.indexOf('image/') === 0)) {
+          if (isImageEvidence) {
             preview.classList.remove('ratio','ratio-16x9');
             var img = document.createElement('img');
+            if (safeSrc.indexOf('action=serve_evidence') !== -1) {
+              safeSrc += (safeSrc.indexOf('?') === -1 ? '?' : '&') + 'v=' + Date.now();
+            }
             img.src = safeSrc;
             img.alt = title;
             img.className = 'img-fluid rounded';
@@ -11351,6 +12170,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         var evCaseId = document.getElementById('evCaseId');
         var evTitle = document.getElementById('evTitle');
         var evType = document.getElementById('evType');
+        var evRotateId = document.getElementById('evRotateId');
+        var evRotateCaseId = document.getElementById('evRotateCaseId');
         if (isEditMode && evId && evCaseId && evTitle && evType) {
           evId.value = id;
           evCaseId.value = caseId;
@@ -11360,6 +12181,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           } else if (evType.tagName !== 'SELECT') {
             evType.value = type || 'other';
           }
+        }
+        if (isEditMode && isImageEvidence && evRotateId && evRotateCaseId) {
+          evRotateId.value = id;
+          evRotateCaseId.value = caseId;
         }
       });
   
@@ -11371,11 +12196,17 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         }
         var previewColumn = document.getElementById('evPreviewColumn');
         var editPanel = document.getElementById('evEditPanel');
+        var rotatePanel = document.getElementById('evRotatePanel');
+        var evRotateId = document.getElementById('evRotateId');
+        var evRotateCaseId = document.getElementById('evRotateCaseId');
         if (previewColumn) {
           previewColumn.classList.remove('col-lg-8');
           previewColumn.classList.add('col-12');
         }
         if (editPanel) editPanel.classList.add('d-none');
+        if (rotatePanel) rotatePanel.classList.add('d-none');
+        if (evRotateId) evRotateId.value = '';
+        if (evRotateCaseId) evRotateCaseId.value = '';
       });
     })();
   
