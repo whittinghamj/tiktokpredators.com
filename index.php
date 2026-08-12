@@ -945,6 +945,110 @@ function tp_person_photo_display_url(string $caseCode): string {
     return $relative . '?v=' . $version;
 }
 
+/** Public profile-photo roster for Catch a Pred. Restricted and Sealed media stay out of the game. */
+function tp_catch_pred_profiles(PDO $pdo): array {
+    $stmt = $pdo->query("SELECT id, case_code FROM cases WHERE status = 'Verified' AND sensitivity = 'Standard' ORDER BY id ASC");
+    $profiles = [];
+    foreach (($stmt ? $stmt->fetchAll() : []) as $row) {
+        $caseCode = trim((string)($row['case_code'] ?? ''));
+        $photoUrl = $caseCode !== '' ? tp_person_photo_display_url($caseCode) : '';
+        if ($photoUrl === '') { continue; }
+        $profiles[] = [
+            'case_id' => (int)($row['id'] ?? 0),
+            'image_url' => $photoUrl,
+        ];
+    }
+    return array_values(array_filter($profiles, static fn (array $profile): bool => $profile['case_id'] > 0));
+}
+
+/** Top visible Catch a Pred scores in deterministic leaderboard order. */
+function tp_catch_pred_leaderboard(PDO $pdo, int $limit = 10): array {
+    $limit = max(1, min(100, $limit));
+    $stmt = $pdo->query(
+        'SELECT id, player_name, score, target_count, duration_ms, created_at '
+        . 'FROM catch_pred_scores WHERE is_visible = 1 '
+        . 'ORDER BY score DESC, duration_ms ASC, created_at ASC, id ASC LIMIT ' . $limit
+    );
+    return $stmt ? ($stmt->fetchAll() ?: []) : [];
+}
+
+/** Determine whether a score currently enters the displayed top ten. */
+function tp_catch_pred_qualification(PDO $pdo, int $score, int $durationMs): array {
+    $leaders = tp_catch_pred_leaderboard($pdo, 10);
+    if ($score <= 0) {
+        return ['qualifies' => false, 'new_high_score' => false, 'rank' => null, 'leaders' => $leaders];
+    }
+
+    $rank = 1;
+    foreach ($leaders as $leader) {
+        $leaderScore = (int)($leader['score'] ?? 0);
+        $leaderDuration = (int)($leader['duration_ms'] ?? PHP_INT_MAX);
+        if ($leaderScore > $score || ($leaderScore === $score && $leaderDuration <= $durationMs)) {
+            $rank++;
+        }
+    }
+
+    $qualifies = count($leaders) < 10;
+    if (!$qualifies) {
+        $last = $leaders[9];
+        $lastScore = (int)($last['score'] ?? 0);
+        $lastDuration = (int)($last['duration_ms'] ?? PHP_INT_MAX);
+        $qualifies = $score > $lastScore || ($score === $lastScore && $durationMs < $lastDuration);
+    }
+
+    return [
+        'qualifies' => $qualifies,
+        'new_high_score' => $qualifies && $rank === 1,
+        'rank' => $qualifies ? min(10, $rank) : null,
+        'leaders' => $leaders,
+    ];
+}
+
+/** Leaderboard names are public, short, and deliberately limited to a safe character set. */
+function tp_catch_pred_player_name(string $value): string {
+    $value = trim(preg_replace('/\s+/u', ' ', $value) ?? '');
+    if (class_exists('Normalizer')) {
+        $normalised = Normalizer::normalize($value, Normalizer::FORM_C);
+        if (is_string($normalised)) { $value = $normalised; }
+    }
+    $length = mb_strlen($value, 'UTF-8');
+    if ($length < 2 || $length > 24 || !tp_valid_public_text($value, 24, false)) { return ''; }
+    return preg_match("/\A[\p{L}\p{N}](?:[\p{L}\p{N} ._’'\x{2010}-\x{2015}-]{0,22}[\p{L}\p{N}])?\z/u", $value) ? $value : '';
+}
+
+/** Remove expired game runs and bound anonymous session storage. */
+function tp_catch_pred_prune_runs(): void {
+    $runs = $_SESSION['catch_pred_runs'] ?? [];
+    if (!is_array($runs)) { $runs = []; }
+    $cutoff = microtime(true) - 3600;
+    foreach ($runs as $token => $run) {
+        if (!is_array($run) || (float)($run['started_at'] ?? 0) < $cutoff) { unset($runs[$token]); }
+    }
+    if (count($runs) >= 8) {
+        uasort($runs, static fn (array $a, array $b): int => ((float)($a['started_at'] ?? 0)) <=> ((float)($b['started_at'] ?? 0)));
+        while (count($runs) >= 8) { array_shift($runs); }
+    }
+    $_SESSION['catch_pred_runs'] = $runs;
+}
+
+/** Server-side play clock with paused time removed. */
+function tp_catch_pred_elapsed_ms(array $run, ?float $now = null): int {
+    $now = $now ?? microtime(true);
+    $startedAt = (float)($run['started_at'] ?? $now);
+    $pausedSeconds = max(0.0, (float)($run['paused_total_seconds'] ?? 0));
+    $pausedAt = (float)($run['paused_at'] ?? 0);
+    if ($pausedAt > 0) { $pausedSeconds += max(0.0, $now - $pausedAt); }
+    return max(0, (int)round((($now - $startedAt) - $pausedSeconds) * 1000));
+}
+
+function tp_catch_pred_json(array $payload, int $status = 200): void {
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, max-age=0');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    exit;
+}
+
 function tp_request_scheme(): string {
     return (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
 }
@@ -1461,6 +1565,107 @@ function generate_case_code(PDO $pdo): string {
     return "CASE-{$year}-" . strtoupper(substr(bin2hex(random_bytes(8)), 0, 8));
 }
 
+// Lightweight game-clock actions run before the database/schema bootstrap.
+// This keeps rapid target batches from repeating the monolith's runtime migrations.
+if (($_POST['action'] ?? '') === 'set_catch_pred_pause') {
+    if (!check_csrf()) { tp_catch_pred_json(['ok' => false, 'error' => 'Security check failed.'], 403); }
+    $roundToken = tp_post_string('round_token');
+    $pausedValue = tp_post_string('paused');
+    if (!preg_match('/\A[a-f0-9]{48}\z/D', $roundToken) || !in_array($pausedValue, ['0', '1'], true)
+        || !isset($_SESSION['catch_pred_runs'][$roundToken]) || !is_array($_SESSION['catch_pred_runs'][$roundToken])) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'Invalid game pause request.'], 400);
+    }
+
+    $run =& $_SESSION['catch_pred_runs'][$roundToken];
+    $now = microtime(true);
+    if (($run['state'] ?? '') !== 'active' || $now > (float)($run['expires_at'] ?? 0)) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'This game is no longer active.'], 409);
+    }
+    $shouldPause = $pausedValue === '1';
+    $pausedAt = (float)($run['paused_at'] ?? 0);
+    if ($shouldPause && $pausedAt <= 0) {
+        if ((int)($run['pause_count'] ?? 0) >= 5) {
+            tp_catch_pred_json(['ok' => false, 'error' => 'The five-pause limit for this round has been reached.'], 409);
+        }
+        $run['pause_count'] = (int)($run['pause_count'] ?? 0) + 1;
+        $run['paused_at'] = $now;
+    } elseif (!$shouldPause && $pausedAt > 0) {
+        $pauseCount = (int)($run['pause_count'] ?? 0);
+        $pauseLength = max(0.0, $now - $pausedAt);
+        if ($pauseCount < 0) {
+            // Establish the real play-clock origin after the preload/visibility handshake.
+            $run['started_at'] = $now;
+            $run['paused_total_seconds'] = 0;
+            $run['paused_at'] = 0;
+            $run['pause_count'] = 0;
+            tp_catch_pred_json(['ok' => true, 'paused' => false, 'elapsed_ms' => 0]);
+        }
+        if ($pauseCount >= 0 && (max(0.0, (float)($run['paused_total_seconds'] ?? 0)) + $pauseLength) > 120) {
+            $run['state'] = 'abandoned';
+            tp_catch_pred_json(['ok' => false, 'error' => 'This round reached its two-minute total pause limit. Start a new game.'], 409);
+        }
+        $run['paused_total_seconds'] = max(0.0, (float)($run['paused_total_seconds'] ?? 0)) + $pauseLength;
+        $run['paused_at'] = 0;
+    }
+    tp_catch_pred_json(['ok' => true, 'paused' => $shouldPause, 'elapsed_ms' => tp_catch_pred_elapsed_ms($run, $now)]);
+}
+
+if (($_POST['action'] ?? '') === 'hit_catch_pred_targets') {
+    if (!check_csrf()) { tp_catch_pred_json(['ok' => false, 'error' => 'Security check failed.'], 403); }
+    $roundToken = tp_post_string('round_token');
+    $targetTokensJson = tp_post_string('target_tokens');
+    $targetTokens = strlen($targetTokensJson) <= 1024 ? json_decode($targetTokensJson, true) : null;
+    if (!preg_match('/\A[a-f0-9]{48}\z/D', $roundToken) || !is_array($targetTokens)
+        || count($targetTokens) < 1 || count($targetTokens) > 8) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'Invalid game token.'], 400);
+    }
+    foreach ($targetTokens as $targetToken) {
+        if (!is_string($targetToken) || !preg_match('/\A[a-f0-9]{32}\z/D', $targetToken)) {
+            tp_catch_pred_json(['ok' => false, 'error' => 'Invalid target token.'], 400);
+        }
+    }
+    $targetTokens = array_values(array_unique($targetTokens));
+    if (!isset($_SESSION['catch_pred_runs'][$roundToken]) || !is_array($_SESSION['catch_pred_runs'][$roundToken])) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'This game has expired. Start a new round.'], 410);
+    }
+
+    $run =& $_SESSION['catch_pred_runs'][$roundToken];
+    if (($run['state'] ?? '') !== 'active' || microtime(true) > (float)($run['expires_at'] ?? 0)) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'This game is no longer active.'], 409);
+    }
+    if ((float)($run['paused_at'] ?? 0) > 0) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'Resume the game before registering a hit.'], 409);
+    }
+    $elapsedMs = tp_catch_pred_elapsed_ms($run);
+    $accepted = [];
+    $rejected = [];
+    foreach ($targetTokens as $targetToken) {
+        if (!isset($run['targets'][$targetToken]) || !is_array($run['targets'][$targetToken])) {
+            $rejected[] = $targetToken;
+            continue;
+        }
+        $target =& $run['targets'][$targetToken];
+        if (!empty($target['hit'])) {
+            $accepted[] = $targetToken;
+            unset($target);
+            continue;
+        }
+        $targetStartMs = (int)($target['start_offset_ms'] ?? 0);
+        $targetEndMs = $targetStartMs + (int)($target['flight_ms'] ?? 0) + 3000;
+        if ($elapsedMs < $targetStartMs || $elapsedMs > $targetEndMs) {
+            $rejected[] = $targetToken;
+            unset($target);
+            continue;
+        }
+        $target['hit'] = true;
+        $target['hit_at_ms'] = $elapsedMs;
+        $run['score'] = (int)($run['score'] ?? 0) + 1;
+        $accepted[] = $targetToken;
+        unset($target);
+    }
+    tp_catch_pred_json(['ok' => true, 'accepted' => $accepted, 'rejected' => $rejected, 'score' => (int)($run['score'] ?? 0)]);
+}
+
 // PDO connection (configure these env vars or replace with constants)
 $dsn = getenv('DB_DSN') ?: 'mysql:host=10.254.6.110;dbname=tiktokpredators;charset=utf8mb4';
 $dbu = getenv('DB_USER') ?: 'stiliam';
@@ -1797,6 +2002,32 @@ try {
       INDEX idx_notification_case (case_id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   ");
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+// --- Catch a Pred public leaderboard ---
+$tp_catch_pred_ready = false;
+try {
+  $pdo->exec(<<<SQL
+CREATE TABLE IF NOT EXISTS catch_pred_scores (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  round_token_hash CHAR(64) NOT NULL,
+  player_name VARCHAR(24) NOT NULL,
+  score SMALLINT UNSIGNED NOT NULL,
+  target_count SMALLINT UNSIGNED NOT NULL,
+  duration_ms INT UNSIGNED NOT NULL,
+  is_visible TINYINT(1) NOT NULL DEFAULT 1,
+  created_by BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  moderated_by BIGINT UNSIGNED NULL,
+  moderated_at DATETIME NULL,
+  UNIQUE KEY uq_catch_pred_round (round_token_hash),
+  INDEX idx_catch_pred_rank (is_visible, score, duration_ms, created_at),
+  INDEX idx_catch_pred_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+SQL
+  );
+  $tp_catch_pred_ready = true;
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
@@ -2664,6 +2895,252 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     if ($fp) { fpassthru($fp); fclose($fp); }
     else { readfile($absReal); }
     exit;
+}
+
+// Start a short-lived, session-bound Catch a Pred round.
+if (($_POST['action'] ?? '') === 'start_catch_pred_game') {
+    if (!check_csrf()) { tp_catch_pred_json(['ok' => false, 'error' => 'Security check failed. Please refresh and try again.'], 403); }
+    if (empty($tp_catch_pred_ready)) { tp_catch_pred_json(['ok' => false, 'error' => 'The game is temporarily unavailable.'], 503); }
+
+    tp_catch_pred_prune_runs();
+    $now = microtime(true);
+    $recentStarts = $_SESSION['catch_pred_recent_starts'] ?? [];
+    if (!is_array($recentStarts)) { $recentStarts = []; }
+    $recentStarts = array_values(array_filter($recentStarts, static fn ($started): bool => is_numeric($started) && (float)$started > $now - 300));
+    if (count($recentStarts) >= 10) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'You have started several games. Take a quick breather and try again shortly.'], 429);
+    }
+
+    try {
+        $profiles = tp_catch_pred_profiles($pdo);
+        if (!$profiles) { tp_catch_pred_json(['ok' => false, 'error' => 'There are no eligible verified profile photos to play with yet.'], 409); }
+        if (count($profiles) > 500) { tp_catch_pred_json(['ok' => false, 'error' => 'This round is currently too large to start safely.'], 503); }
+        shuffle($profiles);
+
+        foreach ($_SESSION['catch_pred_runs'] as &$oldRun) {
+            if (is_array($oldRun) && ($oldRun['state'] ?? '') === 'active') { $oldRun['state'] = 'abandoned'; }
+        }
+        unset($oldRun);
+
+        $roundToken = bin2hex(random_bytes(24));
+        $spawnGapMs = count($profiles) > 80 ? 700 : (count($profiles) > 40 ? 800 : 900);
+        $targetsForClient = [];
+        $targetsForSession = [];
+        $lastOffsetMs = 0;
+        foreach ($profiles as $index => $profile) {
+            $targetToken = bin2hex(random_bytes(16));
+            $offsetMs = $index * $spawnGapMs;
+            $flightMs = random_int(4800, 6800);
+            $targetsForClient[] = [
+                'token' => $targetToken,
+                'image_url' => (string)$profile['image_url'],
+                'start_offset_ms' => $offsetMs,
+                'flight_ms' => $flightMs,
+            ];
+            $targetsForSession[$targetToken] = [
+                'case_id' => (int)$profile['case_id'],
+                'start_offset_ms' => $offsetMs,
+                'flight_ms' => $flightMs,
+                'hit' => false,
+            ];
+            $lastOffsetMs = $offsetMs;
+        }
+
+        $roundStartedAt = microtime(true);
+        $_SESSION['catch_pred_runs'][$roundToken] = [
+            'state' => 'active',
+            'started_at' => $roundStartedAt,
+            'expires_at' => $roundStartedAt + max(900, (($lastOffsetMs + 6800) / 1000) + 300),
+            // Start paused; the browser resumes after its first target images are ready.
+            'paused_at' => $roundStartedAt,
+            'paused_total_seconds' => 0,
+            // -1 means the initial prepared-state resume is free; players then receive five pauses.
+            'pause_count' => -1,
+            'target_count' => count($targetsForSession),
+            'last_offset_ms' => $lastOffsetMs,
+            'targets' => $targetsForSession,
+            'score' => 0,
+        ];
+        $recentStarts[] = $now;
+        $_SESSION['catch_pred_recent_starts'] = $recentStarts;
+
+        tp_catch_pred_json([
+            'ok' => true,
+            'round_token' => $roundToken,
+            'targets' => $targetsForClient,
+            'leaderboard' => tp_catch_pred_leaderboard($pdo, 10),
+        ]);
+    } catch (Throwable $e) {
+        log_console('ERROR', 'CATCH A PRED START: ' . $e->getMessage());
+        tp_catch_pred_json(['ok' => false, 'error' => 'Unable to start the game right now. Please try again.'], 500);
+    }
+}
+
+// Finish once, calculate the accepted score, and issue a short-lived leaderboard claim when earned.
+if (($_POST['action'] ?? '') === 'finish_catch_pred_game') {
+    if (!check_csrf()) { tp_catch_pred_json(['ok' => false, 'error' => 'Security check failed.'], 403); }
+    if (empty($tp_catch_pred_ready)) { tp_catch_pred_json(['ok' => false, 'error' => 'The leaderboard is temporarily unavailable.'], 503); }
+    $roundToken = tp_post_string('round_token');
+    if (!preg_match('/\A[a-f0-9]{48}\z/D', $roundToken) || !isset($_SESSION['catch_pred_runs'][$roundToken]) || !is_array($_SESSION['catch_pred_runs'][$roundToken])) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'This game has expired. Start a new round.'], 410);
+    }
+
+    $run =& $_SESSION['catch_pred_runs'][$roundToken];
+    if (($run['state'] ?? '') === 'finished' || ($run['state'] ?? '') === 'saved') {
+        $result = $run['finish_result'] ?? null;
+        if (is_array($result)) { tp_catch_pred_json($result + ['ok' => true]); }
+    }
+    if (($run['state'] ?? '') !== 'active' || microtime(true) > (float)($run['expires_at'] ?? 0)) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'This game is no longer active.'], 409);
+    }
+    if ((float)($run['paused_at'] ?? 0) > 0) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'Resume the game before finishing the round.'], 409);
+    }
+
+    $durationMs = max(1, tp_catch_pred_elapsed_ms($run));
+    $minimumFinishMs = max(0, (int)($run['last_offset_ms'] ?? 0));
+    if ($durationMs < $minimumFinishMs) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'The round has not finished yet.'], 409);
+    }
+    $score = 0;
+    foreach (($run['targets'] ?? []) as $target) {
+        if (is_array($target) && !empty($target['hit'])) { $score++; }
+    }
+    $score = min($score, (int)($run['target_count'] ?? 0));
+
+    try {
+        $qualification = tp_catch_pred_qualification($pdo, $score, $durationMs);
+        $claimToken = !empty($qualification['qualifies']) ? bin2hex(random_bytes(24)) : '';
+        $run['state'] = 'finished';
+        $run['score'] = $score;
+        $run['duration_ms'] = $durationMs;
+        $run['finished_at'] = microtime(true);
+        $run['claim_token'] = $claimToken;
+        $run['claim_expires_at'] = microtime(true) + 600;
+        $result = [
+            'ok' => true,
+            'score' => $score,
+            'target_count' => (int)$run['target_count'],
+            'duration_ms' => $durationMs,
+            'qualifies' => (bool)$qualification['qualifies'],
+            'new_high_score' => (bool)$qualification['new_high_score'],
+            'rank' => $qualification['rank'],
+            'claim_token' => $claimToken,
+            'leaderboard' => $qualification['leaders'],
+        ];
+        $run['finish_result'] = $result;
+        tp_catch_pred_json($result);
+    } catch (Throwable $e) {
+        log_console('ERROR', 'CATCH A PRED FINISH: ' . $e->getMessage());
+        tp_catch_pred_json(['ok' => false, 'error' => 'Unable to finish this round right now.'], 500);
+    }
+}
+
+// Save a qualifying score with a public player name exactly once.
+if (($_POST['action'] ?? '') === 'save_catch_pred_score') {
+    if (!check_csrf()) { tp_catch_pred_json(['ok' => false, 'error' => 'Security check failed.'], 403); }
+    if (empty($tp_catch_pred_ready)) { tp_catch_pred_json(['ok' => false, 'error' => 'The leaderboard is temporarily unavailable.'], 503); }
+    $roundToken = tp_post_string('round_token');
+    $claimToken = tp_post_string('claim_token');
+    $playerName = tp_catch_pred_player_name(tp_post_string('player_name'));
+    if ($playerName === '') {
+        tp_catch_pred_json(['ok' => false, 'error' => 'Use 2–24 letters or numbers. Spaces, dots, apostrophes, underscores and hyphens are allowed.'], 422);
+    }
+    if (!preg_match('/\A[a-f0-9]{48}\z/D', $roundToken) || !preg_match('/\A[a-f0-9]{48}\z/D', $claimToken)
+        || !isset($_SESSION['catch_pred_runs'][$roundToken]) || !is_array($_SESSION['catch_pred_runs'][$roundToken])) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'This leaderboard place has expired.'], 410);
+    }
+
+    $run =& $_SESSION['catch_pred_runs'][$roundToken];
+    if (($run['state'] ?? '') !== 'finished' || !empty($run['saved'])
+        || microtime(true) > (float)($run['claim_expires_at'] ?? 0)
+        || !hash_equals((string)($run['claim_token'] ?? ''), $claimToken)
+    ) {
+        tp_catch_pred_json(['ok' => false, 'error' => 'This leaderboard place has expired or was already saved.'], 409);
+    }
+
+    $score = (int)($run['score'] ?? 0);
+    $targetCount = (int)($run['target_count'] ?? 0);
+    $durationMs = (int)($run['duration_ms'] ?? 0);
+    $lockHeld = false;
+    $scoreCommitted = false;
+    $response = null;
+    $responseStatus = 200;
+    try {
+        $lockHeld = (int)$pdo->query("SELECT GET_LOCK('catch_pred_leaderboard_save', 5)")->fetchColumn() === 1;
+        if (!$lockHeld) { throw new RuntimeException('Leaderboard save lock timed out.'); }
+        $qualification = tp_catch_pred_qualification($pdo, $score, $durationMs);
+        if (empty($qualification['qualifies'])) {
+            $response = ['ok' => false, 'error' => 'The leaderboard changed before this score was saved. Play again to reclaim a place.'];
+            $responseStatus = 409;
+        } else {
+            $pdo->beginTransaction();
+            $insert = $pdo->prepare(
+                'INSERT INTO catch_pred_scores (round_token_hash, player_name, score, target_count, duration_ms, created_by) '
+                . 'VALUES (?, ?, ?, ?, ?, ?)'
+            );
+            $insert->execute([
+                hash('sha256', $roundToken),
+                $playerName,
+                $score,
+                $targetCount,
+                $durationMs,
+                is_logged_in() ? (int)($_SESSION['user']['id'] ?? 0) ?: null : null,
+            ]);
+            $pdo->commit();
+            $scoreCommitted = true;
+            $run['state'] = 'saved';
+            $run['saved'] = true;
+            $run['claim_token'] = '';
+            $leaders = tp_catch_pred_leaderboard($pdo, 10);
+            $run['finish_result']['claim_token'] = '';
+            $run['finish_result']['qualifies'] = false;
+            $run['finish_result']['rank'] = null;
+            $run['finish_result']['leaderboard'] = $leaders;
+            $response = ['ok' => true, 'leaderboard' => $leaders];
+        }
+    } catch (Throwable $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
+        log_console('ERROR', 'CATCH A PRED SAVE: ' . $e->getMessage());
+        if ($scoreCommitted) {
+            // The score is durable; a leaderboard refresh problem must not invite an impossible retry.
+            $run['state'] = 'saved';
+            $run['saved'] = true;
+            $run['claim_token'] = '';
+            $run['finish_result']['claim_token'] = '';
+            $run['finish_result']['qualifies'] = false;
+            $run['finish_result']['rank'] = null;
+            $response = ['ok' => true, 'leaderboard' => [], 'leaderboard_stale' => true];
+            $responseStatus = 200;
+        } else {
+            $response = ['ok' => false, 'error' => 'Unable to save that score. Please try again.'];
+            $responseStatus = 500;
+        }
+    } finally {
+        if ($lockHeld) {
+            try { $pdo->query("SELECT RELEASE_LOCK('catch_pred_leaderboard_save')"); } catch (Throwable $e) {}
+        }
+    }
+    tp_catch_pred_json($response ?? ['ok' => false, 'error' => 'Unable to save that score.'], $responseStatus);
+}
+
+// Admin leaderboard moderation keeps the score row as an audit record but hides it publicly.
+if (($_POST['action'] ?? '') === 'delete_catch_pred_score') {
+    if (!check_csrf() || !is_admin()) {
+        flash('error', 'Unauthorized leaderboard action.');
+        header('Location: ?view=catch_a_pred#catch-pred-leaderboard'); exit;
+    }
+    $scoreId = max(0, (int)($_POST['score_id'] ?? 0));
+    if ($scoreId > 0 && !empty($tp_catch_pred_ready)) {
+        try {
+            $hide = $pdo->prepare('UPDATE catch_pred_scores SET is_visible = 0, moderated_by = ?, moderated_at = NOW() WHERE id = ? AND is_visible = 1 LIMIT 1');
+            $hide->execute([(int)($_SESSION['user']['id'] ?? 0), $scoreId]);
+            flash('success', $hide->rowCount() ? 'Leaderboard score removed.' : 'Leaderboard score was already removed.');
+        } catch (Throwable $e) {
+            flash('error', 'Unable to remove that leaderboard score.');
+        }
+    }
+    header('Location: ?view=catch_a_pred#catch-pred-leaderboard'); exit;
 }
 
 if (($_POST['action'] ?? '') === 'update_view_client') {
@@ -5606,6 +6083,13 @@ if (isset($pdo) && $pdo instanceof PDO) {
 $tpPageTitle = $tpSiteTitle . ' — Cases & Evidence';
 $tpMetaImageAlt = $tpPageTitle;
 
+if ($view === 'catch_a_pred') {
+  $tpPageTitle = 'Catch a Pred — Free Game — ' . $tpSiteTitle;
+  $tpMetaDescription = 'Play Catch a Pred: tap each moving profile photo from verified public cases, score points, and earn a place on the leaderboard.';
+  $tpMetaUrl = tp_absolute_url('/?view=catch_a_pred');
+  $tpMetaImageAlt = $tpPageTitle;
+}
+
 if ($view === 'case' && isset($pdo) && $pdo instanceof PDO) {
   $metaCaseCode = trim((string)($_GET['code'] ?? ''));
   if ($metaCaseCode !== '') {
@@ -5932,6 +6416,158 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
       max-height: 75vh;
       margin: 0 auto;
       object-fit: contain;
+    }
+
+    /* Catch a Pred */
+    .catch-pred-hero {
+      position: relative;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 88% 12%, rgba(255,193,7,.18), transparent 28%),
+        radial-gradient(circle at 8% 80%, rgba(124,77,255,.26), transparent 34%),
+        rgba(255,255,255,.055);
+    }
+    .catch-pred-kicker {
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      font-size: .72rem;
+      font-weight: 800;
+      color: #ffc107;
+    }
+    .catch-pred-hud {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+      gap: .65rem;
+      align-items: stretch;
+    }
+    .catch-pred-stat {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-width: 0;
+      padding: .55rem .8rem;
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: .8rem;
+      background: rgba(0,0,0,.18);
+    }
+    .catch-pred-stat-label { color: rgba(255,255,255,.6); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
+    .catch-pred-stat-value { font-size: clamp(1.05rem, 2.6vw, 1.45rem); font-weight: 800; line-height: 1.2; }
+    .catch-pred-arena {
+      position: relative;
+      height: 32rem;
+      height: clamp(22rem, 60svh, 37rem);
+      overflow: hidden;
+      isolation: isolate;
+      border: 1px solid rgba(255,255,255,.18);
+      border-radius: 1rem;
+      background:
+        linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px),
+        radial-gradient(circle at center, rgba(124,77,255,.2), transparent 48%),
+        #101216;
+      background-size: 42px 42px, 42px 42px, auto, auto;
+      cursor: crosshair;
+      overscroll-behavior: contain;
+      touch-action: manipulation;
+    }
+    .catch-pred-arena::before,
+    .catch-pred-arena::after {
+      content: "";
+      position: absolute;
+      z-index: -1;
+      pointer-events: none;
+      background: rgba(255,255,255,.05);
+    }
+    .catch-pred-arena::before { width: 1px; inset: 0 auto 0 50%; }
+    .catch-pred-arena::after { height: 1px; inset: 50% 0 auto; }
+    .catch-pred-arena.is-paused .catch-pred-target { filter: grayscale(.6) brightness(.65); }
+    .catch-pred-target {
+      position: absolute;
+      left: 0;
+      top: 0;
+      z-index: 2;
+      width: clamp(4.75rem, 10vw, 6.75rem);
+      aspect-ratio: 1;
+      padding: .22rem;
+      border: 3px solid #fff;
+      border-radius: 50%;
+      background: var(--tp-primary);
+      box-shadow: 0 0 0 .3rem rgba(124,77,255,.24), 0 .6rem 1.5rem rgba(0,0,0,.55);
+      touch-action: manipulation;
+      user-select: none;
+      -webkit-user-select: none;
+      will-change: transform;
+      cursor: crosshair;
+    }
+    .catch-pred-target img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      object-fit: cover;
+      pointer-events: none;
+      user-select: none;
+      -webkit-user-drag: none;
+    }
+    .catch-pred-target:focus-visible { outline: 4px solid #ffc107; outline-offset: 5px; }
+    .catch-pred-target.is-hit {
+      border-color: var(--tp-accent);
+      box-shadow: 0 0 0 .55rem rgba(25,195,125,.42), 0 0 2rem rgba(25,195,125,.75);
+      pointer-events: none;
+    }
+    .catch-pred-hit-pop {
+      position: absolute;
+      z-index: 4;
+      transform: translate(-50%, -50%);
+      color: #fff;
+      font-size: 1.6rem;
+      font-weight: 900;
+      text-shadow: 0 2px 12px #000;
+      pointer-events: none;
+      animation: catch-pred-pop .55s ease-out forwards;
+    }
+    @keyframes catch-pred-pop {
+      from { opacity: 1; scale: .8; }
+      to { opacity: 0; scale: 1.35; translate: 0 -2rem; }
+    }
+    .catch-pred-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 10;
+      display: grid;
+      place-items: center;
+      padding: 1.25rem;
+      text-align: center;
+      background: rgba(9,10,13,.82);
+      backdrop-filter: blur(5px);
+    }
+    .catch-pred-overlay-panel { max-width: 31rem; }
+    .catch-pred-rank {
+      display: inline-grid;
+      place-items: center;
+      width: 2rem;
+      height: 2rem;
+      border-radius: 50%;
+      background: rgba(255,255,255,.1);
+      font-weight: 800;
+    }
+    .catch-pred-rank.is-podium { color: #16120a; background: #ffc107; }
+    .catch-pred-leaderboard td, .catch-pred-leaderboard th { vertical-align: middle; }
+    .catch-pred-score-line { white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .catch-pred-empty {
+      padding: 2rem 1rem;
+      text-align: center;
+      color: rgba(255,255,255,.58);
+    }
+    @media (max-width: 575.98px) {
+      .catch-pred-hud { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .catch-pred-hud .catch-pred-pause { grid-column: 1 / -1; }
+      .catch-pred-arena { height: clamp(22rem, 62svh, 31rem); }
+      .catch-pred-target { width: 4.8rem; }
+      .catch-pred-stat { padding: .45rem .55rem; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .catch-pred-hit-pop { animation-duration: .01ms; }
     }
     
     /* Restricted-mode media blurring (non-admins on Restricted cases) */
@@ -6309,6 +6945,7 @@ document.addEventListener('DOMContentLoaded', function () {
           <a class="nav-link" href="#" data-bs-toggle="modal" data-bs-target="#createCaseModal"><i class="bi bi-folder-plus"></i><span>Create Case</span></a>
         <?php endif; ?>
         <a class="nav-link <?php echo ($view === 'scanner') ? 'active' : ''; ?>" href="?view=scanner#scanner"><i class="bi bi-camera-fill"></i><span>Face Scanner</span></a>
+        <a class="nav-link <?php echo ($view === 'catch_a_pred') ? 'active' : ''; ?>" href="?view=catch_a_pred#catch-a-pred"><i class="bi bi-crosshair2"></i><span>Catch a Pred</span></a>
         <a class="nav-link <?php echo ($view === 'faq') ? 'active' : ''; ?>" href="?view=faq#faq"><i class="bi bi-question-circle"></i><span>FAQ</span></a>
         <a class="nav-link <?php echo in_array($view, ['removal', 'removal_request'], true) ? 'active' : ''; ?>" href="?view=removal#removal"><i class="bi bi-shield-exclamation"></i><span>Removal Requests</span></a>
       </nav>
@@ -8247,6 +8884,844 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     }
   })();
   </script>
+
+  <?php if ($view === 'catch_a_pred'): ?>
+  <?php
+    $catchPredLeaderboard = [];
+    $catchPredProfileCount = 0;
+    if (!empty($tp_catch_pred_ready)) {
+      try {
+        $catchPredLeaderboard = tp_catch_pred_leaderboard($pdo, 10);
+        $catchPredProfileCount = count(tp_catch_pred_profiles($pdo));
+      } catch (Throwable $e) {
+        $tp_catch_pred_ready = false;
+      }
+    }
+  ?>
+  <main class="py-4" id="catch-a-pred">
+    <div class="container-xl">
+      <section class="card glass catch-pred-hero mb-4" aria-labelledby="catchPredTitle">
+        <div class="card-body p-4 p-lg-5">
+          <div class="row align-items-center g-4">
+            <div class="col-lg-8">
+              <div class="catch-pred-kicker mb-2"><i class="bi bi-controller me-2"></i>Free game</div>
+              <h1 class="display-5 fw-bold mb-3" id="catchPredTitle">Catch a Pred</h1>
+              <p class="lead text-secondary mb-3">Line up your shot and tap each moving profile photo. Every verified hit is worth one point, and every eligible profile appears once per round.</p>
+              <div class="d-flex flex-wrap gap-2 small">
+                <span class="badge rounded-pill text-bg-dark border px-3 py-2"><i class="bi bi-crosshair2 me-1 text-warning"></i>Tap or click to hit</span>
+                <span class="badge rounded-pill text-bg-dark border px-3 py-2"><i class="bi bi-plus-circle me-1 text-success"></i>1 point per face</span>
+                <span class="badge rounded-pill text-bg-dark border px-3 py-2"><i class="bi bi-images me-1 text-primary"></i><?php echo (int)$catchPredProfileCount; ?> photo<?php echo $catchPredProfileCount === 1 ? '' : 's'; ?> this round</span>
+              </div>
+            </div>
+            <div class="col-lg-4 text-lg-end">
+              <i class="bi bi-crosshair2 text-warning" aria-hidden="true" style="font-size:clamp(5rem,12vw,8rem);filter:drop-shadow(0 0 1.25rem rgba(255,193,7,.32));"></i>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="row g-4">
+        <section class="col-12 col-xl-8" aria-labelledby="catchPredArenaTitle">
+          <div class="card glass h-100">
+            <div class="card-header d-flex align-items-center justify-content-between gap-2">
+              <h2 class="h5 mb-0" id="catchPredArenaTitle"><i class="bi bi-bullseye me-2 text-danger"></i>Game Arena</h2>
+              <span class="small text-secondary"><i class="bi bi-phone me-1"></i>Mouse, touch or keyboard</span>
+            </div>
+            <div class="card-body">
+              <div class="catch-pred-hud mb-3" aria-label="Current game score">
+                <div class="catch-pred-stat">
+                  <span class="catch-pred-stat-label">Score</span>
+                  <output class="catch-pred-stat-value" id="catchPredScore" aria-live="polite">0</output>
+                </div>
+                <div class="catch-pred-stat">
+                  <span class="catch-pred-stat-label">Remaining</span>
+                  <output class="catch-pred-stat-value" id="catchPredRemaining">—</output>
+                </div>
+                <div class="catch-pred-stat">
+                  <span class="catch-pred-stat-label">Time</span>
+                  <output class="catch-pred-stat-value" id="catchPredTime">0:00</output>
+                </div>
+                <button class="btn btn-outline-light catch-pred-pause" id="catchPredPause" type="button" title="Up to five pauses per round" disabled aria-pressed="false">
+                  <i class="bi bi-pause-fill me-1"></i><span>Pause</span>
+                </button>
+              </div>
+
+              <div class="catch-pred-arena" id="catchPredArena" role="group" aria-label="Catch a Pred moving target area">
+                <div class="catch-pred-overlay" id="catchPredOverlay">
+                  <div class="catch-pred-overlay-panel">
+                    <?php if (empty($tp_catch_pred_ready)): ?>
+                      <i class="bi bi-tools display-4 text-warning d-block mb-3"></i>
+                      <h3 class="h4">Game temporarily unavailable</h3>
+                      <p class="text-secondary mb-0">The leaderboard is being prepared. Please check back shortly.</p>
+                    <?php elseif ($catchPredProfileCount < 1): ?>
+                      <i class="bi bi-image display-4 text-secondary d-block mb-3"></i>
+                      <h3 class="h4">No targets yet</h3>
+                      <p class="text-secondary mb-0">A verified public case with a profile photo is needed before a round can begin.</p>
+                    <?php else: ?>
+                      <i class="bi bi-crosshair2 display-3 text-warning d-block mb-3"></i>
+                      <h3 class="h3">Ready?</h3>
+                      <p class="text-secondary">Hit as many moving faces as you can. Each target only crosses the arena once.</p>
+                      <button class="btn btn-warning btn-lg px-4" id="catchPredStart" type="button">
+                        <i class="bi bi-play-fill me-1"></i>Start Game
+                      </button>
+                    <?php endif; ?>
+                  </div>
+                </div>
+                <p class="visually-hidden" id="catchPredStatus" role="status" aria-live="polite"></p>
+              </div>
+              <p class="small text-secondary mt-3 mb-0"><i class="bi bi-shield-check me-1 text-success"></i>Scores are calculated from one-use target hits accepted by the server. Restricted and Sealed cases are never included.</p>
+            </div>
+          </div>
+        </section>
+
+        <aside class="col-12 col-xl-4" aria-labelledby="catchPredLeaderboardTitle">
+          <div class="card glass mb-4" id="catch-pred-leaderboard">
+            <div class="card-header d-flex align-items-center justify-content-between gap-2">
+              <h2 class="h5 mb-0" id="catchPredLeaderboardTitle"><i class="bi bi-trophy-fill me-2 text-warning"></i>Leaderboard</h2>
+              <span class="badge text-bg-warning text-dark">Top 10</span>
+            </div>
+            <div class="table-responsive">
+              <table class="table table-hover catch-pred-leaderboard mb-0">
+                <thead>
+                  <tr><th scope="col">#</th><th scope="col">Player</th><th scope="col" class="text-end">Score</th><th scope="col" class="text-end">Time</th></tr>
+                </thead>
+                <tbody id="catchPredLeaderboardBody">
+                  <?php if (!$catchPredLeaderboard): ?>
+                    <tr><td colspan="4" class="catch-pred-empty"><i class="bi bi-stars d-block fs-2 mb-2"></i>No scores yet. Be the first!</td></tr>
+                  <?php else: foreach ($catchPredLeaderboard as $rank => $leader): ?>
+                    <tr>
+                      <td><span class="catch-pred-rank<?php echo $rank < 3 ? ' is-podium' : ''; ?>"><?php echo $rank + 1; ?></span></td>
+                      <td>
+                        <div class="fw-semibold text-break"><?php echo htmlspecialchars((string)$leader['player_name']); ?></div>
+                        <div class="small text-secondary"><?php echo htmlspecialchars(date('d M Y', strtotime((string)$leader['created_at']))); ?></div>
+                        <?php if (is_admin()): ?>
+                          <form method="post" action="" class="mt-1" onsubmit="return confirm('Remove this score from the public leaderboard?');">
+                            <input type="hidden" name="action" value="delete_catch_pred_score">
+                            <?php csrf_field(); ?>
+                            <input type="hidden" name="score_id" value="<?php echo (int)$leader['id']; ?>">
+                            <button type="submit" class="btn btn-outline-danger btn-sm py-0"><i class="bi bi-eye-slash me-1"></i>Hide</button>
+                          </form>
+                        <?php endif; ?>
+                      </td>
+                      <td class="text-end fw-bold catch-pred-score-line"><?php echo (int)$leader['score']; ?><span class="text-secondary fw-normal">/<?php echo (int)$leader['target_count']; ?></span></td>
+                      <td class="text-end small catch-pred-score-line"><?php echo number_format(((int)$leader['duration_ms']) / 1000, 1); ?>s</td>
+                    </tr>
+                  <?php endforeach; endif; ?>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="card glass">
+            <div class="card-body">
+              <h2 class="h6"><i class="bi bi-lightning-charge-fill me-2 text-warning"></i>How to play</h2>
+              <ol class="small text-secondary mb-0 ps-3">
+                <li class="mb-2">Press <strong class="text-white">Start Game</strong> and watch the whole arena.</li>
+                <li class="mb-2">Tap, click, or keyboard-select each circular profile photo before it escapes.</li>
+                <li class="mb-2">Score one point for every verified hit. A face never scores twice.</li>
+                <li>Make the top ten and choose a public leaderboard name.</li>
+              </ol>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </div>
+  </main>
+
+  <div class="modal fade" id="catchPredNameModal" tabindex="-1" aria-labelledby="catchPredNameModalTitle" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title h5" id="catchPredNameModalTitle"><i class="bi bi-trophy-fill text-warning me-2"></i>You made the leaderboard!</h2>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Skip saving score"></button>
+        </div>
+        <form id="catchPredNameForm">
+          <div class="modal-body">
+            <p id="catchPredNameMessage" class="mb-3">Enter a name to claim your place.</p>
+            <label class="form-label" for="catchPredPlayerName">Leaderboard name</label>
+            <input class="form-control form-control-lg" id="catchPredPlayerName" name="player_name" type="text" minlength="2" maxlength="24" autocomplete="nickname" pattern="[^&lt;&gt;]{2,24}" aria-describedby="catchPredNameHelp catchPredNameError" required>
+            <div class="form-text" id="catchPredNameHelp">This name will be public. Use 2–24 characters and do not include personal information.</div>
+            <div class="alert alert-danger mt-3 mb-0 d-none" id="catchPredNameError" role="alert"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-outline-light" data-bs-dismiss="modal">Skip</button>
+            <button class="btn btn-warning" id="catchPredSaveScore" type="submit"><i class="bi bi-trophy-fill me-1"></i>Save Score</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function () {
+    'use strict';
+    var arena = document.getElementById('catchPredArena');
+    var startButton = document.getElementById('catchPredStart');
+    if (!arena || !startButton) return;
+
+    var csrfToken = <?php echo json_encode($_SESSION['csrf_token'] ?? ''); ?>;
+    var overlay = document.getElementById('catchPredOverlay');
+    var scoreOutput = document.getElementById('catchPredScore');
+    var remainingOutput = document.getElementById('catchPredRemaining');
+    var timeOutput = document.getElementById('catchPredTime');
+    var pauseButton = document.getElementById('catchPredPause');
+    var statusOutput = document.getElementById('catchPredStatus');
+    var leaderboardBody = document.getElementById('catchPredLeaderboardBody');
+    var nameModalElement = document.getElementById('catchPredNameModal');
+    var nameModal = nameModalElement && window.bootstrap ? bootstrap.Modal.getOrCreateInstance(nameModalElement) : null;
+    var nameForm = document.getElementById('catchPredNameForm');
+    var playerNameInput = document.getElementById('catchPredPlayerName');
+    var nameError = document.getElementById('catchPredNameError');
+    var saveScoreButton = document.getElementById('catchPredSaveScore');
+    var prefersReducedMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var isAdmin = <?php echo is_admin() ? 'true' : 'false'; ?>;
+
+    var game = {
+      generation: 0,
+      playing: false,
+      paused: false,
+      finishing: false,
+      roundToken: '',
+      claimToken: '',
+      targets: [],
+      nextTarget: 0,
+      active: new Map(),
+      pendingHits: new Set(),
+      hitQueue: new Set(),
+      hitFlushPromise: null,
+      hitFlushTimer: 0,
+      pauseChangePending: false,
+      resolved: 0,
+      score: 0,
+      confirmedScore: 0,
+      activeElapsed: 0,
+      lastFrame: 0,
+      frameId: 0,
+      lastLane: -1,
+      modalTimer: 0
+    };
+
+    function postAction(action, values) {
+      var formData = new FormData();
+      formData.append('action', action);
+      formData.append('csrf_token', csrfToken);
+      Object.keys(values || {}).forEach(function (key) { formData.append(key, values[key]); });
+      return fetch('', { method: 'POST', body: formData, credentials: 'same-origin', headers: { 'Accept': 'application/json' } })
+        .then(function (response) {
+          return response.json().catch(function () { return { ok: false, error: 'Invalid server response.' }; })
+            .then(function (data) {
+              if (!response.ok || !data.ok) throw new Error(data.error || 'Request failed.');
+              return data;
+            });
+        });
+    }
+
+    function formatTime(milliseconds) {
+      var totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+      return Math.floor(totalSeconds / 60) + ':' + String(totalSeconds % 60).padStart(2, '0');
+    }
+
+    function setStatus(message) {
+      if (statusOutput) statusOutput.textContent = message;
+    }
+
+    function updateHud() {
+      scoreOutput.textContent = String(game.score);
+      remainingOutput.textContent = game.targets.length ? String(Math.max(0, game.targets.length - game.resolved)) : '—';
+      timeOutput.textContent = formatTime(game.activeElapsed);
+    }
+
+    function cancelTargets() {
+      game.active.forEach(function (target) {
+        target.done = true;
+        if (target.animation) target.animation.cancel();
+        if (target.timeout) window.clearTimeout(target.timeout);
+        if (target.button) target.button.remove();
+      });
+      game.active.clear();
+      arena.querySelectorAll('.catch-pred-hit-pop').forEach(function (node) { node.remove(); });
+    }
+
+    function resetGame() {
+      game.generation++;
+      if (game.modalTimer) window.clearTimeout(game.modalTimer);
+      game.modalTimer = 0;
+      game.playing = false;
+      game.paused = false;
+      game.finishing = false;
+      game.roundToken = '';
+      game.claimToken = '';
+      game.targets = [];
+      game.nextTarget = 0;
+      game.resolved = 0;
+      game.score = 0;
+      game.confirmedScore = 0;
+      game.activeElapsed = 0;
+      game.lastFrame = 0;
+      game.lastLane = -1;
+      game.pauseChangePending = false;
+      if (game.hitFlushTimer) window.clearTimeout(game.hitFlushTimer);
+      game.hitFlushTimer = 0;
+      game.hitQueue.clear();
+      game.hitFlushPromise = null;
+      if (game.frameId) cancelAnimationFrame(game.frameId);
+      game.frameId = 0;
+      cancelTargets();
+      game.pendingHits.clear();
+      if (nameModal) nameModal.hide();
+      if (nameForm) nameForm.reset();
+      if (playerNameInput) playerNameInput.removeAttribute('aria-invalid');
+      if (nameError) nameError.classList.add('d-none');
+      if (saveScoreButton) {
+        saveScoreButton.disabled = false;
+        saveScoreButton.innerHTML = '<i class="bi bi-trophy-fill me-1"></i>Save Score';
+      }
+      arena.classList.remove('is-paused');
+      pauseButton.disabled = true;
+      pauseButton.setAttribute('aria-pressed', 'false');
+      pauseButton.innerHTML = '<i class="bi bi-pause-fill me-1"></i><span>Pause</span>';
+      updateHud();
+    }
+
+    function showOverlay(title, message, buttonLabel, buttonIcon) {
+      overlay.innerHTML = '';
+      var panel = document.createElement('div');
+      panel.className = 'catch-pred-overlay-panel';
+      var icon = document.createElement('i');
+      icon.className = 'bi ' + (buttonIcon || 'bi-crosshair2') + ' display-3 text-warning d-block mb-3';
+      icon.setAttribute('aria-hidden', 'true');
+      var heading = document.createElement('h3');
+      heading.className = 'h3';
+      heading.textContent = title;
+      heading.tabIndex = -1;
+      var copy = document.createElement('p');
+      copy.className = 'text-secondary';
+      copy.textContent = message;
+      panel.append(icon, heading, copy);
+      if (buttonLabel) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'btn btn-warning btn-lg px-4';
+        button.innerHTML = '<i class="bi bi-arrow-repeat me-1"></i>';
+        button.append(document.createTextNode(buttonLabel));
+        button.addEventListener('click', startRound);
+        panel.appendChild(button);
+      }
+      overlay.appendChild(panel);
+      overlay.classList.remove('d-none');
+      window.setTimeout(function () {
+        var focusTarget = panel.querySelector('button') || heading;
+        if (focusTarget && overlay.isConnected) focusTarget.focus({ preventScroll: true });
+      }, 0);
+    }
+
+    function createHitPop(button) {
+      var arenaRect = arena.getBoundingClientRect();
+      var buttonRect = button.getBoundingClientRect();
+      var pop = document.createElement('span');
+      pop.className = 'catch-pred-hit-pop';
+      pop.textContent = '+1';
+      pop.style.left = (buttonRect.left - arenaRect.left + buttonRect.width / 2) + 'px';
+      pop.style.top = (buttonRect.top - arenaRect.top + buttonRect.height / 2) + 'px';
+      arena.appendChild(pop);
+      window.setTimeout(function () { pop.remove(); }, 600);
+    }
+
+    function flushHitQueue() {
+      if (game.hitFlushTimer) window.clearTimeout(game.hitFlushTimer);
+      game.hitFlushTimer = 0;
+      if (game.hitFlushPromise) {
+        return game.hitFlushPromise.then(flushHitQueue, flushHitQueue);
+      }
+      if (!game.hitQueue.size || !game.roundToken) return Promise.resolve();
+
+      var generation = game.generation;
+      var roundToken = game.roundToken;
+      var tokens = Array.from(game.hitQueue).slice(0, 8);
+      tokens.forEach(function (token) { game.hitQueue.delete(token); });
+      function sendBatch(attempt) {
+        return postAction('hit_catch_pred_targets', {
+          round_token: roundToken,
+          target_tokens: JSON.stringify(tokens)
+        }).catch(function (error) {
+          if (attempt < 1 && generation === game.generation && roundToken === game.roundToken) {
+            return new Promise(function (resolve) { window.setTimeout(resolve, 250); }).then(function () { return sendBatch(attempt + 1); });
+          }
+          throw error;
+        });
+      }
+      var request = sendBatch(0).then(function (data) {
+        if (generation !== game.generation || roundToken !== game.roundToken) return;
+        game.confirmedScore = Math.max(game.confirmedScore, Number(data.score) || 0);
+        if (Array.isArray(data.rejected) && data.rejected.length) {
+          setStatus(data.rejected.length + ' hit' + (data.rejected.length === 1 ? '' : 's') + ' could not be verified.');
+        }
+      }).catch(function (error) {
+        if (generation === game.generation && roundToken === game.roundToken) {
+          setStatus('A hit batch could not be verified: ' + error.message);
+        }
+      });
+      game.hitFlushPromise = request;
+      game.pendingHits.add(request);
+      return request.finally(function () {
+        game.pendingHits.delete(request);
+        if (generation === game.generation && roundToken === game.roundToken && game.hitFlushPromise === request) {
+          game.hitFlushPromise = null;
+          if (game.hitQueue.size) game.hitFlushTimer = window.setTimeout(flushHitQueue, 50);
+        }
+      });
+    }
+
+    function queueHit(token) {
+      game.hitQueue.add(token);
+      if (game.hitQueue.size >= 6) {
+        flushHitQueue();
+      } else if (!game.hitFlushTimer) {
+        game.hitFlushTimer = window.setTimeout(flushHitQueue, 1500);
+      }
+    }
+
+    function flushAllHits() {
+      return flushHitQueue().then(function () {
+        return game.hitQueue.size || game.hitFlushPromise ? flushAllHits() : undefined;
+      });
+    }
+
+    function resolveTarget(target, wasHit) {
+      if (!target || target.done) return;
+      var restoreFocus = document.activeElement === target.button;
+      target.done = true;
+      if (target.animation) target.animation.cancel();
+      if (target.timeout) window.clearTimeout(target.timeout);
+      game.active.delete(target.token);
+      game.resolved++;
+
+      if (wasHit) {
+        game.score++;
+        target.button.disabled = true;
+        target.button.classList.add('is-hit');
+        createHitPop(target.button);
+        setStatus('Hit. Score ' + game.score + '.');
+
+        queueHit(target.token);
+        window.setTimeout(function () {
+          target.button.remove();
+          if (restoreFocus && game.playing) {
+            var nextTargetButton = arena.querySelector('.catch-pred-target:not(:disabled)');
+            (nextTargetButton || pauseButton).focus({ preventScroll: true });
+          }
+        }, 220);
+      } else {
+        target.button.remove();
+        if (restoreFocus && game.playing) {
+          var nextButton = arena.querySelector('.catch-pred-target:not(:disabled)');
+          (nextButton || pauseButton).focus({ preventScroll: true });
+        }
+      }
+      updateHud();
+      checkForRoundEnd();
+    }
+
+    function spawnTarget(targetData) {
+      if (!game.playing) return;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'catch-pred-target';
+      button.dataset.targetToken = targetData.token;
+      button.setAttribute('aria-label', 'Photo target ' + (game.nextTarget) + ' of ' + game.targets.length);
+      var image = document.createElement('img');
+      image.src = targetData.image_url;
+      image.alt = '';
+      image.draggable = false;
+      button.appendChild(image);
+      arena.appendChild(button);
+
+      var arenaWidth = arena.clientWidth;
+      var arenaHeight = arena.clientHeight;
+      var size = button.offsetWidth || 84;
+      var laneCount = Math.max(3, Math.min(6, Math.floor((arenaHeight - 20) / (size + 8))));
+      var lane = Math.floor(Math.random() * laneCount);
+      if (laneCount > 1 && lane === game.lastLane) lane = (lane + 1 + Math.floor(Math.random() * (laneCount - 1))) % laneCount;
+      game.lastLane = lane;
+      var laneHeight = (arenaHeight - size - 16) / Math.max(1, laneCount - 1);
+      var top = 8 + lane * laneHeight;
+      button.style.top = Math.max(4, Math.min(arenaHeight - size - 4, top)) + 'px';
+
+      var fromLeft = Math.random() >= .5;
+      var startX = fromLeft ? -size - 16 : arenaWidth + 16;
+      var endX = fromLeft ? arenaWidth + 16 : -size - 16;
+      var keyframes;
+      var reducedCell = '';
+      if (prefersReducedMotion) {
+        var stillSlots = Math.max(2, Math.min(4, Math.floor(arenaWidth / (size + 18))));
+        var occupiedCells = new Set();
+        game.active.forEach(function (activeTarget) {
+          if (activeTarget.reducedCell) occupiedCells.add(activeTarget.reducedCell);
+        });
+        var selectedCell = null;
+        for (var laneOffset = 0; laneOffset < laneCount && !selectedCell; laneOffset++) {
+          var candidateLane = (lane + laneOffset) % laneCount;
+          for (var slotOffset = 0; slotOffset < stillSlots; slotOffset++) {
+            var candidateSlot = (game.nextTarget + slotOffset) % stillSlots;
+            var candidateKey = candidateLane + ':' + candidateSlot;
+            if (!occupiedCells.has(candidateKey)) {
+              selectedCell = { lane: candidateLane, slot: candidateSlot, key: candidateKey };
+              break;
+            }
+          }
+        }
+        if (selectedCell) {
+          lane = selectedCell.lane;
+          reducedCell = selectedCell.key;
+          button.style.top = Math.max(4, Math.min(arenaHeight - size - 4, 8 + lane * laneHeight)) + 'px';
+        }
+        var stillSlot = selectedCell ? selectedCell.slot : (game.nextTarget + lane) % stillSlots;
+        var stillX = 8 + stillSlot * Math.max(0, (arenaWidth - size - 16) / Math.max(1, stillSlots - 1));
+        keyframes = [{ transform: 'translate3d(' + stillX + 'px,0,0)' }, { transform: 'translate3d(' + stillX + 'px,0,0)' }];
+      } else {
+        keyframes = [{ transform: 'translate3d(' + startX + 'px,0,0)' }, { transform: 'translate3d(' + endX + 'px,0,0)' }];
+      }
+
+      var target = { token: targetData.token, button: button, animation: null, timeout: 0, done: false, reducedCell: reducedCell };
+      game.active.set(target.token, target);
+      image.addEventListener('error', function () { resolveTarget(target, false); }, { once: true });
+      var flightMs = Number(targetData.flight_ms) || 5600;
+      // Web Animations is feature-checked before a round starts.
+      target.animation = button.animate(keyframes, { duration: flightMs, easing: 'linear', fill: 'forwards' });
+      target.animation.onfinish = function () { resolveTarget(target, false); };
+      if (game.paused) target.animation.pause();
+    }
+
+    function gameFrame(timestamp, generation) {
+      if (!game.playing || generation !== game.generation) return;
+      if (!game.lastFrame) game.lastFrame = timestamp;
+      if (!game.paused) {
+        game.activeElapsed += Math.max(0, timestamp - game.lastFrame);
+        while (game.nextTarget < game.targets.length
+          && Number(game.targets[game.nextTarget].start_offset_ms) <= game.activeElapsed) {
+          var target = game.targets[game.nextTarget];
+          game.nextTarget++;
+          spawnTarget(target);
+        }
+        updateHud();
+      }
+      game.lastFrame = timestamp;
+      game.frameId = requestAnimationFrame(function (nextTimestamp) { gameFrame(nextTimestamp, generation); });
+    }
+
+    function checkForRoundEnd() {
+      if (!game.playing || game.finishing || game.nextTarget < game.targets.length || game.active.size > 0) return;
+      finishRound();
+    }
+
+    function abandonLocalRound(message) {
+      game.playing = false;
+      game.finishing = true;
+      if (game.frameId) cancelAnimationFrame(game.frameId);
+      game.frameId = 0;
+      cancelTargets();
+      pauseButton.disabled = true;
+      showOverlay('Round ended', message, 'Play Again', 'bi-flag-fill');
+      setStatus('Round ended. ' + message);
+    }
+
+    function applyPausedState(paused, announcement) {
+      game.paused = paused;
+      arena.classList.toggle('is-paused', paused);
+      game.active.forEach(function (target) {
+        if (!target.animation) return;
+        if (paused) target.animation.pause(); else target.animation.play();
+      });
+      pauseButton.setAttribute('aria-pressed', paused ? 'true' : 'false');
+      pauseButton.innerHTML = paused
+        ? '<i class="bi bi-play-fill me-1"></i><span>Resume</span>'
+        : '<i class="bi bi-pause-fill me-1"></i><span>Pause</span>';
+      if (announcement) setStatus(announcement);
+    }
+
+    function setPaused(paused, announcement) {
+      if (!game.playing || game.finishing || game.pauseChangePending || game.paused === paused) return;
+      var generation = game.generation;
+      var roundToken = game.roundToken;
+      game.pauseChangePending = true;
+      pauseButton.disabled = true;
+
+      var prepare = Promise.resolve();
+      if (paused) {
+        // Freeze the visible round immediately, then send any clicks already made before pausing the server clock.
+        applyPausedState(true, announcement);
+        prepare = flushAllHits();
+      }
+      prepare.then(function () {
+        return postAction('set_catch_pred_pause', { round_token: roundToken, paused: paused ? '1' : '0' });
+      }).then(function (data) {
+        if (generation !== game.generation || roundToken !== game.roundToken) return;
+        if (Number.isFinite(Number(data.elapsed_ms))) game.activeElapsed = Math.max(0, Number(data.elapsed_ms));
+        if (!paused) applyPausedState(false, announcement);
+      }).catch(function (error) {
+        if (generation !== game.generation || roundToken !== game.roundToken) return;
+        if (paused && !document.hidden) {
+          applyPausedState(false, 'The game could not be paused: ' + error.message);
+        } else {
+          abandonLocalRound(error.message);
+        }
+      }).finally(function () {
+        if (generation !== game.generation || roundToken !== game.roundToken) return;
+        game.pauseChangePending = false;
+        pauseButton.disabled = !game.playing || game.finishing;
+      });
+    }
+
+    function preloadOpeningTargets(targets) {
+      var openingTargets = targets.slice(0, Math.min(6, targets.length));
+      var loads = openingTargets.map(function (target) {
+        return new Promise(function (resolve) {
+          var image = new Image();
+          var settled = false;
+          function done() { if (!settled) { settled = true; resolve(); } }
+          image.addEventListener('load', done, { once: true });
+          image.addEventListener('error', done, { once: true });
+          image.src = target.image_url;
+          if (image.complete) done();
+        });
+      });
+      return Promise.race([
+        Promise.all(loads),
+        new Promise(function (resolve) { window.setTimeout(resolve, 1800); })
+      ]);
+    }
+
+    function waitUntilVisible() {
+      if (!document.hidden) return Promise.resolve();
+      return new Promise(function (resolve) {
+        function onVisibilityChange() {
+          if (document.hidden) return;
+          document.removeEventListener('visibilitychange', onVisibilityChange);
+          resolve();
+        }
+        document.addEventListener('visibilitychange', onVisibilityChange);
+      });
+    }
+
+    function resumePreparedWhenVisible(generation) {
+      if (generation !== game.generation) return Promise.reject({ stale: true });
+      return waitUntilVisible().then(function () {
+        if (generation !== game.generation) return Promise.reject({ stale: true });
+        return postAction('set_catch_pred_pause', { round_token: game.roundToken, paused: '0' });
+      }).then(function (data) {
+        if (generation !== game.generation) return Promise.reject({ stale: true });
+        if (!document.hidden) return data;
+        return postAction('set_catch_pred_pause', { round_token: game.roundToken, paused: '1' }).then(function () {
+          return resumePreparedWhenVisible(generation);
+        });
+      });
+    }
+
+    function startRound() {
+      resetGame();
+      var generation = game.generation;
+      if (typeof Element.prototype.animate !== 'function') {
+        showOverlay('Browser update needed', 'This game needs a modern browser with animation support.', '', 'bi-browser-chrome');
+        return;
+      }
+      overlay.classList.remove('d-none');
+      showOverlay('Loading targets…', 'Preparing every eligible verified profile for this round.', '', 'bi-hourglass-split');
+
+      postAction('start_catch_pred_game', {}).then(function (data) {
+        if (generation !== game.generation) return Promise.reject({ stale: true });
+        game.roundToken = data.round_token;
+        game.targets = Array.isArray(data.targets) ? data.targets : [];
+        if (!game.targets.length) throw new Error('No eligible targets were returned.');
+        renderLeaderboard(data.leaderboard || []);
+        return preloadOpeningTargets(game.targets);
+      }).then(function () {
+        if (generation !== game.generation) return Promise.reject({ stale: true });
+        // The server starts prepared rounds paused; this initial resume does not consume a player pause.
+        return resumePreparedWhenVisible(generation);
+      }).then(function (data) {
+        if (generation !== game.generation) return;
+        return beginVisibleRound(data, generation);
+      }).catch(function (error) {
+        if (generation !== game.generation || (error && error.stale)) return;
+        showOverlay('Unable to start', error.message, 'Try Again', 'bi-exclamation-triangle');
+      });
+    }
+
+    function beginVisibleRound(data, generation) {
+        if (generation !== game.generation) return;
+        if (Number.isFinite(Number(data.elapsed_ms))) game.activeElapsed = Math.max(0, Number(data.elapsed_ms));
+        game.playing = true;
+        game.lastFrame = performance.now();
+        pauseButton.disabled = false;
+        overlay.classList.add('d-none');
+        updateHud();
+        setStatus('Game started with ' + game.targets.length + ' targets.');
+        pauseButton.focus({ preventScroll: true });
+        game.frameId = requestAnimationFrame(function (timestamp) { gameFrame(timestamp, generation); });
+    }
+
+    function finishRound() {
+      var generation = game.generation;
+      var roundToken = game.roundToken;
+      game.finishing = true;
+      game.playing = false;
+      pauseButton.disabled = true;
+      if (game.frameId) cancelAnimationFrame(game.frameId);
+      setStatus('Round complete. Checking the final score.');
+      showOverlay('Checking score…', 'Verifying your one-use target hits with the server.', '', 'bi-shield-check');
+
+      flushAllHits().then(function () {
+        if (generation !== game.generation || roundToken !== game.roundToken) return Promise.reject({ stale: true });
+        return postAction('finish_catch_pred_game', { round_token: roundToken });
+      }).then(function (data) {
+        if (generation !== game.generation || roundToken !== game.roundToken) return;
+        game.score = Number(data.score) || 0;
+        game.claimToken = data.claim_token || '';
+        scoreOutput.textContent = String(game.score);
+        remainingOutput.textContent = '0';
+        renderLeaderboard(data.leaderboard || []);
+        var summary = 'You hit ' + game.score + ' of ' + Number(data.target_count || game.targets.length) + ' targets in ' + (Number(data.duration_ms || 0) / 1000).toFixed(1) + ' seconds.';
+        showOverlay(data.qualifies ? 'Leaderboard score!' : 'Round complete', summary, 'Play Again', data.qualifies ? 'bi-trophy-fill' : 'bi-flag-fill');
+
+        if (data.qualifies && game.claimToken && nameModal) {
+          document.getElementById('catchPredNameModalTitle').innerHTML = '<i class="bi bi-trophy-fill text-warning me-2"></i>' + (data.new_high_score ? 'New high score!' : 'You made the leaderboard!');
+          document.getElementById('catchPredNameMessage').textContent = summary + (data.rank ? ' Your provisional rank is #' + data.rank + '.' : '');
+          playerNameInput.value = '';
+          playerNameInput.removeAttribute('aria-invalid');
+          nameError.classList.add('d-none');
+          nameModal.show();
+        }
+      }).catch(function (error) {
+        if (generation !== game.generation || (error && error.stale)) return;
+        showOverlay('Score check failed', error.message, 'Play Again', 'bi-exclamation-triangle');
+      });
+    }
+
+    function renderLeaderboard(rows) {
+      if (!leaderboardBody || !Array.isArray(rows)) return;
+      leaderboardBody.replaceChildren();
+      if (!rows.length) {
+        var emptyRow = document.createElement('tr');
+        var emptyCell = document.createElement('td');
+        emptyCell.colSpan = 4;
+        emptyCell.className = 'catch-pred-empty';
+        emptyCell.textContent = 'No scores yet. Be the first!';
+        emptyRow.appendChild(emptyCell);
+        leaderboardBody.appendChild(emptyRow);
+        return;
+      }
+      rows.forEach(function (row, index) {
+        var tr = document.createElement('tr');
+        var rankCell = document.createElement('td');
+        var rank = document.createElement('span');
+        rank.className = 'catch-pred-rank' + (index < 3 ? ' is-podium' : '');
+        rank.textContent = String(index + 1);
+        rankCell.appendChild(rank);
+
+        var nameCell = document.createElement('td');
+        var name = document.createElement('div');
+        name.className = 'fw-semibold text-break';
+        name.textContent = String(row.player_name || 'Player');
+        nameCell.appendChild(name);
+        if (row.created_at) {
+          var date = document.createElement('div');
+          date.className = 'small text-secondary';
+          var dateParts = String(row.created_at).slice(0, 10).split('-');
+          date.textContent = dateParts.length === 3 ? dateParts[2] + '/' + dateParts[1] + '/' + dateParts[0] : String(row.created_at);
+          nameCell.appendChild(date);
+        }
+        if (isAdmin && Number(row.id) > 0) {
+          var form = document.createElement('form');
+          form.method = 'post';
+          form.action = '';
+          form.className = 'mt-1';
+          [['action', 'delete_catch_pred_score'], ['csrf_token', csrfToken], ['score_id', String(Number(row.id))]].forEach(function (field) {
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = field[0];
+            input.value = field[1];
+            form.appendChild(input);
+          });
+          var hideButton = document.createElement('button');
+          hideButton.type = 'submit';
+          hideButton.className = 'btn btn-outline-danger btn-sm py-0';
+          hideButton.innerHTML = '<i class="bi bi-eye-slash me-1"></i>Hide';
+          form.appendChild(hideButton);
+          form.addEventListener('submit', function (event) {
+            if (!window.confirm('Remove this score from the public leaderboard?')) event.preventDefault();
+          });
+          nameCell.appendChild(form);
+        }
+
+        var scoreCell = document.createElement('td');
+        scoreCell.className = 'text-end fw-bold catch-pred-score-line';
+        scoreCell.textContent = String(Number(row.score) || 0) + '/' + String(Number(row.target_count) || 0);
+
+        var timeCell = document.createElement('td');
+        timeCell.className = 'text-end small catch-pred-score-line';
+        timeCell.textContent = ((Number(row.duration_ms) || 0) / 1000).toFixed(1) + 's';
+        tr.append(rankCell, nameCell, scoreCell, timeCell);
+        leaderboardBody.appendChild(tr);
+      });
+    }
+
+    arena.addEventListener('click', function (event) {
+      var button = event.target.closest('.catch-pred-target');
+      if (!button || !game.playing || game.paused) return;
+      var target = game.active.get(button.dataset.targetToken || '');
+      resolveTarget(target, true);
+    });
+
+    pauseButton.addEventListener('click', function () { setPaused(!game.paused, game.paused ? 'Game resumed.' : 'Game paused.'); });
+    startButton.addEventListener('click', startRound);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden && game.playing && !game.paused) setPaused(true, 'Game paused because this tab was hidden. Press Resume when ready.');
+    });
+
+    if (nameForm) {
+      nameForm.addEventListener('submit', function (event) {
+        event.preventDefault();
+        if (!nameForm.checkValidity()) {
+          nameForm.reportValidity();
+          return;
+        }
+        if (!game.claimToken || !game.roundToken) return;
+        var generation = game.generation;
+        var roundToken = game.roundToken;
+        var claimToken = game.claimToken;
+        nameError.classList.add('d-none');
+        playerNameInput.removeAttribute('aria-invalid');
+        saveScoreButton.disabled = true;
+        saveScoreButton.innerHTML = '<span class="spinner-border spinner-border-sm me-1" role="status"></span>Saving…';
+        postAction('save_catch_pred_score', {
+          round_token: roundToken,
+          claim_token: claimToken,
+          player_name: playerNameInput.value
+        }).then(function (data) {
+          if (generation !== game.generation || roundToken !== game.roundToken || claimToken !== game.claimToken) return;
+          if (!data.leaderboard_stale) renderLeaderboard(data.leaderboard || []);
+          game.claimToken = '';
+          nameModal.hide();
+          setStatus(data.leaderboard_stale ? 'High score saved. Refresh the page to update the leaderboard.' : 'High score saved to the public leaderboard.');
+        }).catch(function (error) {
+          if (generation !== game.generation || roundToken !== game.roundToken || claimToken !== game.claimToken) return;
+          nameError.textContent = error.message;
+          nameError.classList.remove('d-none');
+          playerNameInput.setAttribute('aria-invalid', 'true');
+        }).finally(function () {
+          if (generation !== game.generation || roundToken !== game.roundToken) return;
+          saveScoreButton.disabled = false;
+          saveScoreButton.innerHTML = '<i class="bi bi-trophy-fill me-1"></i>Save Score';
+        });
+      });
+      playerNameInput.addEventListener('input', function () {
+        playerNameInput.removeAttribute('aria-invalid');
+        nameError.classList.add('d-none');
+      });
+    }
+  })();
+  </script>
+  <?php endif; ?>
 
   <?php if ($view === 'user_profile'): ?>
   <main class="py-4" id="user-profile">
@@ -12297,6 +13772,7 @@ document.addEventListener('click', function (ev) {
         &copy; <?php echo date('Y'); ?> <?php echo htmlspecialchars($tpSiteTitle); ?>. All rights reserved.
       </div>
       <div class="d-flex gap-3 small">
+        <a href="?view=catch_a_pred#catch-a-pred" class="link-light text-decoration-none">Catch a Pred</a>
         <a href="?view=removal#removal" class="link-light text-decoration-none">Removal Requests</a>
         <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#privacyModal">Privacy</a>
         <a href="#" class="link-light text-decoration-none" data-bs-toggle="modal" data-bs-target="#termsModal">Terms</a>
