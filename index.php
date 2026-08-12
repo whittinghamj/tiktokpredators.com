@@ -6436,7 +6436,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     }
     .catch-pred-hud {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+      grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
       gap: .65rem;
       align-items: stretch;
     }
@@ -6452,6 +6452,16 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     }
     .catch-pred-stat-label { color: rgba(255,255,255,.6); font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
     .catch-pred-stat-value { font-size: clamp(1.05rem, 2.6vw, 1.45rem); font-weight: 800; line-height: 1.2; }
+    .catch-pred-stat.is-speed-up {
+      border-color: rgba(255,193,7,.75);
+      box-shadow: 0 0 1.15rem rgba(255,193,7,.24);
+      animation: catch-pred-speed-pulse .65s ease-out;
+    }
+    @keyframes catch-pred-speed-pulse {
+      0% { scale: 1; }
+      45% { scale: 1.07; }
+      100% { scale: 1; }
+    }
     .catch-pred-arena {
       position: relative;
       height: 32rem;
@@ -6560,7 +6570,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
       color: rgba(255,255,255,.58);
     }
     @media (max-width: 575.98px) {
-      .catch-pred-hud { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      .catch-pred-hud { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .catch-pred-hud .catch-pred-pause { grid-column: 1 / -1; }
       .catch-pred-arena { height: clamp(22rem, 62svh, 31rem); }
       .catch-pred-target { width: 4.8rem; }
@@ -6568,6 +6578,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     }
     @media (prefers-reduced-motion: reduce) {
       .catch-pred-hit-pop { animation-duration: .01ms; }
+      .catch-pred-stat.is-speed-up { animation: none; }
     }
     
     /* Restricted-mode media blurring (non-admins on Restricted cases) */
@@ -8910,6 +8921,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
               <div class="d-flex flex-wrap gap-2 small">
                 <span class="badge rounded-pill text-bg-dark border px-3 py-2"><i class="bi bi-crosshair2 me-1 text-warning"></i>Tap or click to hit</span>
                 <span class="badge rounded-pill text-bg-dark border px-3 py-2"><i class="bi bi-plus-circle me-1 text-success"></i>1 point per face</span>
+                <span class="badge rounded-pill text-bg-dark border px-3 py-2"><i class="bi bi-speedometer2 me-1 text-warning"></i>Faster every 10 points</span>
                 <span class="badge rounded-pill text-bg-dark border px-3 py-2"><i class="bi bi-images me-1 text-primary"></i><?php echo (int)$catchPredProfileCount; ?> photo<?php echo $catchPredProfileCount === 1 ? '' : 's'; ?> this round</span>
               </div>
             </div>
@@ -8940,6 +8952,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 <div class="catch-pred-stat">
                   <span class="catch-pred-stat-label">Time</span>
                   <output class="catch-pred-stat-value" id="catchPredTime">0:00</output>
+                </div>
+                <div class="catch-pred-stat" id="catchPredSpeedStat">
+                  <span class="catch-pred-stat-label">Speed</span>
+                  <output class="catch-pred-stat-value" id="catchPredSpeed">1.0×</output>
                 </div>
                 <button class="btn btn-outline-light catch-pred-pause" id="catchPredPause" type="button" title="Up to five pauses per round" disabled aria-pressed="false">
                   <i class="bi bi-pause-fill me-1"></i><span>Pause</span>
@@ -9019,6 +9035,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                 <li class="mb-2">Press <strong class="text-white">Start Game</strong> and watch the whole arena.</li>
                 <li class="mb-2">Tap, click, or keyboard-select each circular profile photo before it escapes.</li>
                 <li class="mb-2">Score one point for every verified hit. A face never scores twice.</li>
+                <li class="mb-2">Every ten points increases the speed of all current and future targets.</li>
                 <li>Make the top ten and choose a public leaderboard name.</li>
               </ol>
             </div>
@@ -9064,6 +9081,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     var scoreOutput = document.getElementById('catchPredScore');
     var remainingOutput = document.getElementById('catchPredRemaining');
     var timeOutput = document.getElementById('catchPredTime');
+    var speedOutput = document.getElementById('catchPredSpeed');
+    var speedStat = document.getElementById('catchPredSpeedStat');
     var pauseButton = document.getElementById('catchPredPause');
     var statusOutput = document.getElementById('catchPredStatus');
     var leaderboardBody = document.getElementById('catchPredLeaderboardBody');
@@ -9094,6 +9113,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       resolved: 0,
       score: 0,
       confirmedScore: 0,
+      speedMultiplier: 1,
       activeElapsed: 0,
       lastFrame: 0,
       frameId: 0,
@@ -9129,6 +9149,35 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       scoreOutput.textContent = String(game.score);
       remainingOutput.textContent = game.targets.length ? String(Math.max(0, game.targets.length - game.resolved)) : '—';
       timeOutput.textContent = formatTime(game.activeElapsed);
+      speedOutput.textContent = game.speedMultiplier.toFixed(1) + '×';
+    }
+
+    function speedForScore(score) {
+      // Increase crossing speed by 20% at 10, 20, 30 points, and so on.
+      return 1 + Math.floor(Math.max(0, score) / 10) * .2;
+    }
+
+    function updateDifficulty(verifiedScore, announce) {
+      var nextSpeed = speedForScore(verifiedScore);
+      if (Math.abs(nextSpeed - game.speedMultiplier) < .001) return false;
+      game.speedMultiplier = nextSpeed;
+      game.active.forEach(function (target) {
+        if (!target.animation) return;
+        if (typeof target.animation.updatePlaybackRate === 'function') {
+          target.animation.updatePlaybackRate(nextSpeed);
+        } else {
+          target.animation.playbackRate = nextSpeed;
+        }
+      });
+      updateHud();
+      if (speedStat) {
+        speedStat.classList.remove('is-speed-up');
+        void speedStat.offsetWidth;
+        speedStat.classList.add('is-speed-up');
+        window.setTimeout(function () { speedStat.classList.remove('is-speed-up'); }, 700);
+      }
+      if (announce) setStatus('Speed up! Targets are now moving at ' + nextSpeed.toFixed(1) + ' times speed.');
+      return true;
     }
 
     function cancelTargets() {
@@ -9156,6 +9205,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       game.resolved = 0;
       game.score = 0;
       game.confirmedScore = 0;
+      game.speedMultiplier = 1;
       game.activeElapsed = 0;
       game.lastFrame = 0;
       game.lastLane = -1;
@@ -9253,8 +9303,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       var request = sendBatch(0).then(function (data) {
         if (generation !== game.generation || roundToken !== game.roundToken) return;
         game.confirmedScore = Math.max(game.confirmedScore, Number(data.score) || 0);
-        if (Array.isArray(data.rejected) && data.rejected.length) {
-          setStatus(data.rejected.length + ' hit' + (data.rejected.length === 1 ? '' : 's') + ' could not be verified.');
+        var rejectedCount = Array.isArray(data.rejected) ? data.rejected.length : 0;
+        if (rejectedCount) {
+          game.score = Math.max(game.confirmedScore, game.score - rejectedCount);
+          updateHud();
+        }
+        var spedUp = updateDifficulty(game.confirmedScore, true);
+        if (rejectedCount && !spedUp) {
+          setStatus(rejectedCount + ' hit' + (rejectedCount === 1 ? '' : 's') + ' could not be verified.');
         }
       }).catch(function (error) {
         if (generation === game.generation && roundToken === game.roundToken) {
@@ -9304,6 +9360,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
         setStatus('Hit. Score ' + game.score + '.');
 
         queueHit(target.token);
+        // Verify potential 10-point milestones immediately so speed uses accepted points.
+        if (game.score % 10 === 0) flushHitQueue();
         window.setTimeout(function () {
           target.button.remove();
           if (restoreFocus && game.playing) {
@@ -9388,6 +9446,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       var flightMs = Number(targetData.flight_ms) || 5600;
       // Web Animations is feature-checked before a round starts.
       target.animation = button.animate(keyframes, { duration: flightMs, easing: 'linear', fill: 'forwards' });
+      if (typeof target.animation.updatePlaybackRate === 'function') {
+        target.animation.updatePlaybackRate(game.speedMultiplier);
+      } else {
+        target.animation.playbackRate = game.speedMultiplier;
+      }
       target.animation.onfinish = function () { resolveTarget(target, false); };
       if (game.paused) target.animation.pause();
     }
@@ -9576,6 +9639,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
       }).then(function (data) {
         if (generation !== game.generation || roundToken !== game.roundToken) return;
         game.score = Number(data.score) || 0;
+        game.confirmedScore = game.score;
+        updateDifficulty(game.confirmedScore, false);
         game.claimToken = data.claim_token || '';
         scoreOutput.textContent = String(game.score);
         remainingOutput.textContent = '0';
