@@ -914,10 +914,6 @@ function tp_create_user_notification(PDO $pdo, int $userId, string $type, string
     return $html;
   }
 $view = $_GET['view'] ?? 'cases';
-if (in_array($view, ['cyber_watch', 'sleep_live'], true)) {
-    require __DIR__ . '/cyber-watch.php';
-    exit;
-}
 function throttle(){
     $now = time();
     if ($now - ($_SESSION['auth_last'] ?? 0) < 3) { sleep(1); }
@@ -6961,7 +6957,6 @@ document.addEventListener('DOMContentLoaded', function () {
         <?php endif; ?>
         <a class="nav-link <?php echo ($view === 'scanner') ? 'active' : ''; ?>" href="?view=scanner#scanner"><i class="bi bi-camera-fill"></i><span>Face Scanner</span></a>
         <a class="nav-link <?php echo ($view === 'catch_a_pred') ? 'active' : ''; ?>" href="?view=catch_a_pred#catch-a-pred"><i class="bi bi-crosshair2"></i><span>Catch a Pred</span></a>
-        <a class="nav-link" href="?view=cyber_watch" title="Open the simulated cyber-threat sleep scene"><i class="bi bi-globe2"></i><span>Cyber Watch</span></a>
         <a class="nav-link <?php echo ($view === 'faq') ? 'active' : ''; ?>" href="?view=faq#faq"><i class="bi bi-question-circle"></i><span>FAQ</span></a>
         <a class="nav-link <?php echo in_array($view, ['removal', 'removal_request'], true) ? 'active' : ''; ?>" href="?view=removal#removal"><i class="bi bi-shield-exclamation"></i><span>Removal Requests</span></a>
       </nav>
