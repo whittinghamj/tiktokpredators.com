@@ -2835,22 +2835,36 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     $isRestricted = ($sens === 'Restricted');
     $rotationDegrees = (int)($row['rotation_degrees'] ?? 0);
     if (!in_array($rotationDegrees, [0, 90, 180, 270], true)) { $rotationDegrees = 0; }
+    $isThumbnailRequest = $isImage && (($_GET['thumbnail'] ?? null) === '1');
 
     // For restricted cases: non-admins must not get raw images.
     if ($isRestricted && !$canReviewRawEvidence && !$isImage) {
         http_response_code(403); exit('Restricted');
     }
 
-    // Rotated images and restricted previews are rendered from the immutable original.
-    if ($isImage && ($rotationDegrees !== 0 || ($isRestricted && !$canReviewRawEvidence))) {
+    // Evidence responses do not need to retain the PHP session lock while media is encoded or streamed.
+    if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
+
+    // Rotated images, restricted previews and gallery thumbnails are rendered from the immutable original.
+    if ($isImage && ($rotationDegrees !== 0 || ($isRestricted && !$canReviewRawEvidence) || $isThumbnailRequest)) {
         $renderMime = null;
         $renderError = '';
         $img = tp_load_evidence_display_image($absReal, $rotationDegrees, $renderMime, $renderError);
         if (!($img instanceof GdImage) || $renderMime === null) {
-            http_response_code(415); exit('Unsupported media');
+            // Thumbnail generation is an optimisation. If an otherwise viewable image is outside
+            // the safe GD decoder limits (for example GIF, animated WebP or a very large JPEG),
+            // fall back to the original response instead of showing a broken gallery tile.
+            $canFallBackToOriginal = $isThumbnailRequest
+                && $rotationDegrees === 0
+                && (!$isRestricted || $canReviewRawEvidence);
+            if (!$canFallBackToOriginal) {
+                http_response_code(415); exit('Unsupported media');
+            }
+            $img = null;
+            $renderMime = null;
         }
 
-        if ($isRestricted && !$canReviewRawEvidence) {
+        if ($img instanceof GdImage && $renderMime !== null && $isRestricted && !$canReviewRawEvidence) {
             // Downscale to max width 640 (keeping aspect)
             $w = imagesx($img); $h = imagesy($img);
             $maxW = 640;
@@ -2877,20 +2891,116 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
             exit;
         }
 
-        $extension = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'][$renderMime] ?? 'img';
-        header('Content-Type: ' . $renderMime);
-        header('Content-Disposition: inline; filename="evidence-' . $eid . '.' . $extension . '"');
-        $outputOk = tp_output_evidence_display_image($img, $renderMime);
-        $img = null;
-        if (!$outputOk) { log_console('ERROR', 'Unable to encode rotated evidence #' . $eid); }
-        exit;
+        if ($img instanceof GdImage && $renderMime !== null && $isThumbnailRequest) {
+            $width = imagesx($img);
+            $height = imagesy($img);
+            $maxDimension = 720;
+            $scale = ($width > 0 && $height > 0)
+                ? min(1, $maxDimension / $width, $maxDimension / $height)
+                : 0;
+            if ($scale <= 0) {
+                $img = null;
+                http_response_code(500); exit('Unable to render thumbnail');
+            }
+            if ($scale < 1) {
+                $thumbWidth = max(1, (int)round($width * $scale));
+                $thumbHeight = max(1, (int)round($height * $scale));
+                $thumbnail = imagecreatetruecolor($thumbWidth, $thumbHeight);
+                if ($thumbnail instanceof GdImage && in_array($renderMime, ['image/png', 'image/webp'], true)) {
+                    imagealphablending($thumbnail, false);
+                    imagesavealpha($thumbnail, true);
+                    $transparent = imagecolorallocatealpha($thumbnail, 0, 0, 0, 127);
+                    imagefill($thumbnail, 0, 0, $transparent);
+                }
+                if (!($thumbnail instanceof GdImage) || !imagecopyresampled($thumbnail, $img, 0, 0, 0, 0, $thumbWidth, $thumbHeight, $width, $height)) {
+                    $thumbnail = null;
+                    $img = null;
+                    http_response_code(500); exit('Unable to render thumbnail');
+                }
+                $img = null;
+                $img = $thumbnail;
+                $thumbnail = null;
+            }
+        }
+
+        if ($img instanceof GdImage && $renderMime !== null) {
+            $extension = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'][$renderMime] ?? 'img';
+            header('Content-Type: ' . $renderMime);
+            header('Content-Disposition: inline; filename="evidence-' . $eid . ($isThumbnailRequest ? '-thumbnail' : '') . '.' . $extension . '"');
+            $outputOk = tp_output_evidence_display_image($img, $renderMime);
+            $img = null;
+            if (!$outputOk) { log_console('ERROR', 'Unable to encode evidence preview #' . $eid); }
+            exit;
+        }
     }
 
-    // Unrotated, unrestricted evidence is streamed byte-for-byte as uploaded.
+    // Unrotated, unrestricted evidence is streamed byte-for-byte with single-range support for media previews/seeking.
     $size = @filesize($absReal);
     header('Content-Type: ' . $mime);
-    if ($size) { header('Content-Length: ' . $size); }
     header('Content-Disposition: inline; filename="' . basename($absReal) . '"');
+    if (is_int($size) && $size >= 0) {
+        $rangeHeader = trim((string)($_SERVER['HTTP_RANGE'] ?? ''));
+        $ifRangeHeader = trim((string)($_SERVER['HTTP_IF_RANGE'] ?? ''));
+        header('Accept-Ranges: bytes');
+        if ($size === 0) {
+            if ($rangeHeader !== '' && $ifRangeHeader === '' && stripos($rangeHeader, 'bytes=') === 0) {
+                http_response_code(416);
+                header('Content-Range: bytes */0');
+            }
+            header('Content-Length: 0');
+            exit;
+        }
+        $start = 0;
+        $end = $size - 1;
+        $applyRange = $rangeHeader !== ''
+            && $ifRangeHeader === ''
+            && stripos($rangeHeader, 'bytes=') === 0
+            && strpos($rangeHeader, ',') === false
+            && preg_match('/^bytes=(\d*)-(\d*)$/i', $rangeHeader, $rangeMatch)
+            && !($rangeMatch[1] === '' && $rangeMatch[2] === '');
+        if ($applyRange) {
+            if ($rangeMatch[1] === '') {
+                $suffixLength = (int)$rangeMatch[2];
+                if ($suffixLength <= 0) {
+                    http_response_code(416);
+                    header('Content-Range: bytes */' . $size);
+                    exit;
+                }
+                $start = max(0, $size - $suffixLength);
+            } else {
+                $start = (int)$rangeMatch[1];
+                if ($start >= $size) {
+                    http_response_code(416);
+                    header('Content-Range: bytes */' . $size);
+                    exit;
+                }
+                if ($rangeMatch[2] !== '') { $end = min($end, (int)$rangeMatch[2]); }
+            }
+            if ($end < $start) {
+                http_response_code(416);
+                header('Content-Range: bytes */' . $size);
+                exit;
+            }
+            http_response_code(206);
+            header('Content-Range: bytes ' . $start . '-' . $end . '/' . $size);
+        }
+        $length = $end - $start + 1;
+        header('Content-Length: ' . $length);
+        $fp = fopen($absReal, 'rb');
+        if (!$fp || ($start > 0 && fseek($fp, $start) !== 0)) {
+            if (is_resource($fp)) { fclose($fp); }
+            http_response_code(500); exit('Unable to stream evidence');
+        }
+        $remaining = $length;
+        while ($remaining > 0 && !feof($fp) && connection_status() === CONNECTION_NORMAL) {
+            $chunk = fread($fp, min(8192, $remaining));
+            if ($chunk === false || $chunk === '') { break; }
+            echo $chunk;
+            $remaining -= strlen($chunk);
+        }
+        fclose($fp);
+        exit;
+    }
     $fp = fopen($absReal, 'rb');
     if ($fp) { fpassthru($fp); fclose($fp); }
     else { readfile($absReal); }
@@ -6404,9 +6514,119 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
       .webhook-actions { justify-content: flex-start; }
     }
     
-    /* Evidence modal: full-width media */
+    /* Case evidence groups and full-screen media viewer */
+    .case-evidence-section + .case-evidence-section {
+      border-top: 1px solid rgba(255,255,255,.12);
+      margin-top: 1.5rem;
+      padding-top: 1.5rem;
+    }
+    .case-media-thumb {
+      background: rgba(0,0,0,.28);
+      border: 1px solid rgba(255,255,255,.14);
+      border-radius: .65rem;
+      color: inherit;
+      display: block;
+      overflow: hidden;
+      padding: 0;
+      position: relative;
+      transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease;
+      width: 100%;
+    }
+    .case-media-thumb:hover,
+    .case-media-thumb:focus-visible {
+      border-color: rgba(255,255,255,.45);
+      box-shadow: 0 .5rem 1.5rem rgba(0,0,0,.28);
+      outline: 0;
+      transform: translateY(-2px);
+    }
+    .case-media-thumb-frame {
+      align-items: center;
+      aspect-ratio: 4 / 3;
+      background: #090b0d;
+      display: flex;
+      justify-content: center;
+      overflow: hidden;
+      position: relative;
+    }
+    .case-media-thumb-frame img {
+      height: 100%;
+      object-fit: cover;
+      width: 100%;
+    }
+    .case-media-video-placeholder {
+      align-items: center;
+      background: radial-gradient(circle at center, rgba(124,77,255,.24), rgba(9,11,13,.96) 68%);
+      color: rgba(255,255,255,.82);
+      display: flex;
+      flex-direction: column;
+      gap: .35rem;
+      height: 100%;
+      justify-content: center;
+      width: 100%;
+    }
+    .case-media-video-placeholder .bi { font-size: 2.25rem; }
+    .case-media-video-thumb {
+      height: 100%;
+      inset: 0;
+      object-fit: cover;
+      opacity: 0;
+      pointer-events: none;
+      position: absolute;
+      transition: opacity .15s ease;
+      width: 100%;
+    }
+    .case-media-video-thumb.is-ready { opacity: 1; }
+    .case-media-play-badge {
+      align-items: center;
+      background: rgba(0,0,0,.72);
+      border: 1px solid rgba(255,255,255,.3);
+      border-radius: 50%;
+      display: flex;
+      height: 2.75rem;
+      justify-content: center;
+      left: 50%;
+      position: absolute;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      width: 2.75rem;
+      z-index: 2;
+    }
+    .case-media-play-badge .bi { font-size: 1.35rem; margin-left: .1rem; }
+    .case-media-meta {
+      min-height: 2.15rem;
+      padding: .45rem .2rem 0;
+    }
+    .case-evidence-table-wrap .dataTables_filter input,
+    .case-evidence-table-wrap .dataTables_length select {
+      background-color: #212529;
+      border-color: #495057;
+      color: #f8f9fa;
+    }
+    .case-evidence-table-wrap .dataTables_info,
+    .case-evidence-table-wrap .dataTables_length,
+    .case-evidence-table-wrap .dataTables_filter {
+      color: rgba(255,255,255,.65) !important;
+    }
+    .case-evidence-table-wrap table.dataTable { min-width: 44rem; }
+    .case-evidence-table-wrap table.dataTable th:first-child,
+    .case-evidence-table-wrap table.dataTable td:first-child { min-width: 14rem; }
+    @media (max-width: 767.98px) {
+      .case-evidence-table-wrap table.dataTable th:last-child,
+      .case-evidence-table-wrap table.dataTable td:last-child {
+        background: #212529;
+        box-shadow: -.5rem 0 .75rem rgba(0,0,0,.25);
+        position: sticky;
+        right: 0;
+        z-index: 1;
+      }
+      .case-evidence-table-wrap table.dataTable th:last-child {
+        background: #2b3035;
+        z-index: 2;
+      }
+    }
     .evidence-modal .modal-dialog { max-width: 95vw; }
-    .evidence-modal .modal-body { padding: 0; }
+    .evidence-modal .modal-dialog.modal-fullscreen { max-width: none; }
+    .evidence-modal .modal-body { padding: 0; position: relative; }
     .evidence-modal img,
     .evidence-modal video,
     .evidence-modal iframe { width: 100%; height: auto; display: block; object-fit: contain; }
@@ -6416,6 +6636,74 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
       max-height: 75vh;
       margin: 0 auto;
       object-fit: contain;
+    }
+    .evidence-modal .modal-fullscreen .modal-content {
+      height: 100vh;
+      height: 100dvh;
+    }
+    .evidence-modal .modal-fullscreen .modal-body {
+      min-height: 0;
+      overflow: hidden;
+    }
+    .evidence-modal .modal-fullscreen .modal-body > .row {
+      --bs-gutter-x: 0;
+      --bs-gutter-y: 0;
+      height: 100%;
+      margin: 0;
+    }
+    .evidence-modal .modal-fullscreen #evPreviewColumn {
+      height: 100%;
+      padding: 0;
+    }
+    .evidence-modal .modal-fullscreen #evPreview {
+      border-radius: 0 !important;
+      height: 100%;
+      max-height: 100%;
+      min-height: 0;
+    }
+    .evidence-modal .modal-fullscreen #evPreview img,
+    .evidence-modal .modal-fullscreen #evPreview video,
+    .evidence-modal .modal-fullscreen #evPreview iframe {
+      height: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      width: 100%;
+    }
+    .evidence-gallery-nav {
+      align-items: center;
+      background: rgba(0,0,0,.64);
+      border: 1px solid rgba(255,255,255,.3);
+      border-radius: 50%;
+      color: #fff;
+      display: flex;
+      height: 3rem;
+      justify-content: center;
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 3rem;
+      z-index: 5;
+    }
+    .evidence-gallery-nav:hover,
+    .evidence-gallery-nav:focus-visible { background: rgba(124,77,255,.9); color: #fff; }
+    .evidence-gallery-nav:disabled { opacity: .3; }
+    .evidence-gallery-prev { left: .75rem; }
+    .evidence-gallery-next { right: .75rem; }
+    .evidence-gallery-position {
+      background: rgba(0,0,0,.68);
+      border-radius: 999px;
+      bottom: .75rem;
+      color: #fff;
+      left: 50%;
+      padding: .3rem .7rem;
+      position: absolute;
+      transform: translateX(-50%);
+      z-index: 5;
+    }
+    @media (max-width: 575.98px) {
+      .evidence-gallery-nav { height: 2.5rem; width: 2.5rem; }
+      .evidence-gallery-prev { left: .35rem; }
+      .evidence-gallery-next { right: .35rem; }
     }
 
     /* Catch a Pred */
@@ -11790,10 +12078,32 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               </div>
             </div>
             <?php endif; ?>
+            <?php
+              $viewMediaEv = [];
+              $viewTextPdfEv = [];
+              $viewUrlEv = [];
+              foreach ($viewEv as $evidenceItem) {
+                $evidenceType = strtolower(trim((string)($evidenceItem['type'] ?? '')));
+                $evidenceMime = strtolower(trim((string)($evidenceItem['mime_type'] ?? '')));
+                $evidenceMimeIsMedia = strpos($evidenceMime, 'image/') === 0
+                  || strpos($evidenceMime, 'video/') === 0
+                  || in_array($evidenceMime, ['application/ogg', 'application/mp4'], true);
+                $evidenceTypeIsMediaFallback = in_array($evidenceType, ['image', 'video'], true)
+                  && in_array($evidenceMime, ['', 'application/octet-stream'], true);
+                if ($evidenceType === 'url' || $evidenceMime === 'text/url') {
+                  $viewUrlEv[] = $evidenceItem;
+                } elseif ($evidenceMimeIsMedia || $evidenceTypeIsMediaFallback) {
+                  $viewMediaEv[] = $evidenceItem;
+                } else {
+                  // Preserve legacy notes, documents, audio and uncategorised uploads in the requested file table.
+                  $viewTextPdfEv[] = $evidenceItem;
+                }
+              }
+            ?>
             <div class="col-12">
               <div class="card glass">
                 <div class="card-body">
-                  <div class="d-flex align-items-center justify-content-between mb-2">
+                  <div class="d-flex align-items-center justify-content-between gap-2 mb-3">
                     <h3 class="h6 mb-0">Evidence (<?php echo count($viewEv); ?>)</h3>
                     <?php if (is_admin() && $viewEv): ?>
                       <button type="button" class="btn btn-outline-danger btn-sm" data-bs-toggle="modal" data-bs-target="#deleteAllCaseViewEvidenceModal">
@@ -11801,35 +12111,123 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       </button>
                     <?php endif; ?>
                   </div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead>
-                        <tr>
-                          <th>Title</th>
-                          <th>Type</th>
-                          <th class="text-end">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        <?php if ($viewEv) { foreach ($viewEv as $e) { ?>
-                          <tr>
-                            <td><?php echo htmlspecialchars($e['title']); ?></td>
-                            <td><?php echo htmlspecialchars($e['type']); ?></td>
-                            <td class="text-end">
-                              <div class="d-inline-flex gap-1">
-                                <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain' && strpos($e['filepath'], 'uploads/notes/') === 0)) { ?>
-                                  <button type="button" class="btn btn-sm btn-outline-light btn-view-note"
-                                          data-bs-toggle="modal" data-bs-target="#noteModal"
-                                          data-id="<?php echo (int)$e['id']; ?>"
-                                          data-case-id="<?php echo (int)$viewCaseId; ?>"
-                                          data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
-                                          data-title="<?php echo htmlspecialchars(is_logged_in() ? ($e['title'] ?? 'Note') : 'Evidence'); ?>">
-                                    View
+
+                  <section class="case-evidence-section" aria-labelledby="caseMediaEvidenceHeading">
+                    <?php $mediaEvidenceTotal = count($viewMediaEv); ?>
+                    <div class="d-flex align-items-center justify-content-between mb-3">
+                      <h4 class="h6 mb-0" id="caseMediaEvidenceHeading"><i class="bi bi-images me-2"></i>Images / Videos</h4>
+                      <span class="badge text-bg-dark border"><?php echo $mediaEvidenceTotal; ?></span>
+                    </div>
+                    <?php if ($viewMediaEv): ?>
+                      <div class="row row-cols-2 row-cols-lg-4 g-3">
+                        <?php foreach ($viewMediaEv as $mediaIndex => $e):
+                          $mediaType = strtolower(trim((string)($e['type'] ?? '')));
+                          $mediaMime = strtolower(trim((string)($e['mime_type'] ?? '')));
+                          $mediaIsVideo = strpos($mediaMime, 'video/') === 0
+                            || in_array($mediaMime, ['application/ogg', 'application/mp4'], true)
+                            || (in_array($mediaMime, ['', 'application/octet-stream'], true) && $mediaType === 'video');
+                          $mediaTitle = trim((string)($e['title'] ?? ''));
+                          if ($mediaTitle === '') { $mediaTitle = 'Evidence #' . (int)$e['id']; }
+                          $mediaDateRaw = trim((string)($e['created_at'] ?? ''));
+                          $mediaTimestamp = $mediaDateRaw !== '' ? strtotime($mediaDateRaw) : false;
+                          $mediaDateLabel = $mediaTimestamp !== false ? date('j M Y, H:i', $mediaTimestamp) : ($mediaDateRaw !== '' ? $mediaDateRaw : 'Date unavailable');
+                          $mediaCanPreviewVideo = $mediaIsVideo && empty($tp_isRestrictedForNonAdmin);
+                          $mediaCanGenerateThumbnail = !$mediaIsVideo && in_array($mediaMime, ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'], true);
+                        ?>
+                          <div class="col">
+                            <button type="button"
+                                    class="case-media-thumb btn-view-evidence"
+                                    data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                    data-gallery="case-media"
+                                    data-gallery-index="<?php echo (int)$mediaIndex; ?>"
+                                    data-id="<?php echo (int)$e['id']; ?>"
+                                    data-case-id="<?php echo (int)$viewCaseId; ?>"
+                                    data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
+                                    data-title="<?php echo htmlspecialchars(is_logged_in() ? $mediaTitle : 'Evidence'); ?>"
+                                    data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
+                                    data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>"
+                                    aria-label="View <?php echo $mediaIsVideo ? 'video' : 'image'; ?> evidence <?php echo (int)$mediaIndex + 1; ?> of <?php echo $mediaEvidenceTotal; ?>, uploaded <?php echo htmlspecialchars($mediaDateLabel); ?>">
+                              <span class="case-media-thumb-frame">
+                                <?php if ($mediaIsVideo): ?>
+                                  <span class="case-media-video-placeholder" aria-hidden="true">
+                                    <i class="bi bi-camera-video"></i>
+                                    <span class="small text-uppercase fw-semibold">Video</span>
+                                  </span>
+                                  <?php if ($mediaCanPreviewVideo): ?>
+                                    <video class="case-media-video-thumb" muted playsinline preload="metadata" tabindex="-1" aria-hidden="true">
+                                      <source src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>#t=0.1" type="<?php echo htmlspecialchars($e['mime_type'] ?? 'video/mp4'); ?>">
+                                    </video>
+                                  <?php endif; ?>
+                                  <span class="case-media-play-badge" aria-hidden="true"><i class="bi bi-play-fill"></i></span>
+                                <?php else: ?>
+                                  <img src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?><?php echo $mediaCanGenerateThumbnail ? '&amp;thumbnail=1' : ''; ?>" alt="" loading="lazy" decoding="async">
+                                <?php endif; ?>
+                              </span>
+                            </button>
+                            <div class="case-media-meta d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-1">
+                              <time class="small text-secondary" datetime="<?php echo htmlspecialchars($mediaDateRaw); ?>">Uploaded <?php echo htmlspecialchars($mediaDateLabel); ?></time>
+                              <?php if ($tp_canEditCaseEvidence): ?>
+                                <div class="d-flex gap-1">
+                                  <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                          data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($mediaTitle); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>" aria-label="Edit <?php echo $mediaIsVideo ? 'video' : 'image'; ?> evidence">
+                                    <i class="bi bi-pencil" aria-hidden="true"></i><span class="visually-hidden">Edit</span>
                                   </button>
+                                  <?php if (is_admin()): ?>
+                                  <form method="post" action="" onsubmit="return confirm('Delete this evidence permanently?');">
+                                    <input type="hidden" name="action" value="delete_evidence">
+                                    <?php csrf_field(); ?>
+                                    <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                    <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                                    <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                                    <button type="submit" class="btn btn-sm btn-outline-danger" aria-label="Delete <?php echo $mediaIsVideo ? 'video' : 'image'; ?> evidence"><i class="bi bi-trash" aria-hidden="true"></i><span class="visually-hidden">Delete</span></button>
+                                  </form>
+                                  <?php endif; ?>
+                                </div>
+                              <?php endif; ?>
+                            </div>
+                          </div>
+                        <?php endforeach; ?>
+                      </div>
+                    <?php else: ?>
+                      <div class="text-secondary small">No image or video evidence available.</div>
+                    <?php endif; ?>
+                  </section>
+
+                  <section class="case-evidence-section" aria-labelledby="caseTextPdfEvidenceHeading">
+                    <div class="d-flex align-items-center justify-content-between mb-3">
+                      <h4 class="h6 mb-0" id="caseTextPdfEvidenceHeading"><i class="bi bi-file-earmark-text me-2"></i>Text / PDF</h4>
+                      <span class="badge text-bg-dark border"><?php echo count($viewTextPdfEv); ?></span>
+                    </div>
+                    <div class="table-responsive case-evidence-table-wrap">
+                      <table class="table table-sm align-middle w-100 js-case-evidence-datatable" id="caseTextEvidenceTable" data-empty-label="No text or PDF evidence available." aria-labelledby="caseTextPdfEvidenceHeading">
+                        <caption class="visually-hidden">Text and PDF evidence files</caption>
+                        <thead>
+                          <tr><th scope="col">Title</th><th scope="col">Type</th><th scope="col">Uploaded</th><th scope="col" class="text-end">Actions</th></tr>
+                        </thead>
+                        <tbody>
+                          <?php foreach ($viewTextPdfEv as $e):
+                            $fileDateRaw = trim((string)($e['created_at'] ?? ''));
+                            $fileTimestamp = $fileDateRaw !== '' ? strtotime($fileDateRaw) : false;
+                            $fileDateLabel = $fileTimestamp !== false ? date('j M Y, H:i', $fileTimestamp) : ($fileDateRaw !== '' ? $fileDateRaw : '—');
+                            $isEvidenceNote = (($e['type'] ?? '') === 'note') || (($e['mime_type'] ?? '') === 'text/plain' && strpos((string)($e['filepath'] ?? ''), 'uploads/notes/') === 0);
+                          ?>
+                            <tr>
+                              <td><?php echo htmlspecialchars($e['title'] ?? ('Evidence #' . (int)$e['id'])); ?></td>
+                              <td><?php echo htmlspecialchars(ucfirst((string)($e['type'] ?? 'other'))); ?></td>
+                              <td class="text-nowrap" data-order="<?php echo $fileTimestamp !== false ? (int)$fileTimestamp : 0; ?>"><time datetime="<?php echo htmlspecialchars($fileDateRaw); ?>"><?php echo htmlspecialchars($fileDateLabel); ?></time></td>
+                              <td class="text-end text-nowrap">
+                                <div class="d-inline-flex gap-1">
+                                  <?php if ($isEvidenceNote): ?>
+                                    <button type="button" class="btn btn-sm btn-outline-light btn-view-note" data-bs-toggle="modal" data-bs-target="#noteModal"
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath'] ?? ''); ?>" data-title="<?php echo htmlspecialchars(is_logged_in() ? ($e['title'] ?? 'Note') : 'Evidence'); ?>">View</button>
+                                  <?php else: ?>
+                                    <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars(is_logged_in() ? ($e['title'] ?? 'Evidence') : 'Evidence'); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>">View</button>
+                                  <?php endif; ?>
                                   <?php if ($tp_canEditCaseEvidence): ?>
-                                    <div class="btn-group ms-1">
-                                      <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal" data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">Edit</button>
-                                      <?php if (is_admin()): ?>
+                                    <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo $isEvidenceNote ? htmlspecialchars($e['filepath'] ?? '') : '?action=serve_evidence&amp;id=' . (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title'] ?? ''); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>">Edit</button>
+                                    <?php if (is_admin()): ?>
                                       <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
                                         <input type="hidden" name="action" value="delete_evidence">
                                         <?php csrf_field(); ?>
@@ -11838,74 +12236,68 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                         <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
                                         <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
                                       </form>
-                                      <?php endif; ?>
-                                    </div>
-                                  <?php endif; ?>
-                                <?php } else {
-                                    $isUrl = (($e['type'] ?? '') === 'url') || (($e['mime_type'] ?? '') === 'text/url');
-                                    if ($isUrl) { ?>
-                                      <a class="btn btn-sm btn-outline-light"
-                                         href="<?php echo htmlspecialchars($e['filepath']); ?>"
-                                         target="_blank" rel="noopener">
-                                        Open
-                                      </a>
-                                      <?php if ($tp_canEditCaseEvidence): ?>
-                                        <div class="btn-group ms-1">
-                                          <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                                  data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-url="1">
-                                            Edit
-                                          </button>
-                                          <?php if (is_admin()): ?>
-                                          <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
-                                            <input type="hidden" name="action" value="delete_evidence">
-                                            <?php csrf_field(); ?>
-                                            <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
-                                            <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
-                                            <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
-                                            <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-                                          </form>
-                                          <?php endif; ?>
-                                        </div>
-                                      <?php endif; ?>
-                                    <?php } else { ?>
-                                      <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence"
-                                              data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                              data-id="<?php echo (int)$e['id']; ?>"
-                                              data-case-id="<?php echo (int)$viewCaseId; ?>"
-                                              data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
-                                              data-title="<?php echo htmlspecialchars(is_logged_in() ? $e['title'] : 'Evidence'); ?>"
-                                              data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
-                                              data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
-                                        View
-                                    </button>
-                                    <?php if ($tp_canEditCaseEvidence): ?>
-                                      <div class="btn-group ms-1">
-                                        <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                                data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
-                                          Edit
-                                        </button>
-                                        <?php if (is_admin()): ?>
-                                        <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
-                                          <input type="hidden" name="action" value="delete_evidence">
-                                          <?php csrf_field(); ?>
-                                          <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
-                                          <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
-                                          <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
-                                          <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
-                                        </form>
-                                        <?php endif; ?>
-                                      </div>
                                     <?php endif; ?>
-                                  <?php } ?>
-                              <?php } ?>
-                            </td>
-                          </tr>
-                        <?php } } else { ?>
-                          <tr><td colspan="3" class="text-secondary">No evidence available.</td></tr>
-                        <?php } ?>
-                      </tbody>
-                    </table>
-                  </div>
+                                  <?php endif; ?>
+                                </div>
+                              </td>
+                            </tr>
+                          <?php endforeach; ?>
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
+
+                  <section class="case-evidence-section" aria-labelledby="caseUrlEvidenceHeading">
+                    <div class="d-flex align-items-center justify-content-between mb-3">
+                      <h4 class="h6 mb-0" id="caseUrlEvidenceHeading"><i class="bi bi-link-45deg me-2"></i>External URLs</h4>
+                      <span class="badge text-bg-dark border"><?php echo count($viewUrlEv); ?></span>
+                    </div>
+                    <div class="table-responsive case-evidence-table-wrap">
+                      <table class="table table-sm align-middle w-100 js-case-evidence-datatable" id="caseUrlEvidenceTable" data-empty-label="No external URL evidence available." aria-labelledby="caseUrlEvidenceHeading">
+                        <caption class="visually-hidden">External URL evidence</caption>
+                        <thead>
+                          <tr><th scope="col">Title</th><th scope="col">URL</th><th scope="col">Uploaded</th><th scope="col" class="text-end">Actions</th></tr>
+                        </thead>
+                        <tbody>
+                          <?php foreach ($viewUrlEv as $e):
+                            $urlDateRaw = trim((string)($e['created_at'] ?? ''));
+                            $urlTimestamp = $urlDateRaw !== '' ? strtotime($urlDateRaw) : false;
+                            $urlDateLabel = $urlTimestamp !== false ? date('j M Y, H:i', $urlTimestamp) : ($urlDateRaw !== '' ? $urlDateRaw : '—');
+                            $evidenceUrl = trim((string)($e['filepath'] ?? ''));
+                            $hasSafeEvidenceUrl = tp_valid_public_http_url($evidenceUrl);
+                          ?>
+                            <tr>
+                              <td><?php echo htmlspecialchars($e['title'] ?? ('Evidence #' . (int)$e['id'])); ?></td>
+                              <td class="text-break">
+                                <?php if ($hasSafeEvidenceUrl): ?><a href="<?php echo htmlspecialchars($evidenceUrl); ?>" target="_blank" rel="noopener noreferrer"><?php echo htmlspecialchars($evidenceUrl); ?></a>
+                                <?php else: ?><span class="text-secondary"><?php echo htmlspecialchars($evidenceUrl !== '' ? $evidenceUrl : 'Invalid URL'); ?></span><?php endif; ?>
+                              </td>
+                              <td class="text-nowrap" data-order="<?php echo $urlTimestamp !== false ? (int)$urlTimestamp : 0; ?>"><time datetime="<?php echo htmlspecialchars($urlDateRaw); ?>"><?php echo htmlspecialchars($urlDateLabel); ?></time></td>
+                              <td class="text-end text-nowrap">
+                                <div class="d-inline-flex gap-1">
+                                  <?php if ($hasSafeEvidenceUrl): ?><a class="btn btn-sm btn-outline-light" href="<?php echo htmlspecialchars($evidenceUrl); ?>" target="_blank" rel="noopener noreferrer">Open</a><?php endif; ?>
+                                  <?php if ($tp_canEditCaseEvidence): ?>
+                                    <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo $hasSafeEvidenceUrl ? htmlspecialchars($evidenceUrl) : ''; ?>" data-title="<?php echo htmlspecialchars($e['title'] ?? ''); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? 'text/url'); ?>" data-url="1">Edit</button>
+                                    <?php if (is_admin()): ?>
+                                      <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
+                                        <input type="hidden" name="action" value="delete_evidence">
+                                        <?php csrf_field(); ?>
+                                        <input type="hidden" name="evidence_id" value="<?php echo (int)$e['id']; ?>">
+                                        <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+                                        <input type="hidden" name="redirect_url" value="?view=case&amp;code=<?php echo urlencode($caseCode); ?>#case-view">
+                                        <button type="submit" class="btn btn-sm btn-outline-danger">Delete</button>
+                                      </form>
+                                    <?php endif; ?>
+                                  <?php endif; ?>
+                                </div>
+                              </td>
+                            </tr>
+                          <?php endforeach; ?>
+                        </tbody>
+                      </table>
+                    </div>
+                  </section>
                 </div>
               </div>
             </div>
@@ -13173,7 +13565,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       : (string)($_SERVER['REQUEST_URI'] ?? '/');
   ?>
   <!-- Global Evidence Viewer / Editor Modal -->
-  <div class="modal fade evidence-modal" id="evidenceModal" tabindex="-1" aria-hidden="true">
+  <div class="modal fade evidence-modal" id="evidenceModal" tabindex="-1" role="dialog" aria-hidden="true" aria-labelledby="evModalTitle">
     <div class="modal-dialog modal-lg modal-fullscreen-md-down modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content">
         <div class="modal-header">
@@ -13181,6 +13573,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
+          <button type="button" class="evidence-gallery-nav evidence-gallery-prev d-none" id="evGalleryPrev" aria-label="Previous media item">
+            <i class="bi bi-chevron-left" aria-hidden="true"></i>
+          </button>
+          <button type="button" class="evidence-gallery-nav evidence-gallery-next d-none" id="evGalleryNext" aria-label="Next media item">
+            <i class="bi bi-chevron-right" aria-hidden="true"></i>
+          </button>
+          <div class="evidence-gallery-position small d-none" id="evGalleryPosition" aria-live="polite"></div>
           <div class="row g-3">
             <div class="col-12" id="evPreviewColumn">
               <div id="evPreview" class="ratio ratio-16x9 bg-dark d-flex align-items-center justify-content-center rounded overflow-hidden">
@@ -13633,116 +14032,267 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           order: [[0, 'desc']]
         });
       }
+
+      window.jQuery('.js-case-evidence-datatable').each(function () {
+        var evidenceTable = window.jQuery(this);
+        if (window.jQuery.fn.dataTable.isDataTable(this)) return;
+        evidenceTable.DataTable({
+          pageLength: 10,
+          lengthMenu: [[10, 25, 50, 100], [10, 25, 50, 100]],
+          order: [[2, 'desc']],
+          autoWidth: false,
+          columnDefs: [
+            { targets: 3, orderable: false, searchable: false }
+          ],
+          language: {
+            emptyTable: evidenceTable.attr('data-empty-label') || 'No evidence available.'
+          }
+        });
+      });
     }
 
-    // Evidence modal dynamic preview + admin edit wiring
+    // Evidence modal preview, editor and case-media gallery navigation.
     (function () {
       var evModal = document.getElementById('evidenceModal');
       if (!evModal) return;
-  
-      evModal.addEventListener('show.bs.modal', function (event) {
-        var btn = event.relatedTarget;
-        if (!btn) return;
-        var src = btn.getAttribute('data-src') || '';
-        var title = btn.getAttribute('data-title') || '';
-        var mime = btn.getAttribute('data-mime') || '';
-        var type = btn.getAttribute('data-type') || '';
-        var id = btn.getAttribute('data-id') || '';
-        var caseId = btn.getAttribute('data-case-id') || '';
-        var isEditMode = btn.classList.contains('btn-edit-evidence');
-        var isImageEvidence = type === 'image' || mime.toLowerCase().indexOf('image/') === 0;
-        var showEvidenceTitles = <?php echo is_logged_in() ? 'true' : 'false'; ?>;
-  
-        // Fallbacks
+
+      var dialog = evModal.querySelector('.modal-dialog');
+      var preview = document.getElementById('evPreview');
+      var previewColumn = document.getElementById('evPreviewColumn');
+      var editPanel = document.getElementById('evEditPanel');
+      var rotatePanel = document.getElementById('evRotatePanel');
+      var prevButton = document.getElementById('evGalleryPrev');
+      var nextButton = document.getElementById('evGalleryNext');
+      var position = document.getElementById('evGalleryPosition');
+      var galleryTriggers = Array.prototype.slice.call(document.querySelectorAll('[data-gallery="case-media"]'));
+      var galleryIndex = -1;
+      var showEvidenceTitles = <?php echo is_logged_in() ? 'true' : 'false'; ?>;
+
+      document.querySelectorAll('.case-media-video-thumb').forEach(function (videoThumbnail) {
+        var revealThumbnail = function () { videoThumbnail.classList.add('is-ready'); };
+        videoThumbnail.addEventListener('loadeddata', revealThumbnail, { once: true });
+        videoThumbnail.addEventListener('seeked', revealThumbnail, { once: true });
+        if (videoThumbnail.readyState >= 2) revealThumbnail();
+      });
+
+      function itemFromTrigger(trigger) {
+        var src = trigger.getAttribute('data-src') || '';
+        var title = trigger.getAttribute('data-title') || '';
+        var mime = (trigger.getAttribute('data-mime') || '').toLowerCase();
+        var type = (trigger.getAttribute('data-type') || '').toLowerCase();
         if (!type && mime.indexOf('/') > -1) type = mime.split('/')[0];
         if (!title || title.trim() === '') {
-          // Derive from filename as last resort
-          try { title = src.split('/').pop(); } catch (e) { title = 'Evidence'; }
+          try { title = src.split('/').pop() || 'Evidence'; } catch (e) { title = 'Evidence'; }
         }
-  
-        // Set header fields
-        var titleEl = document.getElementById('evModalTitle');
-        if (titleEl) titleEl.textContent = showEvidenceTitles ? title : 'Evidence';
+        return {
+          trigger: trigger,
+          src: src,
+          title: title,
+          mime: mime,
+          type: type,
+          id: trigger.getAttribute('data-id') || '',
+          caseId: trigger.getAttribute('data-case-id') || '',
+          isEditMode: trigger.classList.contains('btn-edit-evidence'),
+          isGallery: trigger.getAttribute('data-gallery') === 'case-media',
+          isUrl: trigger.getAttribute('data-url') === '1' || type === 'url' || mime === 'text/url'
+        };
+      }
 
-        // Viewing is evidence-only. Editing is a separate creator/admin action.
-        var previewColumn = document.getElementById('evPreviewColumn');
-        var editPanel = document.getElementById('evEditPanel');
-        var rotatePanel = document.getElementById('evRotatePanel');
-        if (previewColumn) {
-          previewColumn.classList.toggle('col-lg-8', isEditMode && !!editPanel);
-          previewColumn.classList.toggle('col-12', !isEditMode || !editPanel);
+      function stopPreviewMedia() {
+        if (!preview) return;
+        preview.querySelectorAll('video, audio').forEach(function (media) {
+          try { media.pause(); } catch (e) {}
+          media.removeAttribute('src');
+          media.querySelectorAll('source').forEach(function (source) { source.removeAttribute('src'); });
+          try { media.load(); } catch (e) {}
+        });
+        preview.querySelectorAll('iframe').forEach(function (frame) { frame.src = 'about:blank'; });
+        preview.replaceChildren();
+      }
+
+      function setGalleryChrome(isGallery) {
+        if (dialog) {
+          dialog.classList.toggle('modal-fullscreen', isGallery);
+          dialog.classList.toggle('modal-lg', !isGallery);
+          dialog.classList.toggle('modal-fullscreen-md-down', !isGallery);
         }
-        if (editPanel) editPanel.classList.toggle('d-none', !isEditMode);
-        if (rotatePanel) rotatePanel.classList.toggle('d-none', !isEditMode || !isImageEvidence);
-  
-        // Render preview
-        var preview = document.getElementById('evPreview');
-        if (preview) {
-          preview.classList.add('ratio','ratio-16x9');
-          preview.innerHTML = '';
-          var safeSrc = src;
-          if (isImageEvidence) {
-            preview.classList.remove('ratio','ratio-16x9');
-            var img = document.createElement('img');
-            if (safeSrc.indexOf('action=serve_evidence') !== -1) {
-              safeSrc += (safeSrc.indexOf('?') === -1 ? '?' : '&') + 'v=' + Date.now();
-            }
-            img.src = safeSrc;
-            img.alt = title;
-            img.className = 'img-fluid rounded';
-            preview.appendChild(img);
-          } else if (type === 'video' || mime.indexOf('video/') === 0) {
-            preview.innerHTML = '<video controls playsinline preload="metadata" class="w-100 h-100"><source src="'+safeSrc+'" type="'+mime+'">Your browser does not support the HTML5 video element.</video>';
-          } else if (type === 'audio' || mime.indexOf('audio/') === 0) {
-            preview.classList.remove('ratio','ratio-16x9');
-            preview.innerHTML = '<audio controls class="w-100"><source src="'+safeSrc+'" type="'+mime+'"></audio>';
-          } else if (type === 'pdf' || mime === 'application/pdf') {
-            preview.innerHTML = '<iframe src="'+safeSrc+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
-          } else {
-            preview.innerHTML = '<iframe src="'+safeSrc+'" class="w-100 h-100 rounded" loading="lazy"></iframe>';
+        var showArrows = isGallery && galleryTriggers.length > 1;
+        if (prevButton) prevButton.classList.toggle('d-none', !showArrows);
+        if (nextButton) nextButton.classList.toggle('d-none', !showArrows);
+        if (position) {
+          position.classList.toggle('d-none', !isGallery);
+          position.textContent = isGallery && galleryIndex >= 0 ? (galleryIndex + 1) + ' / ' + galleryTriggers.length : '';
+        }
+      }
+
+      function addMediaSource(media, src, mime) {
+        var source = document.createElement('source');
+        source.src = src;
+        if (mime) source.type = mime;
+        media.appendChild(source);
+      }
+
+      function isImageItem(item) {
+        if (item.mime.indexOf('image/') === 0) return true;
+        if (item.mime && item.mime !== 'application/octet-stream') return false;
+        return item.type === 'image';
+      }
+
+      function isVideoItem(item) {
+        if (item.mime.indexOf('video/') === 0 || item.mime === 'application/ogg' || item.mime === 'application/mp4') return true;
+        if (item.mime && item.mime !== 'application/octet-stream') return false;
+        return item.type === 'video';
+      }
+
+      function renderPreview(item) {
+        if (!preview) return;
+        stopPreviewMedia();
+        preview.classList.add('ratio', 'ratio-16x9');
+
+        var isImage = isImageItem(item);
+        var isVideo = isVideoItem(item);
+        var isAudio = item.type === 'audio' || item.mime.indexOf('audio/') === 0;
+        var safeSrc = item.src;
+
+        if (isImage) {
+          preview.classList.remove('ratio', 'ratio-16x9');
+          var image = document.createElement('img');
+          if (safeSrc.indexOf('action=serve_evidence') !== -1) {
+            safeSrc += (safeSrc.indexOf('?') === -1 ? '?' : '&') + 'v=' + Date.now();
           }
+          image.src = safeSrc;
+          image.alt = item.title;
+          image.className = 'img-fluid rounded';
+          preview.appendChild(image);
+        } else if (isVideo) {
+          if (item.isGallery && !item.isEditMode) preview.classList.remove('ratio', 'ratio-16x9');
+          var video = document.createElement('video');
+          video.controls = true;
+          video.playsInline = true;
+          video.preload = 'metadata';
+          video.className = 'w-100 h-100';
+          addMediaSource(video, safeSrc, item.mime);
+          video.appendChild(document.createTextNode('Your browser does not support the HTML5 video element.'));
+          preview.appendChild(video);
+        } else if (isAudio) {
+          preview.classList.remove('ratio', 'ratio-16x9');
+          var audio = document.createElement('audio');
+          audio.controls = true;
+          audio.className = 'w-100';
+          addMediaSource(audio, safeSrc, item.mime);
+          preview.appendChild(audio);
+        } else if (item.isUrl) {
+          preview.classList.remove('ratio', 'ratio-16x9');
+          var urlMessage = document.createElement('div');
+          urlMessage.className = 'p-4 text-center';
+          var urlText = document.createElement('p');
+          urlText.className = 'text-secondary';
+          urlText.textContent = 'External URL evidence opens in a new tab.';
+          urlMessage.appendChild(urlText);
+          if (/^https?:\/\//i.test(safeSrc)) {
+            var urlLink = document.createElement('a');
+            urlLink.className = 'btn btn-outline-light';
+            urlLink.href = safeSrc;
+            urlLink.target = '_blank';
+            urlLink.rel = 'noopener noreferrer';
+            urlLink.textContent = 'Open External URL';
+            urlMessage.appendChild(urlLink);
+          }
+          preview.appendChild(urlMessage);
+        } else {
+          var frame = document.createElement('iframe');
+          frame.src = safeSrc;
+          frame.className = 'w-100 h-100 rounded';
+          frame.loading = 'lazy';
+          frame.title = item.title;
+          preview.appendChild(frame);
         }
-  
-        // Admin edit fields (if present)
+      }
+
+      function renderEvidence(item) {
+        var isImage = isImageItem(item);
+        var activeGallery = item.isGallery && !item.isEditMode;
+        var titleElement = document.getElementById('evModalTitle');
+        if (titleElement) titleElement.textContent = showEvidenceTitles ? item.title : 'Evidence';
+
+        if (previewColumn) {
+          previewColumn.classList.toggle('col-lg-8', item.isEditMode && !!editPanel);
+          previewColumn.classList.toggle('col-12', !item.isEditMode || !editPanel);
+        }
+        if (editPanel) editPanel.classList.toggle('d-none', !item.isEditMode);
+        if (rotatePanel) rotatePanel.classList.toggle('d-none', !item.isEditMode || !isImage);
+        setGalleryChrome(activeGallery);
+        renderPreview(item);
+
         var evId = document.getElementById('evId');
         var evCaseId = document.getElementById('evCaseId');
         var evTitle = document.getElementById('evTitle');
         var evType = document.getElementById('evType');
         var evRotateId = document.getElementById('evRotateId');
         var evRotateCaseId = document.getElementById('evRotateCaseId');
-        if (isEditMode && evId && evCaseId && evTitle && evType) {
-          evId.value = id;
-          evCaseId.value = caseId;
-          evTitle.value = title;
-          if (evType.tagName === 'SELECT' && evType.querySelector('option[value="'+type+'"]')) {
-            evType.value = type;
+        if (item.isEditMode && evId && evCaseId && evTitle && evType) {
+          evId.value = item.id;
+          evCaseId.value = item.caseId;
+          evTitle.value = item.title;
+          if (evType.tagName === 'SELECT' && evType.querySelector('option[value="' + item.type + '"]')) {
+            evType.value = item.type;
           } else if (evType.tagName !== 'SELECT') {
-            evType.value = type || 'other';
+            evType.value = item.type || 'other';
           }
         }
-        if (isEditMode && isImageEvidence && evRotateId && evRotateCaseId) {
-          evRotateId.value = id;
-          evRotateCaseId.value = caseId;
+        if (item.isEditMode && isImage && evRotateId && evRotateCaseId) {
+          evRotateId.value = item.id;
+          evRotateCaseId.value = item.caseId;
+        }
+      }
+
+      function showRelativeGalleryItem(offset) {
+        if (galleryIndex < 0 || galleryTriggers.length < 2) return;
+        galleryIndex = (galleryIndex + offset + galleryTriggers.length) % galleryTriggers.length;
+        renderEvidence(itemFromTrigger(galleryTriggers[galleryIndex]));
+      }
+
+      evModal.addEventListener('show.bs.modal', function (event) {
+        var trigger = event.relatedTarget;
+        if (!trigger) return;
+        var item = itemFromTrigger(trigger);
+        galleryIndex = item.isGallery ? galleryTriggers.indexOf(trigger) : -1;
+        renderEvidence(item);
+      });
+
+      if (prevButton) prevButton.addEventListener('click', function () { showRelativeGalleryItem(-1); });
+      if (nextButton) nextButton.addEventListener('click', function () { showRelativeGalleryItem(1); });
+      document.addEventListener('keydown', function (event) {
+        if (!evModal.classList.contains('show') || galleryIndex < 0 || galleryTriggers.length < 2) return;
+        if (event.target && (event.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT|VIDEO|AUDIO)$/.test(event.target.tagName))) return;
+        if (event.key === 'ArrowLeft') {
+          event.preventDefault();
+          showRelativeGalleryItem(-1);
+        } else if (event.key === 'ArrowRight') {
+          event.preventDefault();
+          showRelativeGalleryItem(1);
         }
       });
-  
+
       evModal.addEventListener('hidden.bs.modal', function () {
-        var preview = document.getElementById('evPreview');
+        stopPreviewMedia();
         if (preview) {
-          preview.innerHTML = '<div class="text-secondary small">No preview available</div>';
-          preview.classList.add('ratio','ratio-16x9');
+          var emptyMessage = document.createElement('div');
+          emptyMessage.className = 'text-secondary small';
+          emptyMessage.textContent = 'No preview available';
+          preview.appendChild(emptyMessage);
+          preview.classList.add('ratio', 'ratio-16x9');
         }
-        var previewColumn = document.getElementById('evPreviewColumn');
-        var editPanel = document.getElementById('evEditPanel');
-        var rotatePanel = document.getElementById('evRotatePanel');
-        var evRotateId = document.getElementById('evRotateId');
-        var evRotateCaseId = document.getElementById('evRotateCaseId');
+        galleryIndex = -1;
+        setGalleryChrome(false);
         if (previewColumn) {
           previewColumn.classList.remove('col-lg-8');
           previewColumn.classList.add('col-12');
         }
         if (editPanel) editPanel.classList.add('d-none');
         if (rotatePanel) rotatePanel.classList.add('d-none');
+        var evRotateId = document.getElementById('evRotateId');
+        var evRotateCaseId = document.getElementById('evRotateCaseId');
         if (evRotateId) evRotateId.value = '';
         if (evRotateCaseId) evRotateCaseId.value = '';
       });
