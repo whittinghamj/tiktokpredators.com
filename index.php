@@ -1610,6 +1610,31 @@ function tp_can_manage_evidence_redaction(array $row): bool {
     return tp_can_view_evidence_original($row);
 }
 
+/** Only these static image formats can have a server-rendered public blur copy. */
+function tp_evidence_mime_supports_public_blur(string $mime): bool {
+    return in_array(strtolower(trim($mime)), ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'], true);
+}
+
+/**
+ * Report saved blur state only to moderators, and only from committed redaction
+ * metadata. Draft boxes in the browser must never make an item look published.
+ */
+function tp_evidence_has_saved_public_blur(array $row): bool {
+    $evidenceId = (int)($row['id'] ?? 0);
+    return can_moderate_cases()
+        && $evidenceId > 0
+        && (int)($row['redaction_evidence_id'] ?? 0) === $evidenceId;
+}
+
+/** Recovery rows and impossible MIME combinations are saved state that needs review. */
+function tp_evidence_saved_public_blur_needs_attention(array $row): bool {
+    return tp_evidence_has_saved_public_blur($row)
+        && (
+            (int)($row['redaction_region_count'] ?? 0) <= 0
+            || !tp_evidence_mime_supports_public_blur((string)($row['mime_type'] ?? ''))
+        );
+}
+
 /** Normalize an absolute Unix filesystem path without requiring it to exist yet. */
 function tp_normalize_absolute_storage_path(string $path): ?string {
     $path = trim($path);
@@ -8025,6 +8050,21 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
       width: 100%;
     }
     .case-media-video-thumb.is-ready { opacity: 1; }
+    .case-media-blur-badge {
+      align-items: center;
+      box-shadow: 0 .2rem .75rem rgba(0,0,0,.55);
+      display: inline-flex;
+      font-size: .72rem;
+      gap: .3rem;
+      left: .5rem;
+      max-width: calc(100% - 1rem);
+      padding: .4rem .55rem;
+      pointer-events: none;
+      position: absolute;
+      top: .5rem;
+      white-space: normal;
+      z-index: 3;
+    }
     .case-media-play-badge {
       align-items: center;
       background: rgba(0,0,0,.72);
@@ -12704,7 +12744,19 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             } catch (Throwable $e) {}
           }
           try {
-            $st2 = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC');
+            $viewRedactionSelect = ', NULL AS redaction_evidence_id, NULL AS redaction_region_count';
+            $viewRedactionJoin = '';
+            if (can_moderate_cases() && !empty($tp_evidence_redactions_ready)) {
+              $viewRedactionSelect = ', r.evidence_id AS redaction_evidence_id, r.region_count AS redaction_region_count';
+              $viewRedactionJoin = ' LEFT JOIN evidence_redactions r ON r.evidence_id = e.id';
+            }
+            $st2 = $pdo->prepare(
+              'SELECT e.id, e.type, e.title, e.filepath, e.mime_type, e.size_bytes, e.created_at'
+              . $viewRedactionSelect
+              . ' FROM evidence e'
+              . $viewRedactionJoin
+              . ' WHERE e.case_id = ? ORDER BY e.created_at DESC'
+            );
             $st2->execute([$viewCaseId]);
             $viewEv = $st2->fetchAll();
           } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
@@ -13614,11 +13666,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                           $mediaTimestamp = $mediaDateRaw !== '' ? strtotime($mediaDateRaw) : false;
                           $mediaDateLabel = $mediaTimestamp !== false ? date('j M Y, H:i', $mediaTimestamp) : ($mediaDateRaw !== '' ? $mediaDateRaw : 'Date unavailable');
                           $mediaCanPreviewVideo = $mediaIsVideo && empty($tp_isRestrictedForNonAdmin);
-                          $mediaCanGenerateThumbnail = !$mediaIsVideo && in_array($mediaMime, ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'], true);
+                          $mediaCanGenerateThumbnail = !$mediaIsVideo && tp_evidence_mime_supports_public_blur($mediaMime);
                           $mediaCanRedact = !empty($tp_evidence_redactions_ready)
                             && can_moderate_cases()
                             && !$mediaIsVideo
-                            && in_array($mediaMime, ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'], true);
+                            && tp_evidence_mime_supports_public_blur($mediaMime);
+                          $mediaHasSavedBlur = tp_evidence_has_saved_public_blur($e);
+                          $mediaSavedBlurNeedsAttention = $mediaHasSavedBlur && tp_evidence_saved_public_blur_needs_attention($e);
                         ?>
                           <div class="col">
                             <button type="button"
@@ -13632,7 +13686,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                     data-title="<?php echo htmlspecialchars(is_logged_in() ? $mediaTitle : 'Evidence'); ?>"
                                     data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
                                     data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>"
-                                    aria-label="View <?php echo $mediaIsVideo ? 'video' : 'image'; ?> evidence <?php echo (int)$mediaIndex + 1; ?> of <?php echo $mediaEvidenceTotal; ?>, uploaded <?php echo htmlspecialchars($mediaDateLabel); ?>">
+                                    <?php if (can_moderate_cases()): ?>data-has-redaction="<?php echo $mediaHasSavedBlur ? '1' : '0'; ?>" data-blur-needs-attention="<?php echo $mediaSavedBlurNeedsAttention ? '1' : '0'; ?>"<?php endif; ?>
+                                    data-blur-aria-base="View <?php echo $mediaIsVideo ? 'video' : 'image'; ?> evidence <?php echo (int)$mediaIndex + 1; ?> of <?php echo $mediaEvidenceTotal; ?>, uploaded <?php echo htmlspecialchars($mediaDateLabel); ?>"
+                                    aria-label="View <?php echo $mediaIsVideo ? 'video' : 'image'; ?> evidence <?php echo (int)$mediaIndex + 1; ?> of <?php echo $mediaEvidenceTotal; ?>, uploaded <?php echo htmlspecialchars($mediaDateLabel); ?><?php echo $mediaSavedBlurNeedsAttention ? ', saved blur needs attention' : ($mediaHasSavedBlur ? ', public blur saved' : ''); ?>">
                               <span class="case-media-thumb-frame">
                                 <?php if ($mediaIsVideo): ?>
                                   <span class="case-media-video-placeholder" aria-hidden="true">
@@ -13648,6 +13704,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                 <?php else: ?>
                                   <img src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?><?php echo $mediaCanGenerateThumbnail ? '&amp;thumbnail=1' : ''; ?>" alt="" loading="lazy" decoding="async">
                                 <?php endif; ?>
+                                <?php if (can_moderate_cases() && ($mediaCanRedact || $mediaHasSavedBlur)): ?>
+                                  <span class="case-media-blur-badge badge <?php echo $mediaSavedBlurNeedsAttention ? 'text-bg-warning text-dark' : 'text-bg-success'; ?><?php echo $mediaHasSavedBlur ? '' : ' d-none'; ?>" data-evidence-blur-state="<?php echo (int)$e['id']; ?>">
+                                    <i class="bi <?php echo $mediaSavedBlurNeedsAttention ? 'bi-exclamation-triangle' : 'bi-shield-check'; ?>" data-blur-state-icon aria-hidden="true"></i><span data-blur-state-label><?php echo $mediaSavedBlurNeedsAttention ? 'Blur needs attention' : 'Public blur saved'; ?></span>
+                                  </span>
+                                <?php endif; ?>
                               </span>
                             </button>
                             <div class="case-media-meta d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-1">
@@ -13656,14 +13717,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                 <div class="d-flex gap-1">
                                   <?php if ($tp_canEditCaseEvidence): ?>
                                   <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                          data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($mediaTitle); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>" aria-label="Edit <?php echo $mediaIsVideo ? 'video' : 'image'; ?> evidence">
+                                          data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($mediaTitle); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>" <?php if (can_moderate_cases()): ?>data-has-redaction="<?php echo $mediaHasSavedBlur ? '1' : '0'; ?>" data-blur-needs-attention="<?php echo $mediaSavedBlurNeedsAttention ? '1' : '0'; ?>"<?php endif; ?> aria-label="Edit <?php echo $mediaIsVideo ? 'video' : 'image'; ?> evidence">
                                     <i class="bi bi-pencil" aria-hidden="true"></i><span class="visually-hidden">Edit</span>
                                   </button>
                                   <?php endif; ?>
                                   <?php if ($mediaCanRedact): ?>
-                                  <button type="button" class="btn btn-sm btn-outline-info btn-redact-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                          data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>&amp;variant=original" data-title="<?php echo htmlspecialchars($mediaTitle); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'image'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>" aria-label="Blur sensitive areas in this image" title="Blur sensitive areas">
-                                    <i class="bi bi-bounding-box-circles" aria-hidden="true"></i><span class="visually-hidden">Blur sensitive areas</span>
+                                  <button type="button" class="btn btn-sm <?php echo $mediaSavedBlurNeedsAttention ? 'btn-warning' : ($mediaHasSavedBlur ? 'btn-success' : 'btn-outline-info'); ?> btn-redact-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                          data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>&amp;variant=original" data-title="<?php echo htmlspecialchars($mediaTitle); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'image'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>" data-has-redaction="<?php echo $mediaHasSavedBlur ? '1' : '0'; ?>" data-blur-needs-attention="<?php echo $mediaSavedBlurNeedsAttention ? '1' : '0'; ?>" data-blur-label-empty="Blur sensitive areas" data-blur-label-saved="Edit saved public blur" data-blur-label-attention="Review saved blur that needs attention" aria-label="<?php echo $mediaSavedBlurNeedsAttention ? 'Review saved blur that needs attention' : ($mediaHasSavedBlur ? 'Edit saved public blur' : 'Blur sensitive areas in this image'); ?>" title="<?php echo $mediaSavedBlurNeedsAttention ? 'Saved blur needs attention — open to repair or remove' : ($mediaHasSavedBlur ? 'Public blur saved — open to review or edit' : 'Blur sensitive areas'); ?>">
+                                    <i class="bi <?php echo $mediaSavedBlurNeedsAttention ? 'bi-exclamation-triangle' : ($mediaHasSavedBlur ? 'bi-shield-check' : 'bi-bounding-box-circles'); ?>" data-blur-action-icon aria-hidden="true"></i><span class="visually-hidden" data-blur-action-label><?php echo $mediaSavedBlurNeedsAttention ? 'Review saved blur that needs attention' : ($mediaHasSavedBlur ? 'Edit saved public blur' : 'Blur sensitive areas'); ?></span>
                                   </button>
                                   <?php endif; ?>
                                   <?php if (is_admin()): ?>
@@ -14014,7 +14075,19 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       $evTotalCount = 0;
       if ($caseId > 0) {
           try {
-              $evi = $pdo->prepare('SELECT id, type, title, filepath, mime_type, size_bytes, created_at FROM evidence WHERE case_id = ? ORDER BY created_at DESC LIMIT 100');
+              $adminRedactionSelect = ', NULL AS redaction_evidence_id, NULL AS redaction_region_count';
+              $adminRedactionJoin = '';
+              if (!empty($tp_evidence_redactions_ready)) {
+                  $adminRedactionSelect = ', r.evidence_id AS redaction_evidence_id, r.region_count AS redaction_region_count';
+                  $adminRedactionJoin = ' LEFT JOIN evidence_redactions r ON r.evidence_id = e.id';
+              }
+              $evi = $pdo->prepare(
+                  'SELECT e.id, e.type, e.title, e.filepath, e.mime_type, e.size_bytes, e.created_at'
+                  . $adminRedactionSelect
+                  . ' FROM evidence e'
+                  . $adminRedactionJoin
+                  . ' WHERE e.case_id = ? ORDER BY e.created_at DESC LIMIT 100'
+              );
               $evi->execute([$caseId]);
               $ev = $evi->fetchAll();
               $evidenceCountQuery = $pdo->prepare('SELECT COUNT(*) FROM evidence WHERE case_id = ?');
@@ -14190,10 +14263,23 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <table class="table table-sm align-middle">
                 <thead><tr><th>Type</th><th>Title</th><th>Actions</th><th>MIME</th><th>Size</th><th>Added</th></tr></thead>
                 <tbody>
-                  <?php if ($ev) { foreach ($ev as $e) { ?>
+                  <?php if ($ev) { foreach ($ev as $e) {
+                    $adminEvidenceCanRedact = !empty($tp_evidence_redactions_ready)
+                      && tp_evidence_mime_supports_public_blur((string)($e['mime_type'] ?? ''));
+                    $adminEvidenceHasSavedBlur = tp_evidence_has_saved_public_blur($e);
+                    $adminEvidenceSavedBlurNeedsAttention = $adminEvidenceHasSavedBlur
+                      && tp_evidence_saved_public_blur_needs_attention($e);
+                  ?>
                     <tr>
                       <td><?php echo htmlspecialchars($e['type']); ?></td>
-                      <td><?php echo htmlspecialchars($e['title']); ?></td>
+                      <td>
+                        <div><?php echo htmlspecialchars($e['title']); ?></div>
+                        <?php if ($adminEvidenceCanRedact || $adminEvidenceHasSavedBlur): ?>
+                          <span class="badge <?php echo $adminEvidenceSavedBlurNeedsAttention ? 'text-bg-warning text-dark' : 'text-bg-success'; ?> mt-1<?php echo $adminEvidenceHasSavedBlur ? '' : ' d-none'; ?>" data-evidence-blur-state="<?php echo (int)$e['id']; ?>">
+                            <i class="bi <?php echo $adminEvidenceSavedBlurNeedsAttention ? 'bi-exclamation-triangle' : 'bi-shield-check'; ?> me-1" data-blur-state-icon aria-hidden="true"></i><span data-blur-state-label><?php echo $adminEvidenceSavedBlurNeedsAttention ? 'Blur needs attention' : 'Public blur saved'; ?></span>
+                          </span>
+                        <?php endif; ?>
+                      </td>
                       <td>
                         <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain'
                           && (strpos($e['filepath'], 'uploads/notes/') === 0 || strpos($e['filepath'], 'private:notes/') === 0))) { ?>
@@ -14222,8 +14308,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         <?php } else {
                             $isUrl = (($e['type'] ?? '') === 'url') || (($e['mime_type'] ?? '') === 'text/url');
                             $isImage = (($e['type'] ?? '') === 'image') || strpos(strtolower((string)($e['mime_type'] ?? '')), 'image/') === 0;
-                            $canRedactImage = !empty($tp_evidence_redactions_ready)
-                              && in_array(strtolower((string)($e['mime_type'] ?? '')), ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'], true);
+                            $canRedactImage = $adminEvidenceCanRedact;
                             if ($isUrl) { ?>
                               <a class="btn btn-sm btn-outline-light"
                                  href="<?php echo htmlspecialchars($e['filepath']); ?>"
@@ -14252,18 +14337,20 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                       data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
                                       data-title="<?php echo htmlspecialchars($e['title']); ?>"
                                       data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>"
-                                      data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>">
+                                      data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>"
+                                      data-has-redaction="<?php echo $adminEvidenceHasSavedBlur ? '1' : '0'; ?>"
+                                      data-blur-needs-attention="<?php echo $adminEvidenceSavedBlurNeedsAttention ? '1' : '0'; ?>">
                                 View
                               </button>
                               <div class="btn-group ms-1">
                                 <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                        data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                        data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-has-redaction="<?php echo $adminEvidenceHasSavedBlur ? '1' : '0'; ?>" data-blur-needs-attention="<?php echo $adminEvidenceSavedBlurNeedsAttention ? '1' : '0'; ?>" data-admin="1">
                                   Edit
                                 </button>
                                 <?php if ($isImage && $canRedactImage): ?>
-                                <button type="button" class="btn btn-sm btn-outline-info btn-redact-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                        data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>&amp;variant=original" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'image'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
-                                  Blur
+                                <button type="button" class="btn btn-sm <?php echo $adminEvidenceSavedBlurNeedsAttention ? 'btn-warning' : ($adminEvidenceHasSavedBlur ? 'btn-success' : 'btn-outline-info'); ?> btn-redact-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                        data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>&amp;variant=original" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'image'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-has-redaction="<?php echo $adminEvidenceHasSavedBlur ? '1' : '0'; ?>" data-blur-needs-attention="<?php echo $adminEvidenceSavedBlurNeedsAttention ? '1' : '0'; ?>" data-blur-label-empty="Blur" data-blur-label-saved="Edit Blur" data-blur-label-attention="Review Blur" aria-label="<?php echo $adminEvidenceSavedBlurNeedsAttention ? 'Review saved blur that needs attention' : ($adminEvidenceHasSavedBlur ? 'Edit saved public blur' : 'Blur sensitive areas in this image'); ?>" title="<?php echo $adminEvidenceSavedBlurNeedsAttention ? 'Saved blur needs attention — open to repair or remove' : ($adminEvidenceHasSavedBlur ? 'Public blur saved — open to review or edit' : 'Blur sensitive areas'); ?>" data-admin="1">
+                                  <i class="bi <?php echo $adminEvidenceSavedBlurNeedsAttention ? 'bi-exclamation-triangle' : ($adminEvidenceHasSavedBlur ? 'bi-shield-check' : 'bi-bounding-box-circles'); ?> me-1" data-blur-action-icon aria-hidden="true"></i><span data-blur-action-label><?php echo $adminEvidenceSavedBlurNeedsAttention ? 'Review Blur' : ($adminEvidenceHasSavedBlur ? 'Edit Blur' : 'Blur'); ?></span>
                                 </button>
                                 <?php endif; ?>
                                 <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
@@ -14293,10 +14380,22 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           <!-- Photos -->
           <div class="tab-pane fade" id="photos-pane" role="tabpanel">
             <div class="row g-2">
-              <?php if ($ev) { $hasImg=false; foreach ($ev as $e) { if ($e['type']==='image') { $hasImg=true; ?>
+              <?php if ($ev) { $hasImg=false; foreach ($ev as $e) { if ($e['type']==='image') {
+                $hasImg=true;
+                $adminPhotoCanRedact = !empty($tp_evidence_redactions_ready)
+                  && tp_evidence_mime_supports_public_blur((string)($e['mime_type'] ?? ''));
+                $adminPhotoHasSavedBlur = tp_evidence_has_saved_public_blur($e);
+                $adminPhotoSavedBlurNeedsAttention = $adminPhotoHasSavedBlur
+                  && tp_evidence_saved_public_blur_needs_attention($e);
+              ?>
                 <div class="col-6 col-md-4">
-                  <div class="card h-100">
+                  <div class="card h-100 position-relative">
                     <img src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" class="card-img-top" alt="">
+                    <?php if ($adminPhotoCanRedact || $adminPhotoHasSavedBlur): ?>
+                      <span class="case-media-blur-badge badge <?php echo $adminPhotoSavedBlurNeedsAttention ? 'text-bg-warning text-dark' : 'text-bg-success'; ?><?php echo $adminPhotoHasSavedBlur ? '' : ' d-none'; ?>" data-evidence-blur-state="<?php echo (int)$e['id']; ?>">
+                        <i class="bi <?php echo $adminPhotoSavedBlurNeedsAttention ? 'bi-exclamation-triangle' : 'bi-shield-check'; ?>" data-blur-state-icon aria-hidden="true"></i><span data-blur-state-label><?php echo $adminPhotoSavedBlurNeedsAttention ? 'Blur needs attention' : 'Public blur saved'; ?></span>
+                      </span>
+                    <?php endif; ?>
                     <div class="card-body p-2">
                       <div class="small text-truncate" title="<?php echo htmlspecialchars($e['title']); ?>"><?php echo htmlspecialchars($e['title']); ?></div>
                     </div>
@@ -15078,7 +15177,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
     <div class="modal-dialog modal-lg modal-fullscreen-md-down modal-dialog-centered modal-dialog-scrollable">
       <div class="modal-content">
         <div class="modal-header">
-          <h5 class="modal-title"><i class="bi bi-file-earmark-text me-2"></i><span id="evModalTitle">Evidence</span></h5>
+          <h5 class="modal-title d-flex flex-wrap align-items-center gap-2">
+            <span><i class="bi bi-file-earmark-text me-2"></i><span id="evModalTitle">Evidence</span></span>
+            <?php if ($tp_showEvidenceRedactor): ?>
+              <span class="badge text-bg-success d-none" id="evModalSavedBlurAlert" role="status">
+                <i class="bi bi-shield-check me-1" aria-hidden="true"></i><span data-modal-blur-label>Public blur saved</span>
+              </span>
+            <?php endif; ?>
+          </h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
         </div>
         <div class="modal-body">
@@ -15617,6 +15723,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       var redactionCount = document.getElementById('evRedactionCount');
       var redactionStatus = document.getElementById('evRedactionStatus');
       var redactionPublishedBadge = document.getElementById('evRedactionPublishedBadge');
+      var modalSavedBlurAlert = document.getElementById('evModalSavedBlurAlert');
       var redactionCsrf = document.getElementById('evRedactionCsrf');
       var prevButton = document.getElementById('evGalleryPrev');
       var nextButton = document.getElementById('evGalleryNext');
@@ -15641,6 +15748,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         activePointerId: null,
         drawing: false,
         published: false,
+        stale: false,
         version: 'original',
         sourceWidth: 0,
         sourceHeight: 0,
@@ -15678,7 +15786,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           isEditMode: trigger.classList.contains('btn-edit-evidence'),
           isRedactMode: trigger.classList.contains('btn-redact-evidence'),
           isGallery: trigger.getAttribute('data-gallery') === 'case-media',
-          isUrl: trigger.getAttribute('data-url') === '1' || type === 'url' || mime === 'text/url'
+          isUrl: trigger.getAttribute('data-url') === '1' || type === 'url' || mime === 'text/url',
+          hasSavedBlur: trigger.getAttribute('data-has-redaction') === '1',
+          blurNeedsAttention: trigger.getAttribute('data-blur-needs-attention') === '1'
         };
       }
 
@@ -15760,6 +15870,77 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         redactionStatus.className = 'evidence-redaction-status small mb-2 ' + (tone || 'text-secondary');
       }
 
+      function setModalSavedBlurAlert(state) {
+        if (!modalSavedBlurAlert) return;
+        var label = modalSavedBlurAlert.querySelector('[data-modal-blur-label]');
+        var icon = modalSavedBlurAlert.querySelector('.bi');
+        var visible = state === 'saved' || state === 'stale';
+        modalSavedBlurAlert.classList.toggle('d-none', !visible);
+        modalSavedBlurAlert.classList.toggle('text-bg-success', state === 'saved');
+        modalSavedBlurAlert.classList.toggle('text-bg-warning', state === 'stale');
+        modalSavedBlurAlert.classList.toggle('text-dark', state === 'stale');
+        if (label) label.textContent = state === 'stale' ? 'Saved blur needs attention' : 'Public blur saved';
+        if (icon) {
+          icon.classList.toggle('bi-shield-check', state !== 'stale');
+          icon.classList.toggle('bi-exclamation-triangle', state === 'stale');
+        }
+      }
+
+      function setEvidenceSavedBlurState(evidenceId, hasSavedBlur, needsAttention) {
+        var normalizedId = String(evidenceId || '');
+        if (!/^[1-9][0-9]*$/.test(normalizedId)) return;
+        hasSavedBlur = !!hasSavedBlur;
+        needsAttention = hasSavedBlur && !!needsAttention;
+        document.querySelectorAll('[data-evidence-blur-state="' + normalizedId + '"]').forEach(function (indicator) {
+          indicator.classList.toggle('d-none', !hasSavedBlur);
+          indicator.classList.toggle('text-bg-success', hasSavedBlur && !needsAttention);
+          indicator.classList.toggle('text-bg-warning', needsAttention);
+          indicator.classList.toggle('text-dark', needsAttention);
+          var stateIcon = indicator.querySelector('[data-blur-state-icon]');
+          if (stateIcon) {
+            stateIcon.classList.toggle('bi-shield-check', !needsAttention);
+            stateIcon.classList.toggle('bi-exclamation-triangle', needsAttention);
+          }
+          var stateLabel = indicator.querySelector('[data-blur-state-label]');
+          if (stateLabel) stateLabel.textContent = needsAttention ? 'Blur needs attention' : 'Public blur saved';
+        });
+        document.querySelectorAll('[data-id="' + normalizedId + '"]').forEach(function (trigger) {
+          trigger.setAttribute('data-has-redaction', hasSavedBlur ? '1' : '0');
+          trigger.setAttribute('data-blur-needs-attention', needsAttention ? '1' : '0');
+          var ariaBase = trigger.getAttribute('data-blur-aria-base');
+          if (ariaBase) {
+            trigger.setAttribute('aria-label', ariaBase + (needsAttention
+              ? ', saved blur needs attention'
+              : (hasSavedBlur ? ', public blur saved' : '')));
+          }
+        });
+        document.querySelectorAll('.btn-redact-evidence[data-id="' + normalizedId + '"]').forEach(function (button) {
+          button.classList.toggle('btn-warning', needsAttention);
+          button.classList.toggle('btn-success', hasSavedBlur && !needsAttention);
+          button.classList.toggle('btn-outline-info', !hasSavedBlur);
+          var icon = button.querySelector('[data-blur-action-icon]');
+          if (icon) {
+            icon.classList.toggle('bi-exclamation-triangle', needsAttention);
+            icon.classList.toggle('bi-shield-check', hasSavedBlur && !needsAttention);
+            icon.classList.toggle('bi-bounding-box-circles', !hasSavedBlur);
+          }
+          var label = button.querySelector('[data-blur-action-label]');
+          var nextLabel = needsAttention
+            ? (button.getAttribute('data-blur-label-attention') || 'Review saved blur that needs attention')
+            : (hasSavedBlur
+            ? (button.getAttribute('data-blur-label-saved') || 'Edit saved public blur')
+            : (button.getAttribute('data-blur-label-empty') || 'Blur sensitive areas'));
+          if (label) label.textContent = nextLabel;
+          button.setAttribute('aria-label', needsAttention ? 'Review saved blur that needs attention' : (hasSavedBlur ? 'Edit saved public blur' : 'Blur sensitive areas in this image'));
+          button.title = needsAttention ? 'Saved blur needs attention — open to repair or remove' : (hasSavedBlur ? 'Public blur saved — open to review or edit' : 'Blur sensitive areas');
+        });
+        if (redactionState.item && String(redactionState.item.id) === normalizedId) {
+          redactionState.item.hasSavedBlur = hasSavedBlur;
+          redactionState.item.blurNeedsAttention = needsAttention;
+          setModalSavedBlurAlert(needsAttention ? 'stale' : (hasSavedBlur ? 'saved' : 'none'));
+        }
+      }
+
       function teardownRedactionStage() {
         redactionRequestSequence++;
         if (redactionState.resizeObserver) redactionState.resizeObserver.disconnect();
@@ -15781,6 +15962,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         redactionState.regions = [];
         redactionState.drawing = false;
         redactionState.published = false;
+        redactionState.stale = false;
         redactionState.version = 'original';
         redactionState.sourceWidth = 0;
         redactionState.sourceHeight = 0;
@@ -15824,8 +16006,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           redactionPublicButton.classList.toggle('btn-outline-light', !isPublic);
         }
         if (redactionPublishedBadge) {
-          redactionPublishedBadge.textContent = redactionState.published ? 'Public copy saved' : 'Not published';
-          redactionPublishedBadge.className = 'badge ' + (redactionState.published ? 'text-bg-success' : 'text-bg-secondary');
+          redactionPublishedBadge.textContent = redactionState.stale
+            ? 'Saved copy needs attention'
+            : (redactionState.published ? 'Public copy saved' : 'Not published');
+          redactionPublishedBadge.className = 'badge ' + (redactionState.stale
+            ? 'text-bg-warning text-dark'
+            : (redactionState.published ? 'text-bg-success' : 'text-bg-secondary'));
         }
         if (redactionState.stage) {
           redactionState.stage.classList.toggle('is-drawing', redactionState.drawing && !isPublic && editorReady);
@@ -15992,12 +16178,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           }
           redactionState.regions = Array.isArray(data.regions) ? data.regions.map(cleanClientRegion).filter(Boolean) : [];
           redactionState.published = !!data.has_redaction;
+          redactionState.stale = !!data.stale;
           redactionState.sourceWidth = authoritativeWidth;
           redactionState.sourceHeight = authoritativeHeight;
           redactionState.sourceRotation = Number(data.source_rotation) || 0;
           redactionState.metadataLoaded = true;
           redactionState.metadataFailed = false;
           redactionState.drawing = true;
+          setEvidenceSavedBlurState(item.id, redactionState.published, redactionState.published && redactionState.stale);
           updateRedactionControls();
           paintRedactions();
           if (data.stale) {
@@ -16012,6 +16200,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           );
         }).catch(function (error) {
           if (requestId !== redactionRequestSequence || redactionState.item !== item) return;
+          if (item.hasSavedBlur) {
+            setEvidenceSavedBlurState(item.id, true, true);
+            redactionState.published = true;
+            redactionState.stale = true;
+          }
           redactionState.metadataLoaded = true;
           redactionState.metadataFailed = true;
           redactionState.drawing = false;
@@ -16030,6 +16223,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         redactionState.draft = null;
         redactionState.drawing = false;
         redactionState.published = false;
+        redactionState.stale = false;
         redactionState.version = 'original';
         redactionState.metadataLoaded = false;
         redactionState.metadataFailed = false;
@@ -16153,8 +16347,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           regions: redactionState.regions
         };
         postRedactionAction('save_evidence_redaction', {mask_json:JSON.stringify(mask)}).then(function (data) {
+          // The server save is authoritative even if the user navigated to another
+          // gallery item while it was running. Refresh page-level state first.
+          setEvidenceSavedBlurState(operationItem.id, true, false);
           if (!operationIsCurrent()) return;
           redactionState.published = true;
+          redactionState.stale = false;
           setRedactionStatus(data.message || 'Public blurred copy saved. The original remains protected.', 'text-success');
         }).catch(function (error) {
           if (!operationIsCurrent()) return;
@@ -16178,8 +16376,11 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         updateRedactionControls();
         setRedactionStatus('Removing the public blurred copy…', 'text-warning');
         postRedactionAction('remove_evidence_redaction', {}).then(function (data) {
+          // As with save, keep the page indicator in sync even if the modal moved on.
+          setEvidenceSavedBlurState(operationItem.id, false, false);
           if (!operationIsCurrent()) return;
           redactionState.published = false;
+          redactionState.stale = false;
           redactionState.regions = [];
           setRedactionVersion('original');
           setRedactionStatus(data.message || 'Published blur removed. The original is now the public version.', 'text-warning');
@@ -16266,6 +16467,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         var activeGallery = item.isGallery && !item.isEditMode && !item.isRedactMode;
         var titleElement = document.getElementById('evModalTitle');
         if (titleElement) titleElement.textContent = showEvidenceTitles ? item.title : 'Evidence';
+        setModalSavedBlurAlert(item.hasSavedBlur
+          ? (item.blurNeedsAttention ? 'stale' : 'saved')
+          : 'none');
 
         if (previewColumn) {
           previewColumn.classList.toggle('col-lg-8', showSidePanel);
@@ -16377,6 +16581,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         if (titleEditPanel) titleEditPanel.classList.add('d-none');
         if (rotatePanel) rotatePanel.classList.add('d-none');
         if (redactionPanel) redactionPanel.classList.add('d-none');
+        setModalSavedBlurAlert('none');
         var evRotateId = document.getElementById('evRotateId');
         var evRotateCaseId = document.getElementById('evRotateCaseId');
         if (evRotateId) evRotateId.value = '';
