@@ -1,4 +1,12 @@
 <?php
+// Historical source snapshot only. Its legacy evidence endpoint predates public derivatives.
+// Keep the file available for command-line recovery while preventing any web bypass.
+if (PHP_SAPI !== 'cli') {
+    http_response_code(404);
+    header('Cache-Control: no-store');
+    exit('Not found');
+}
+
 // ---- Minimal auth bootstrap (no frameworks) ----
 if (session_status() === PHP_SESSION_NONE) {
     // Secure session settings
@@ -102,7 +110,7 @@ try {
 } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
-function log_case_event(PDO $pdo, int $caseId, string $type, string $subject = null, string $detail = null, ?int $refEvidenceId = null, ?int $refNoteId = null): void {
+function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = null, ?string $detail = null, ?int $refEvidenceId = null, ?int $refNoteId = null): void {
     try {
         $stmt = $pdo->prepare("INSERT INTO case_events (case_id, event_type, subject, detail, ref_evidence_id, ref_note_id, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)");
         $stmt->execute([$caseId, $type, $subject, $detail, $refEvidenceId, $refNoteId, $_SESSION['user']['id'] ?? null]);

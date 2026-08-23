@@ -36,8 +36,11 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
-// Evidence storage path (absolute directory where files are stored, outside web root if possible)
-$storagePath = '/var/www/html/tiktokpredators.com/uploads/';
+// Evidence storage path. New evidence is never written below the document root.
+$tpPrivateStorageOverride = getenv('EVIDENCE_PRIVATE_STORAGE_PATH');
+$storagePath = is_string($tpPrivateStorageOverride) && trim($tpPrivateStorageOverride) !== ''
+    ? trim($tpPrivateStorageOverride)
+    : '/var/lib/tiktokpredators/evidence';
 
 // Console log path
 $CONSOLE_LOG_PATH = '/var/www/html/tiktokpredators.com/logs/console.log';
@@ -1550,6 +1553,655 @@ function tp_save_rotated_display_image(GdImage $image, string $mime, string $des
     return false;
 }
 
+/** Emit a no-store JSON response for the evidence editor API. */
+function tp_evidence_json_response(array $payload, int $status = 200): void {
+    http_response_code($status);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: private, no-store, no-cache, must-revalidate');
+    header('Vary: Cookie');
+    echo json_encode($payload, JSON_UNESCAPED_SLASHES);
+    exit;
+}
+
+/** Apply the same case visibility rule used by the case page and evidence streamer. */
+function tp_evidence_context_is_visible(array $row): bool {
+    $status = (string)($row['case_status'] ?? '');
+    if (!in_array($status, ['Being Built', 'Pending', 'Rejected'], true)) { return true; }
+    if (is_admin()) { return true; }
+    if (is_moderator() && in_array($status, ['Pending', 'Rejected'], true)) { return true; }
+    return !empty($_SESSION['user'])
+        && (int)($row['case_created_by'] ?? 0) > 0
+        && (int)($row['case_created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
+}
+
+/** Original evidence and redaction controls are restricted to visible admin/mod accounts. */
+function tp_can_view_evidence_original(array $row): bool {
+    return tp_evidence_context_is_visible($row) && can_moderate_cases();
+}
+
+function tp_can_manage_evidence_redaction(array $row): bool {
+    return tp_can_view_evidence_original($row);
+}
+
+/** Normalize an absolute Unix filesystem path without requiring it to exist yet. */
+function tp_normalize_absolute_storage_path(string $path): ?string {
+    $path = trim($path);
+    if ($path === '' || $path[0] !== '/' || strpos($path, "\0") !== false) { return null; }
+    $parts = [];
+    foreach (explode('/', str_replace('\\', '/', $path)) as $part) {
+        if ($part === '' || $part === '.') { continue; }
+        if ($part === '..') {
+            if (!$parts) { return null; }
+            array_pop($parts);
+            continue;
+        }
+        $parts[] = $part;
+    }
+    return '/' . implode('/', $parts);
+}
+
+/** Resolve/create the application-private root and reject any location inside the web root. */
+function tp_private_storage_root(bool $create = false, ?string &$error = null): ?string {
+    $error = '';
+    $configured = (string)($GLOBALS['storagePath'] ?? '');
+    $candidate = tp_normalize_absolute_storage_path($configured);
+    $applicationRoot = @realpath(__DIR__) ?: tp_normalize_absolute_storage_path(__DIR__);
+    $serverRootValue = isset($_SERVER['DOCUMENT_ROOT']) && is_string($_SERVER['DOCUMENT_ROOT'])
+        ? trim($_SERVER['DOCUMENT_ROOT'])
+        : '';
+    $serverRoot = $serverRootValue !== ''
+        ? (@realpath($serverRootValue) ?: tp_normalize_absolute_storage_path($serverRootValue))
+        : null;
+    $forbiddenRoots = array_values(array_unique(array_filter([$applicationRoot, $serverRoot], 'is_string')));
+    if ($candidate === null || $candidate === '/' || !$forbiddenRoots) {
+        $error = 'Private evidence storage must be configured as a safe absolute path.';
+        return null;
+    }
+    foreach ($forbiddenRoots as $forbiddenRoot) {
+        $forbiddenPrefix = rtrim($forbiddenRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        $candidatePrefix = rtrim($candidate, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if ($candidate === $forbiddenRoot
+            || strncmp($candidate, $forbiddenPrefix, strlen($forbiddenPrefix)) === 0
+            || strncmp($forbiddenRoot, $candidatePrefix, strlen($candidatePrefix)) === 0) {
+            $error = 'Private evidence storage cannot be inside the public document root.';
+            return null;
+        }
+    }
+
+    $created = false;
+    if (!is_dir($candidate)) {
+        if (!$create || (!@mkdir($candidate, 0700, true) && !is_dir($candidate))) {
+            $error = 'Private evidence storage does not exist or could not be created.';
+            return null;
+        }
+        $created = true;
+    }
+    $root = @realpath($candidate);
+    if (!$root || !is_dir($root)) {
+        $error = 'Private evidence storage could not be resolved safely.';
+        return null;
+    }
+    foreach ($forbiddenRoots as $forbiddenRoot) {
+        $resolvedForbiddenRoot = @realpath($forbiddenRoot) ?: $forbiddenRoot;
+        $forbiddenPrefix = rtrim($resolvedForbiddenRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        $rootPrefix = rtrim($root, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if ($root === $resolvedForbiddenRoot
+            || strncmp($root, $forbiddenPrefix, strlen($forbiddenPrefix)) === 0
+            || strncmp($resolvedForbiddenRoot, $rootPrefix, strlen($rootPrefix)) === 0) {
+            $error = 'Private evidence storage resolved inside the public document root.';
+            return null;
+        }
+    }
+    if ($created) { @chmod($root, 0700); }
+    if ($create && !is_writable($root)) {
+        $error = 'Private evidence storage is not writable.';
+        return null;
+    }
+    return $root;
+}
+
+/** Resolve/create one of the three fixed private storage namespaces. */
+function tp_private_storage_directory(string $kind, bool $create = false, ?string &$error = null): ?string {
+    $error = '';
+    if (!in_array($kind, ['evidence', 'notes', 'redactions'], true)) {
+        $error = 'Invalid private evidence storage namespace.';
+        return null;
+    }
+    $rootError = '';
+    $root = tp_private_storage_root($create, $rootError);
+    if ($root === null) { $error = $rootError; return null; }
+    $candidate = $root . DIRECTORY_SEPARATOR . $kind;
+    if (!is_dir($candidate)) {
+        if (!$create || (!@mkdir($candidate, 0700) && !is_dir($candidate))) {
+            $error = 'Private ' . $kind . ' storage does not exist or could not be created.';
+            return null;
+        }
+        @chmod($candidate, 0700);
+    }
+    $directory = @realpath($candidate);
+    $prefix = rtrim($root, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+    if (!$directory || strncmp($directory, $prefix, strlen($prefix)) !== 0 || !is_dir($directory)) {
+        $error = 'Private ' . $kind . ' storage could not be resolved safely.';
+        return null;
+    }
+    if ($create && !is_writable($directory)) {
+        $error = 'Private ' . $kind . ' storage is not writable.';
+        return null;
+    }
+    return $directory;
+}
+
+/** Build/parse opaque database tokens; tokens never contain an absolute path. */
+function tp_private_file_token(string $kind, string $filename): ?string {
+    if (!in_array($kind, ['evidence', 'notes', 'redactions'], true)
+        || !preg_match('/\A[A-Za-z0-9][A-Za-z0-9._-]{0,250}\z/D', $filename)) {
+        return null;
+    }
+    return 'private:' . $kind . '/' . $filename;
+}
+
+function tp_parse_private_file_token(string $token): ?array {
+    if (!preg_match('/\Aprivate:(evidence|notes|redactions)\/([A-Za-z0-9][A-Za-z0-9._-]{0,250})\z/D', $token, $matches)) {
+        return null;
+    }
+    return ['kind' => $matches[1], 'filename' => $matches[2]];
+}
+
+/** Resolve an opaque private token or a read-only legacy path below uploads/. */
+function tp_resolve_uploaded_file(string $relativePath): ?string {
+    if ($relativePath === '' || strpos($relativePath, "\0") !== false) { return null; }
+    $private = tp_parse_private_file_token($relativePath);
+    if ($private !== null) {
+        $directoryError = '';
+        $directory = tp_private_storage_directory((string)$private['kind'], false, $directoryError);
+        if ($directory === null) { return null; }
+        $absolute = @realpath($directory . DIRECTORY_SEPARATOR . (string)$private['filename']);
+        $prefix = rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+        if (!$absolute || strncmp($absolute, $prefix, strlen($prefix)) !== 0 || !is_file($absolute)) { return null; }
+        return $absolute;
+    }
+    if (strncmp($relativePath, 'private:', 8) === 0) { return null; }
+
+    $uploadsRoot = realpath(__DIR__ . '/uploads');
+    $absolute = @realpath(__DIR__ . '/' . ltrim($relativePath, '/'));
+    $prefix = $uploadsRoot ? rtrim($uploadsRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : '';
+    if (!$absolute || $prefix === '' || strncmp($absolute, $prefix, strlen($prefix)) !== 0 || !is_file($absolute)) {
+        return null;
+    }
+    return $absolute;
+}
+
+/** Ensure the private derivative directory exists. */
+function tp_evidence_redaction_directory(?string &$error = null): ?string {
+    return tp_private_storage_directory('redactions', true, $error);
+}
+
+/** Confirm a derivative token/path resolves within its fixed redactions namespace. */
+function tp_evidence_redaction_path_is_safe(string $storedPath, ?string $resolvedPath): bool {
+    if ($resolvedPath === null || !is_file($resolvedPath)) { return false; }
+    $private = tp_parse_private_file_token($storedPath);
+    if ($private !== null) {
+        if (($private['kind'] ?? '') !== 'redactions') { return false; }
+        $error = '';
+        $directory = tp_private_storage_directory('redactions', false, $error);
+    } else {
+        // Backward-compatible cleanup/serving for derivatives created before private storage.
+        if (strpos($storedPath, 'uploads/redactions/') !== 0) { return false; }
+        $directory = @realpath(__DIR__ . '/uploads/redactions') ?: null;
+    }
+    $prefix = $directory ? rtrim($directory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : '';
+    return $prefix !== '' && strncmp($resolvedPath, $prefix, strlen($prefix)) === 0;
+}
+
+/** Delete only a validated public derivative; never trust a DB path blindly. */
+function tp_delete_evidence_redaction_file(?string $storedPath): void {
+    $storedPath = trim((string)$storedPath);
+    if ($storedPath === '') { return; }
+    $absolute = tp_resolve_uploaded_file($storedPath);
+    if (tp_evidence_redaction_path_is_safe($storedPath, $absolute)) { @unlink($absolute); }
+}
+
+/** Best-effort rollback for a legacy-original move whose DB transaction failed. */
+function tp_restore_legacy_evidence_file(string $privatePath, string $legacyPath, string $expectedSha256): bool {
+    if (!is_file($privatePath) || $legacyPath === '' || strpos($legacyPath, "\0") !== false) { return false; }
+    $legacyDirectory = @realpath(dirname($legacyPath));
+    $uploadsRoot = @realpath(__DIR__ . '/uploads');
+    $uploadsPrefix = $uploadsRoot ? rtrim($uploadsRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : '';
+    if (!$legacyDirectory || $uploadsPrefix === ''
+        || strncmp(rtrim($legacyDirectory, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR, $uploadsPrefix, strlen($uploadsPrefix)) !== 0) {
+        return false;
+    }
+    if (is_file($legacyPath)) {
+        $existingHash = @hash_file('sha256', $legacyPath);
+        if (is_string($existingHash) && hash_equals(strtolower($expectedSha256), strtolower($existingHash))) {
+            @unlink($privatePath);
+            return true;
+        }
+        return false;
+    }
+    if (@rename($privatePath, $legacyPath)) { return true; }
+
+    // Cross-filesystem rollback: copy to an unpredictable sibling then atomically rename.
+    $restoreTemporary = @tempnam($legacyDirectory, '.restore-evidence-');
+    if (!is_string($restoreTemporary) || $restoreTemporary === '' || !@copy($privatePath, $restoreTemporary)) {
+        if (is_string($restoreTemporary) && is_file($restoreTemporary)) { @unlink($restoreTemporary); }
+        return false;
+    }
+    $restoredHash = @hash_file('sha256', $restoreTemporary);
+    if (!is_string($restoredHash) || !hash_equals(strtolower($expectedSha256), strtolower($restoredHash))
+        || !@rename($restoreTemporary, $legacyPath)) {
+        if (is_file($restoreTemporary)) { @unlink($restoreTemporary); }
+        return false;
+    }
+    @unlink($privatePath);
+    return true;
+}
+
+/**
+ * Move a legacy webroot derivative into private quarantine before changing its DB row.
+ * Private derivatives need no quarantine because they have no directly reachable URL.
+ */
+function tp_quarantine_legacy_redaction_file(
+    string $storedPath,
+    int $evidenceId,
+    ?string &$quarantinePath,
+    ?string &$legacyPath,
+    ?string &$sha256,
+    string &$error
+): bool {
+    $quarantinePath = null;
+    $legacyPath = null;
+    $sha256 = null;
+    $error = '';
+    $private = tp_parse_private_file_token($storedPath);
+    if ($private !== null) {
+        if (($private['kind'] ?? '') === 'redactions') { return true; }
+        $error = 'The stored public derivative is outside the private redactions namespace.';
+        return false;
+    }
+    if (strpos($storedPath, 'uploads/redactions/') !== 0) {
+        $error = 'The stored public derivative has an unexpected public path.';
+        return false;
+    }
+
+    $resolved = tp_resolve_uploaded_file($storedPath);
+    if ($resolved === null) {
+        $candidate = __DIR__ . '/' . ltrim($storedPath, '/');
+        if (file_exists($candidate) || is_link($candidate)) {
+            $error = 'The legacy public derivative could not be quarantined safely.';
+            return false;
+        }
+        // It is already absent from the public webroot, so there is nothing to expose.
+        return true;
+    }
+    if (!tp_evidence_redaction_path_is_safe($storedPath, $resolved)) {
+        $error = 'The legacy public derivative path is unsafe.';
+        return false;
+    }
+    $sourceHash = @hash_file('sha256', $resolved);
+    $sourceSize = @filesize($resolved);
+    if (!is_string($sourceHash) || !is_int($sourceSize) || $sourceSize <= 0) {
+        $error = 'The legacy public derivative could not be verified.';
+        return false;
+    }
+    $storageError = '';
+    $redactionDirectory = tp_private_storage_directory('redactions', true, $storageError);
+    if ($redactionDirectory === null) { $error = $storageError; return false; }
+    $extension = strtolower((string)pathinfo($resolved, PATHINFO_EXTENSION));
+    if (!preg_match('/\A[a-z0-9]{1,10}\z/D', $extension)) { $extension = 'bin'; }
+    $quarantineName = 'legacy_' . max(0, $evidenceId) . '_' . date('Ymd_His') . '_' . bin2hex(random_bytes(12)) . '.' . $extension;
+    $destination = $redactionDirectory . '/' . $quarantineName;
+
+    if (!@rename($resolved, $destination)) {
+        $temporary = @tempnam($redactionDirectory, '.legacy-redaction-');
+        if (!is_string($temporary) || $temporary === '' || !@copy($resolved, $temporary)) {
+            if (is_string($temporary) && is_file($temporary)) { @unlink($temporary); }
+            $error = 'The legacy public derivative could not be copied into private quarantine.';
+            return false;
+        }
+        $copiedHash = @hash_file('sha256', $temporary);
+        $copiedSize = @filesize($temporary);
+        if (!is_string($copiedHash) || !hash_equals(strtolower($sourceHash), strtolower($copiedHash))
+            || !is_int($copiedSize) || $copiedSize !== $sourceSize || !@rename($temporary, $destination)) {
+            if (is_file($temporary)) { @unlink($temporary); }
+            $error = 'The quarantined legacy derivative failed integrity verification.';
+            return false;
+        }
+        if (!@unlink($resolved)) {
+            @unlink($destination);
+            $error = 'The legacy public derivative could not be removed from the webroot.';
+            return false;
+        }
+    }
+    $installedHash = @hash_file('sha256', $destination);
+    $installedSize = @filesize($destination);
+    if (!is_string($installedHash) || !hash_equals(strtolower($sourceHash), strtolower($installedHash))
+        || !is_int($installedSize) || $installedSize !== $sourceSize) {
+        // Leave the webroot name absent; callers will roll back and attempt restoration.
+        $quarantinePath = $destination;
+        $legacyPath = $resolved;
+        $sha256 = strtolower($sourceHash);
+        $error = 'The installed legacy-derivative quarantine failed integrity verification.';
+        return false;
+    }
+    @chmod($destination, 0600);
+    $quarantinePath = $destination;
+    $legacyPath = $resolved;
+    $sha256 = strtolower($sourceHash);
+    return true;
+}
+
+/** Fetch evidence, its case policy, and its current public derivative metadata. */
+function tp_fetch_evidence_redaction_context(PDO $pdo, int $evidenceId, bool $forUpdate = false): ?array {
+    if ($evidenceId <= 0) { return null; }
+    $rotationSelect = !empty($GLOBALS['tp_evidence_rotation_ready']) ? 'e.rotation_degrees' : '0 AS rotation_degrees';
+    if (!empty($GLOBALS['tp_evidence_redactions_ready'])) {
+        $redactionSelect = ', r.evidence_id AS redaction_evidence_id, r.public_filepath, r.public_mime_type, r.public_size_bytes, r.public_sha256, r.source_sha256, r.source_rotation, r.source_width, r.source_height, r.mask_json, r.region_count, r.updated_by AS redaction_updated_by, r.updated_at AS redaction_updated_at';
+        $redactionJoin = ' LEFT JOIN evidence_redactions r ON r.evidence_id = e.id';
+    } else {
+        $redactionSelect = ', NULL AS redaction_evidence_id, NULL AS public_filepath, NULL AS public_mime_type, NULL AS public_size_bytes, NULL AS public_sha256, NULL AS source_sha256, NULL AS source_rotation, NULL AS source_width, NULL AS source_height, NULL AS mask_json, NULL AS region_count, NULL AS redaction_updated_by, NULL AS redaction_updated_at';
+        $redactionJoin = '';
+    }
+    $sql = 'SELECT e.id, e.case_id, e.type, e.title, e.filepath, e.mime_type, e.size_bytes, e.hash_sha256, e.sha256_hex, '
+        . $rotationSelect
+        . ', c.sensitivity, c.status AS case_status, c.created_by AS case_created_by'
+        . $redactionSelect
+        . ' FROM evidence e JOIN cases c ON c.id = e.case_id'
+        . $redactionJoin
+        . ' WHERE e.id = ? LIMIT 1'
+        . ($forUpdate ? ' FOR UPDATE' : '');
+    $stmt = $pdo->prepare($sql);
+    $stmt->execute([$evidenceId]);
+    $row = $stmt->fetch();
+    return $row ?: null;
+}
+
+/**
+ * Convert normalized regions into bounded pixel work. The selected area may total at
+ * most two complete source images. Including blur padding, a request may process no
+ * more than three source images plus one megapixel, capped at 24 megapixels.
+ */
+function tp_prepare_evidence_redaction_work(
+    int $imageWidth,
+    int $imageHeight,
+    array $regions,
+    ?array &$workRegions,
+    string &$error
+): bool {
+    $workRegions = null;
+    $error = '';
+    if ($imageWidth <= 0 || $imageHeight <= 0 || $imageWidth > intdiv(PHP_INT_MAX, $imageHeight)) {
+        $error = 'The image dimensions are invalid.';
+        return false;
+    }
+    $imagePixels = $imageWidth * $imageHeight;
+    $selectedPixelLimit = $imagePixels * 2;
+    $paddedPixelLimit = min(24000000, ($imagePixels * 3) + 1000000);
+    $selectedPixels = 0;
+    $paddedPixels = 0;
+    $prepared = [];
+
+    foreach ($regions as $index => $region) {
+        if (!is_array($region)) {
+            $error = 'Blur area ' . ((int)$index + 1) . ' is invalid.';
+            return false;
+        }
+        $left = max(0, min($imageWidth - 1, (int)floor((float)($region['x'] ?? -1) * $imageWidth)));
+        $top = max(0, min($imageHeight - 1, (int)floor((float)($region['y'] ?? -1) * $imageHeight)));
+        $right = max($left + 1, min($imageWidth, (int)ceil(((float)($region['x'] ?? -1) + (float)($region['width'] ?? 0)) * $imageWidth)));
+        $bottom = max($top + 1, min($imageHeight, (int)ceil(((float)($region['y'] ?? -1) + (float)($region['height'] ?? 0)) * $imageHeight)));
+        $targetWidth = $right - $left;
+        $targetHeight = $bottom - $top;
+        $targetPixels = $targetWidth * $targetHeight;
+        $selectedPixels += $targetPixels;
+        if ($selectedPixels > $selectedPixelLimit) {
+            $error = 'The combined blur areas are too large. Cover no more than two image areas in one save.';
+            return false;
+        }
+
+        $padding = max(12, min(96, (int)ceil(max($targetWidth, $targetHeight) * 0.08)));
+        $cropLeft = max(0, $left - $padding);
+        $cropTop = max(0, $top - $padding);
+        $cropRight = min($imageWidth, $right + $padding);
+        $cropBottom = min($imageHeight, $bottom + $padding);
+        $cropWidth = $cropRight - $cropLeft;
+        $cropHeight = $cropBottom - $cropTop;
+        $cropPixels = $cropWidth * $cropHeight;
+        $paddedPixels += $cropPixels;
+        if ($paddedPixels > $paddedPixelLimit) {
+            $error = 'The blur areas require too much image processing. Use fewer or smaller areas and save again.';
+            return false;
+        }
+        $prepared[] = [
+            'left' => $left,
+            'top' => $top,
+            'target_width' => $targetWidth,
+            'target_height' => $targetHeight,
+            'crop_left' => $cropLeft,
+            'crop_top' => $cropTop,
+            'crop_width' => $cropWidth,
+            'crop_height' => $cropHeight,
+            'crop_pixels' => $cropPixels,
+        ];
+    }
+    $workRegions = $prepared;
+    return true;
+}
+
+/** Validate and canonicalise the normalized rectangle mask supplied by the canvas editor. */
+function tp_validate_evidence_redaction_mask(
+    string $maskJson,
+    int $expectedWidth,
+    int $expectedHeight,
+    ?string &$canonicalJson,
+    ?array &$canonicalRegions,
+    string &$error
+): bool {
+    $canonicalJson = null;
+    $canonicalRegions = null;
+    $error = '';
+    if ($maskJson === '' || strlen($maskJson) > 131072) {
+        $error = 'The blur selection data is empty or too large.';
+        return false;
+    }
+    $decoded = json_decode($maskJson, true);
+    if (!is_array($decoded) || json_last_error() !== JSON_ERROR_NONE) {
+        $error = 'The blur selection data is not valid JSON.';
+        return false;
+    }
+    if ((int)($decoded['version'] ?? 0) !== 1) {
+        $error = 'This blur selection format is not supported.';
+        return false;
+    }
+    $sourceWidth = $decoded['source_width'] ?? null;
+    $sourceHeight = $decoded['source_height'] ?? null;
+    if (!is_int($sourceWidth) || !is_int($sourceHeight)
+        || $sourceWidth !== $expectedWidth || $sourceHeight !== $expectedHeight) {
+        $error = 'The image changed while it was being edited. Reload it and draw the blur areas again.';
+        return false;
+    }
+    $regions = $decoded['regions'] ?? null;
+    if (!is_array($regions) || count($regions) < 1 || count($regions) > 100) {
+        $error = 'Draw between 1 and 100 blur areas.';
+        return false;
+    }
+
+    $normalized = [];
+    foreach ($regions as $index => $region) {
+        if (!is_array($region)) {
+            $error = 'Blur area ' . ((int)$index + 1) . ' is invalid.';
+            return false;
+        }
+        $values = [];
+        foreach (['x', 'y', 'width', 'height'] as $key) {
+            $value = $region[$key] ?? null;
+            if ((!is_int($value) && !is_float($value)) || !is_finite((float)$value)) {
+                $error = 'Blur area ' . ((int)$index + 1) . ' has invalid coordinates.';
+                return false;
+            }
+            $values[$key] = (float)$value;
+        }
+        if ($values['x'] < 0 || $values['y'] < 0 || $values['width'] <= 0 || $values['height'] <= 0
+            || $values['x'] >= 1 || $values['y'] >= 1
+            || ($values['x'] + $values['width']) > 1.000001
+            || ($values['y'] + $values['height']) > 1.000001) {
+            $error = 'Blur area ' . ((int)$index + 1) . ' falls outside the image.';
+            return false;
+        }
+        $x = max(0.0, min(1.0, $values['x']));
+        $y = max(0.0, min(1.0, $values['y']));
+        $width = min($values['width'], 1.0 - $x);
+        $height = min($values['height'], 1.0 - $y);
+        if (($width * $expectedWidth) < 1 || ($height * $expectedHeight) < 1) {
+            $error = 'Blur area ' . ((int)$index + 1) . ' is too small.';
+            return false;
+        }
+        $normalized[] = [
+            'x' => round($x, 6),
+            'y' => round($y, 6),
+            'width' => round($width, 6),
+            'height' => round($height, 6),
+        ];
+    }
+
+    // Reject abusive aggregate work before any image-processing allocation occurs.
+    $validatedWork = null;
+    $workError = '';
+    if (!tp_prepare_evidence_redaction_work($expectedWidth, $expectedHeight, $normalized, $validatedWork, $workError)) {
+        $error = $workError;
+        return false;
+    }
+
+    $canonical = [
+        'version' => 1,
+        'source_width' => $expectedWidth,
+        'source_height' => $expectedHeight,
+        'regions' => $normalized,
+    ];
+    $encoded = json_encode($canonical, JSON_UNESCAPED_SLASHES);
+    if (!is_string($encoded)) {
+        $error = 'Unable to encode the blur selection data.';
+        return false;
+    }
+    $canonicalJson = $encoded;
+    $canonicalRegions = $normalized;
+    return true;
+}
+
+/** Configure a temporary GD canvas to retain transparency for PNG and WebP. */
+function tp_prepare_evidence_canvas(GdImage $canvas, string $mime): void {
+    if (!in_array($mime, ['image/png', 'image/webp'], true)) { return; }
+    imagealphablending($canvas, false);
+    imagesavealpha($canvas, true);
+    $transparent = imagecolorallocatealpha($canvas, 0, 0, 0, 127);
+    if ($transparent !== false) { imagefill($canvas, 0, 0, $transparent); }
+}
+
+/** Release a GD object without PHP 8.5's deprecated imagedestroy() warning. */
+function tp_release_evidence_image(&$image): void {
+    if ($image instanceof GdImage && PHP_VERSION_ID < 80500) { @imagedestroy($image); }
+    $image = null;
+}
+
+/**
+ * Apply a deliberately strong pixelation + Gaussian blur inside each selected rectangle.
+ * Padding supplies neighbouring pixels to the blur while only the selected rectangle is copied back.
+ */
+function tp_apply_evidence_blur_regions(GdImage $image, array $regions, string $mime, string &$error): bool {
+    $error = '';
+    $imageWidth = imagesx($image);
+    $imageHeight = imagesy($image);
+    if ($imageWidth <= 0 || $imageHeight <= 0) {
+        $error = 'The image dimensions are invalid.';
+        return false;
+    }
+
+    // Recalculate all limits server-side immediately before processing (defence in depth).
+    $workRegions = null;
+    if (!tp_prepare_evidence_redaction_work($imageWidth, $imageHeight, $regions, $workRegions, $error)) {
+        return false;
+    }
+    $largestCropPixels = 0;
+    $largestSmallPixels = 0;
+    foreach ($workRegions ?: [] as $work) {
+        $largestCropPixels = max($largestCropPixels, (int)$work['crop_pixels']);
+        $largestSmallPixels = max(
+            $largestSmallPixels,
+            max(1, (int)ceil((int)$work['crop_width'] / 18)) * max(1, (int)ceil((int)$work['crop_height'] / 18))
+        );
+    }
+    $memoryLimit = tp_evidence_ini_bytes((string)ini_get('memory_limit'));
+    if ($memoryLimit > 0) {
+        $available = max(0, $memoryLimit - memory_get_usage(true));
+        // GD allocations are not consistently included in memory_get_usage(). Reserve for
+        // the source, padded crop, resampling/filter scratch space, and encoder overhead.
+        $estimatedAdditional = ($imageWidth * $imageHeight * 6)
+            + ($largestCropPixels * 12)
+            + ($largestSmallPixels * 8)
+            + (16 * 1024 * 1024);
+        if ($estimatedAdditional > $available) {
+            $error = 'The blur areas need more image memory than this server currently has available.';
+            return false;
+        }
+    }
+
+    foreach ($workRegions ?: [] as $index => $work) {
+        $left = (int)$work['left'];
+        $top = (int)$work['top'];
+        $targetWidth = (int)$work['target_width'];
+        $targetHeight = (int)$work['target_height'];
+        $cropLeft = (int)$work['crop_left'];
+        $cropTop = (int)$work['crop_top'];
+        $cropWidth = (int)$work['crop_width'];
+        $cropHeight = (int)$work['crop_height'];
+
+        $crop = imagecreatetruecolor($cropWidth, $cropHeight);
+        if (!($crop instanceof GdImage)) {
+            $error = 'Unable to prepare blur area ' . ((int)$index + 1) . '.';
+            return false;
+        }
+        tp_prepare_evidence_canvas($crop, $mime);
+        if (!imagecopy($crop, $image, 0, 0, $cropLeft, $cropTop, $cropWidth, $cropHeight)) {
+            tp_release_evidence_image($crop);
+            $error = 'Unable to read blur area ' . ((int)$index + 1) . '.';
+            return false;
+        }
+
+        // Destroy fine detail before the Gaussian passes. This is intentionally much stronger
+        // than a cosmetic CSS blur because the derivative may contain intimate or identifying data.
+        $smallWidth = max(1, (int)ceil($cropWidth / 18));
+        $smallHeight = max(1, (int)ceil($cropHeight / 18));
+        $small = imagecreatetruecolor($smallWidth, $smallHeight);
+        if (!($small instanceof GdImage)) {
+            tp_release_evidence_image($small);
+            tp_release_evidence_image($crop);
+            $error = 'Unable to allocate memory for blur area ' . ((int)$index + 1) . '.';
+            return false;
+        }
+        tp_prepare_evidence_canvas($small, $mime);
+        $resampledDown = imagecopyresampled($small, $crop, 0, 0, 0, 0, $smallWidth, $smallHeight, $cropWidth, $cropHeight);
+        $resampledUp = $resampledDown
+            && imagecopyresampled($crop, $small, 0, 0, 0, 0, $cropWidth, $cropHeight, $smallWidth, $smallHeight);
+        tp_release_evidence_image($small);
+        if (!$resampledUp) {
+            tp_release_evidence_image($crop);
+            $error = 'Unable to render blur area ' . ((int)$index + 1) . '.';
+            return false;
+        }
+        for ($pass = 0; $pass < 6; $pass++) { @imagefilter($crop, IMG_FILTER_GAUSSIAN_BLUR); }
+
+        $sourceX = $left - $cropLeft;
+        $sourceY = $top - $cropTop;
+        if (!imagecopy($image, $crop, $left, $top, $sourceX, $sourceY, $targetWidth, $targetHeight)) {
+            tp_release_evidence_image($crop);
+            $error = 'Unable to apply blur area ' . ((int)$index + 1) . '.';
+            return false;
+        }
+        tp_release_evidence_image($crop);
+    }
+    return true;
+}
+
 // Generate a unique case code like CASE-2025-AB12CD34 (random, collision-checked)
 function generate_case_code(PDO $pdo): string {
     $year = date('Y');
@@ -1833,6 +2485,43 @@ try {
   $tp_evidence_rotation_ready = true;
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+// --- Evidence public derivatives (immutable original + current server-rendered redaction) ---
+$tp_evidence_redactions_ready = false;
+try {
+  $pdo->exec(<<<SQL
+CREATE TABLE IF NOT EXISTS evidence_redactions (
+  evidence_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+  public_filepath VARCHAR(1024) NOT NULL,
+  public_mime_type VARCHAR(127) NOT NULL,
+  public_size_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  public_sha256 CHAR(64) NOT NULL,
+  source_sha256 CHAR(64) NOT NULL,
+  source_rotation SMALLINT UNSIGNED NOT NULL DEFAULT 0,
+  source_width INT UNSIGNED NOT NULL,
+  source_height INT UNSIGNED NOT NULL,
+  mask_json LONGTEXT NOT NULL,
+  region_count INT UNSIGNED NOT NULL DEFAULT 0,
+  updated_by BIGINT UNSIGNED NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_evidence_redactions_updated_by (updated_by),
+  INDEX idx_evidence_redactions_updated_at (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+SQL
+  );
+  $tp_evidence_redactions_ready = true;
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+  log_console('ERROR', 'Evidence redaction schema: ' . $e->getMessage());
+  // A deployment may pre-create the table while denying runtime DDL. Confirm the
+  // required columns with a read before deciding the feature is unavailable.
+  try {
+    $pdo->query('SELECT evidence_id, public_filepath, public_mime_type, public_size_bytes, public_sha256, source_sha256, source_rotation, source_width, source_height, mask_json, region_count, updated_by, created_at, updated_at FROM evidence_redactions LIMIT 0');
+    $tp_evidence_redactions_ready = true;
+  } catch (Throwable $ignored) {
+    $tp_evidence_redactions_ready = false;
+  }
 }
 // --- Case TikTok usernames relationship setup and legacy backfill ---
 try {
@@ -2792,102 +3481,213 @@ function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = 
       }
     }
 
-// Secure evidence streaming endpoint
+// Privileged canvas-editor metadata endpoint. Mask coordinates are never exposed publicly.
+if (($_GET['action'] ?? '') === 'get_evidence_redaction') {
+    $eidRaw = $_GET['id'] ?? '';
+    $eid = (is_string($eidRaw) || is_int($eidRaw)) && ctype_digit((string)$eidRaw) ? (int)$eidRaw : 0;
+    if ($eid <= 0) { tp_evidence_json_response(['ok' => false, 'error' => 'Invalid evidence.'], 400); }
+    if (empty($tp_evidence_redactions_ready)) {
+        tp_evidence_json_response(['ok' => false, 'error' => 'Evidence redaction is temporarily unavailable.'], 503);
+    }
+    try {
+        $row = tp_fetch_evidence_redaction_context($pdo, $eid);
+    } catch (Throwable $e) {
+        log_console('ERROR', 'Load evidence redaction #' . $eid . ': ' . $e->getMessage());
+        tp_evidence_json_response(['ok' => false, 'error' => 'Unable to load evidence redaction details.'], 500);
+    }
+    if (!$row || !tp_can_manage_evidence_redaction($row)) {
+        tp_evidence_json_response(['ok' => false, 'error' => 'Not found.'], 404);
+    }
+    if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
+    $originalPath = tp_resolve_uploaded_file((string)($row['filepath'] ?? ''));
+    $rotation = (int)($row['rotation_degrees'] ?? 0);
+    if (!in_array($rotation, [0, 90, 180, 270], true)) { $rotation = 0; }
+    $detectedMime = null;
+    $renderError = '';
+    $image = $originalPath ? tp_load_evidence_display_image($originalPath, $rotation, $detectedMime, $renderError) : null;
+    if (!($image instanceof GdImage) || $detectedMime === null) {
+        tp_evidence_json_response(['ok' => false, 'error' => $renderError !== '' ? $renderError : 'This evidence is not a supported image.'], 415);
+    }
+    $sourceWidth = imagesx($image);
+    $sourceHeight = imagesy($image);
+    tp_release_evidence_image($image);
+    // Row existence is authoritative. A corrupt/incomplete row must remain visible to
+    // moderators for removal and must never be treated as permission to serve the original.
+    $hasRedaction = (int)($row['redaction_evidence_id'] ?? 0) === $eid;
+    $regions = [];
+    $redactionStale = false;
+    if ($hasRedaction) {
+        $canonicalJson = null;
+        $canonicalRegions = null;
+        $maskError = '';
+        if ((int)($row['source_rotation'] ?? -1) !== $rotation
+            || !tp_validate_evidence_redaction_mask((string)($row['mask_json'] ?? ''), $sourceWidth, $sourceHeight, $canonicalJson, $canonicalRegions, $maskError)) {
+            $redactionStale = true;
+        } else {
+            $regions = $canonicalRegions ?: [];
+        }
+        $actualSourceHash = $originalPath ? @hash_file('sha256', $originalPath) : false;
+        if (!is_string($actualSourceHash) || !hash_equals(strtolower((string)($row['source_sha256'] ?? '')), strtolower($actualSourceHash))) {
+            $redactionStale = true;
+        }
+        $databaseSourceHash = strtolower(trim((string)($row['hash_sha256'] ?? $row['sha256_hex'] ?? '')));
+        if (is_string($actualSourceHash) && preg_match('/\A[a-f0-9]{64}\z/D', $databaseSourceHash)
+            && !hash_equals($databaseSourceHash, strtolower($actualSourceHash))) {
+            $redactionStale = true;
+        }
+        $publicRelative = trim((string)($row['public_filepath'] ?? ''));
+        $publicPath = tp_resolve_uploaded_file($publicRelative);
+        $publicMime = strtolower(trim((string)($row['public_mime_type'] ?? '')));
+        $actualPublicSize = $publicPath ? @filesize($publicPath) : false;
+        $actualPublicHash = $publicPath ? @hash_file('sha256', $publicPath) : false;
+        $storedPublicHash = strtolower(trim((string)($row['public_sha256'] ?? '')));
+        if (!tp_evidence_redaction_path_is_safe($publicRelative, $publicPath)
+            || !in_array($publicMime, ['image/jpeg', 'image/png', 'image/webp'], true)
+            || !is_int($actualPublicSize) || $actualPublicSize <= 0
+            || $actualPublicSize !== (int)($row['public_size_bytes'] ?? -1)
+            || !is_string($actualPublicHash) || !preg_match('/\A[a-f0-9]{64}\z/D', $storedPublicHash)
+            || !hash_equals($storedPublicHash, strtolower((string)$actualPublicHash))) {
+            $redactionStale = true;
+        }
+    }
+    tp_evidence_json_response([
+        'ok' => true,
+        'has_redaction' => $hasRedaction,
+        'regions' => $regions,
+        'source_width' => $sourceWidth,
+        'source_height' => $sourceHeight,
+        'source_rotation' => $rotation,
+        'stale' => $redactionStale,
+        'warning' => $redactionStale ? 'The saved public version is stale. Remove it or draw and save new blur areas.' : '',
+    ]);
+}
+
+// Secure evidence streaming endpoint. Originals and public derivatives are selected server-side.
 if (($_GET['action'] ?? '') === 'serve_evidence') {
+    // These vary by authentication even when an access/integrity check exits early.
+    header('X-Content-Type-Options: nosniff');
+    header('Cache-Control: private, no-store, no-cache, must-revalidate, no-transform');
+    header('Vary: Cookie');
+    header('Pragma: no-cache');
+    header('Expires: 0');
     $eid = (int)($_GET['id'] ?? 0);
     if ($eid <= 0) { http_response_code(400); exit('Bad request'); }
     try {
-        $rotationSelect = !empty($tp_evidence_rotation_ready) ? 'e.rotation_degrees' : '0 AS rotation_degrees';
-        $q = $pdo->prepare('SELECT e.id, e.filepath, e.mime_type, e.type, e.case_id, ' . $rotationSelect . ', c.sensitivity, c.status AS case_status, c.created_by AS case_created_by FROM evidence e JOIN cases c ON c.id = e.case_id WHERE e.id = ? LIMIT 1');
-        $q->execute([$eid]);
-        $row = $q->fetch();
+        $row = tp_fetch_evidence_redaction_context($pdo, $eid);
     } catch (Throwable $e) {
         http_response_code(500); exit('Server error');
     }
-    if (!$row) { http_response_code(404); exit('Not found'); }
-    $isReviewCaseOwner = !empty($_SESSION['user']) && (int)($row['case_created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
-    $isPrivateReviewStatus = in_array(($row['case_status'] ?? ''), ['Being Built','Pending','Rejected'], true);
-    $isCaseReviewer = can_moderate_cases() && in_array(($row['case_status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true);
-    if ($isPrivateReviewStatus && !is_admin() && !$isCaseReviewer && !$isReviewCaseOwner) { http_response_code(404); exit('Not found'); }
-    $rel = $row['filepath'] ?? '';
-    $mime = $row['mime_type'] ?? 'application/octet-stream';
-    $type = $row['type'] ?? 'other';
-    $sens = $row['sensitivity'] ?? 'Standard';
-    $abs  = __DIR__ . '/' . ltrim($rel, '/');
-    $uploadsRoot = realpath(__DIR__ . '/uploads');
-    $absReal = @realpath($abs);
-    $uploadsPrefix = $uploadsRoot ? rtrim($uploadsRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : '';
-    // Require a real file within uploads; a similarly prefixed sibling directory is not enough.
-    if (!$absReal || $uploadsPrefix === '' || strncmp($absReal, $uploadsPrefix, strlen($uploadsPrefix)) !== 0) {
-        http_response_code(403); exit('Forbidden');
+    if (!$row || !tp_evidence_context_is_visible($row)) { http_response_code(404); exit('Not found'); }
+
+    $variantValue = $_GET['variant'] ?? '';
+    if (!is_string($variantValue)) { http_response_code(400); exit('Bad request'); }
+    $requestedVariant = strtolower(trim($variantValue));
+    if (!in_array($requestedVariant, ['', 'public', 'original'], true)) { http_response_code(400); exit('Bad request'); }
+    $canViewOriginal = tp_can_view_evidence_original($row);
+    if ($requestedVariant === 'original' && !$canViewOriginal) { http_response_code(404); exit('Not found'); }
+    if (empty($tp_evidence_redactions_ready) && (!$canViewOriginal || $requestedVariant === 'public')) {
+        // Without redaction metadata the server cannot prove that the original is the public copy.
+        http_response_code(503); exit('Public version temporarily unavailable');
     }
-    if (!is_file($absReal)) { http_response_code(404); exit('Not found'); }
 
-    // Send restrictive headers
-    header('X-Content-Type-Options: nosniff');
-    header('Cache-Control: private, no-store, no-cache, must-revalidate, no-transform');
-    header('Pragma: no-cache');
-    header('Expires: 0');
-
-    $isImage = ($type === 'image') || (strpos($mime, 'image/') === 0);
-    $isAdmin = is_admin();
-    $canReviewRawEvidence = $isAdmin || $isCaseReviewer;
-    $isRestricted = ($sens === 'Restricted');
+    $originalPath = tp_resolve_uploaded_file((string)($row['filepath'] ?? ''));
+    if ($originalPath === null) { http_response_code(404); exit('Not found'); }
+    $originalMime = strtolower(trim((string)($row['mime_type'] ?? 'application/octet-stream')));
+    $type = strtolower(trim((string)($row['type'] ?? 'other')));
+    $sensitivity = (string)($row['sensitivity'] ?? 'Standard');
     $rotationDegrees = (int)($row['rotation_degrees'] ?? 0);
     if (!in_array($rotationDegrees, [0, 90, 180, 270], true)) { $rotationDegrees = 0; }
-    $isThumbnailRequest = $isImage && (($_GET['thumbnail'] ?? null) === '1');
 
-    // For restricted cases: non-admins must not get raw images.
-    if ($isRestricted && !$canReviewRawEvidence && !$isImage) {
-        http_response_code(403); exit('Restricted');
+    // Do not infer row absence from a path value: a corrupt row is still a redaction
+    // state and therefore must force the public path through fail-closed validation.
+    $hasRedaction = (int)($row['redaction_evidence_id'] ?? 0) === $eid;
+    $showPublicPresentation = !$canViewOriginal || $requestedVariant === 'public';
+    if ($sensitivity === 'Sealed' && $showPublicPresentation) { http_response_code(403); exit('Sealed'); }
+    // Access decisions are complete; do not hold the session lock while files are verified/rendered.
+    if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
+    $usePublicDerivative = $hasRedaction && $showPublicPresentation;
+    $selectedPath = $originalPath;
+    $selectedMime = $originalMime;
+    $selectedRotation = $rotationDegrees;
+    if ($usePublicDerivative) {
+        // The bytes currently on disk are the freshness authority. The evidence-table
+        // hash is useful as an additional integrity check but cannot safely stand in for
+        // hashing the original because a file can be replaced without updating the DB.
+        $sourceHash = strtolower((string)@hash_file('sha256', $originalPath));
+        $databaseSourceHash = strtolower(trim((string)($row['hash_sha256'] ?? $row['sha256_hex'] ?? '')));
+        $databaseSourceHashIsValid = preg_match('/\A[a-f0-9]{64}\z/D', $databaseSourceHash) === 1;
+        $databaseSourceMatches = !$databaseSourceHashIsValid
+            || (preg_match('/\A[a-f0-9]{64}\z/D', $sourceHash) === 1 && hash_equals($databaseSourceHash, $sourceHash));
+        $storedSourceHash = strtolower(trim((string)($row['source_sha256'] ?? '')));
+        $publicRelative = trim((string)($row['public_filepath'] ?? ''));
+        $publicMime = strtolower(trim((string)($row['public_mime_type'] ?? '')));
+        $publicPath = tp_resolve_uploaded_file($publicRelative);
+        $publicInsideRedactions = tp_evidence_redaction_path_is_safe($publicRelative, $publicPath);
+        $actualPublicSize = $publicPath ? @filesize($publicPath) : false;
+        $storedPublicSize = (int)($row['public_size_bytes'] ?? -1);
+        $actualPublicHash = $publicPath ? @hash_file('sha256', $publicPath) : false;
+        $publicIsCurrent = preg_match('/\A[a-f0-9]{64}\z/D', $sourceHash)
+            && preg_match('/\A[a-f0-9]{64}\z/D', $storedSourceHash)
+            && hash_equals($storedSourceHash, $sourceHash)
+            && $databaseSourceMatches
+            && (int)($row['source_rotation'] ?? -1) === $rotationDegrees
+            && $publicInsideRedactions
+            && in_array($publicMime, ['image/jpeg', 'image/png', 'image/webp'], true)
+            && is_int($actualPublicSize) && $actualPublicSize > 0 && $actualPublicSize === $storedPublicSize
+            && is_string($actualPublicHash)
+            && preg_match('/\A[a-f0-9]{64}\z/D', strtolower((string)($row['public_sha256'] ?? '')))
+            && hash_equals(strtolower((string)$row['public_sha256']), strtolower($actualPublicHash));
+        if (!$publicIsCurrent) {
+            log_console('ERROR', 'Refusing stale/missing public derivative for evidence #' . $eid);
+            http_response_code(503); exit('Public version temporarily unavailable');
+        }
+        $selectedPath = $publicPath;
+        $selectedMime = $publicMime;
+        // The saved derivative already includes EXIF normalization and the stored display rotation.
+        $selectedRotation = 0;
     }
 
-    // Evidence responses do not need to retain the PHP session lock while media is encoded or streamed.
-    if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
+    // A privileged public-preview request with no redaction shows the same source public viewers see.
+    $isImage = ($type === 'image') || strpos($selectedMime, 'image/') === 0;
+    $isRestrictedPresentation = $sensitivity === 'Restricted' && $showPublicPresentation;
+    if ($isRestrictedPresentation && !$isImage) { http_response_code(403); exit('Restricted'); }
+    $isThumbnailRequest = $isImage && (($_GET['thumbnail'] ?? null) === '1');
 
-    // Rotated images, restricted previews and gallery thumbnails are rendered from the immutable original.
-    if ($isImage && ($rotationDegrees !== 0 || ($isRestricted && !$canReviewRawEvidence) || $isThumbnailRequest)) {
+    if ($isImage && ($selectedRotation !== 0 || $isRestrictedPresentation || $isThumbnailRequest)) {
         $renderMime = null;
         $renderError = '';
-        $img = tp_load_evidence_display_image($absReal, $rotationDegrees, $renderMime, $renderError);
+        $img = tp_load_evidence_display_image($selectedPath, $selectedRotation, $renderMime, $renderError);
         if (!($img instanceof GdImage) || $renderMime === null) {
-            // Thumbnail generation is an optimisation. If an otherwise viewable image is outside
-            // the safe GD decoder limits (for example GIF, animated WebP or a very large JPEG),
-            // fall back to the original response instead of showing a broken gallery tile.
-            $canFallBackToOriginal = $isThumbnailRequest
-                && $rotationDegrees === 0
-                && (!$isRestricted || $canReviewRawEvidence);
-            if (!$canFallBackToOriginal) {
-                http_response_code(415); exit('Unsupported media');
-            }
+            // A thumbnail is an optimisation; falling back to the already-authorised selected
+            // source is safe. Restricted presentations must never bypass their whole-image blur.
+            $canFallBackToSelected = $isThumbnailRequest && $selectedRotation === 0 && !$isRestrictedPresentation;
+            if (!$canFallBackToSelected) { http_response_code(415); exit('Unsupported media'); }
             $img = null;
             $renderMime = null;
         }
 
-        if ($img instanceof GdImage && $renderMime !== null && $isRestricted && !$canReviewRawEvidence) {
-            // Downscale to max width 640 (keeping aspect)
-            $w = imagesx($img); $h = imagesy($img);
-            $maxW = 640;
-            if ($w > $maxW) {
-                $nw = $maxW; $nh = (int)round($h * ($maxW / $w));
-                $small = imagecreatetruecolor($nw, $nh);
-                if (!($small instanceof GdImage) || !imagecopyresampled($small, $img, 0, 0, 0, 0, $nw, $nh, $w, $h)) {
-                    $small = null;
-                    $img = null;
+        if ($img instanceof GdImage && $renderMime !== null && $isRestrictedPresentation) {
+            $width = imagesx($img);
+            $height = imagesy($img);
+            $maxWidth = 640;
+            if ($width > $maxWidth) {
+                $newWidth = $maxWidth;
+                $newHeight = max(1, (int)round($height * ($maxWidth / $width)));
+                $small = imagecreatetruecolor($newWidth, $newHeight);
+                if (!($small instanceof GdImage) || !imagecopyresampled($small, $img, 0, 0, 0, 0, $newWidth, $newHeight, $width, $height)) {
+                    tp_release_evidence_image($small);
+                    tp_release_evidence_image($img);
                     http_response_code(500); exit('Unable to render image');
                 }
-                $img = null;
+                tp_release_evidence_image($img);
                 $img = $small;
                 $small = null;
             }
-            // Apply heavy gaussian blur
-            for ($i = 0; $i < 8; $i++) { @imagefilter($img, IMG_FILTER_GAUSSIAN_BLUR); }
-
+            for ($pass = 0; $pass < 8; $pass++) { @imagefilter($img, IMG_FILTER_GAUSSIAN_BLUR); }
             header('Content-Type: image/jpeg');
-            // Prevent download as "real" with generic filename
             header('Content-Disposition: inline; filename="restricted.jpg"');
             imagejpeg($img, null, 60);
-            $img = null;
+            tp_release_evidence_image($img);
             exit;
         }
 
@@ -2895,29 +3695,22 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
             $width = imagesx($img);
             $height = imagesy($img);
             $maxDimension = 720;
-            $scale = ($width > 0 && $height > 0)
-                ? min(1, $maxDimension / $width, $maxDimension / $height)
-                : 0;
+            $scale = ($width > 0 && $height > 0) ? min(1, $maxDimension / $width, $maxDimension / $height) : 0;
             if ($scale <= 0) {
-                $img = null;
+                tp_release_evidence_image($img);
                 http_response_code(500); exit('Unable to render thumbnail');
             }
             if ($scale < 1) {
                 $thumbWidth = max(1, (int)round($width * $scale));
                 $thumbHeight = max(1, (int)round($height * $scale));
                 $thumbnail = imagecreatetruecolor($thumbWidth, $thumbHeight);
-                if ($thumbnail instanceof GdImage && in_array($renderMime, ['image/png', 'image/webp'], true)) {
-                    imagealphablending($thumbnail, false);
-                    imagesavealpha($thumbnail, true);
-                    $transparent = imagecolorallocatealpha($thumbnail, 0, 0, 0, 127);
-                    imagefill($thumbnail, 0, 0, $transparent);
-                }
+                if ($thumbnail instanceof GdImage) { tp_prepare_evidence_canvas($thumbnail, $renderMime); }
                 if (!($thumbnail instanceof GdImage) || !imagecopyresampled($thumbnail, $img, 0, 0, 0, 0, $thumbWidth, $thumbHeight, $width, $height)) {
-                    $thumbnail = null;
-                    $img = null;
+                    tp_release_evidence_image($thumbnail);
+                    tp_release_evidence_image($img);
                     http_response_code(500); exit('Unable to render thumbnail');
                 }
-                $img = null;
+                tp_release_evidence_image($img);
                 $img = $thumbnail;
                 $thumbnail = null;
             }
@@ -2928,16 +3721,43 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
             header('Content-Type: ' . $renderMime);
             header('Content-Disposition: inline; filename="evidence-' . $eid . ($isThumbnailRequest ? '-thumbnail' : '') . '.' . $extension . '"');
             $outputOk = tp_output_evidence_display_image($img, $renderMime);
-            $img = null;
+            tp_release_evidence_image($img);
             if (!$outputOk) { log_console('ERROR', 'Unable to encode evidence preview #' . $eid); }
             exit;
         }
     }
 
-    // Unrotated, unrestricted evidence is streamed byte-for-byte with single-range support for media previews/seeking.
-    $size = @filesize($absReal);
-    header('Content-Type: ' . $mime);
-    header('Content-Disposition: inline; filename="' . basename($absReal) . '"');
+    // Stream the selected original/public version with single-range support for media seeking.
+    $size = @filesize($selectedPath);
+    // Passive media families can be previewed inline, including legacy formats that
+    // browsers may support. Active document/script subtypes always download, even if
+    // they use an image/* label (notably SVG).
+    $activeMimeMarkers = ['svg', 'xml', 'html', 'javascript', 'ecmascript'];
+    $isActiveMime = false;
+    foreach ($activeMimeMarkers as $activeMimeMarker) {
+        if (strpos($selectedMime, $activeMimeMarker) !== false) {
+            $isActiveMime = true;
+            break;
+        }
+    }
+    $isPassiveMediaMime = preg_match('/\A(?:image|audio|video)\/[a-z0-9][a-z0-9.+_-]*\z/D', $selectedMime) === 1;
+    $streamInline = !$isActiveMime && (
+        $isPassiveMediaMime
+        || in_array($selectedMime, ['application/ogg', 'application/pdf', 'text/plain'], true)
+    );
+    $streamMime = $streamInline ? $selectedMime : 'application/octet-stream';
+    $extension = [
+        'image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp',
+        'image/gif' => 'gif', 'image/bmp' => 'bmp', 'image/x-bmp' => 'bmp',
+        'image/x-ms-bmp' => 'bmp', 'image/avif' => 'avif',
+        'video/mp4' => 'mp4', 'video/x-m4v' => 'm4v', 'video/webm' => 'webm', 'video/ogg' => 'ogv',
+        'audio/mpeg' => 'mp3', 'audio/mp4' => 'm4a', 'audio/aac' => 'aac', 'audio/x-aac' => 'aac',
+        'audio/flac' => 'flac', 'audio/x-flac' => 'flac', 'audio/ogg' => 'ogg',
+        'audio/webm' => 'weba', 'audio/wav' => 'wav', 'audio/x-wav' => 'wav',
+        'application/ogg' => 'ogg', 'application/pdf' => 'pdf', 'text/plain' => 'txt',
+    ][$selectedMime] ?? 'bin';
+    header('Content-Type: ' . $streamMime);
+    header('Content-Disposition: ' . ($streamInline ? 'inline' : 'attachment') . '; filename="evidence-' . $eid . ($usePublicDerivative ? '-public' : '') . '.' . $extension . '"');
     if (is_int($size) && $size >= 0) {
         $rangeHeader = trim((string)($_SERVER['HTTP_RANGE'] ?? ''));
         $ifRangeHeader = trim((string)($_SERVER['HTTP_IF_RANGE'] ?? ''));
@@ -2986,7 +3806,7 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
         }
         $length = $end - $start + 1;
         header('Content-Length: ' . $length);
-        $fp = fopen($absReal, 'rb');
+        $fp = fopen($selectedPath, 'rb');
         if (!$fp || ($start > 0 && fseek($fp, $start) !== 0)) {
             if (is_resource($fp)) { fclose($fp); }
             http_response_code(500); exit('Unable to stream evidence');
@@ -3001,9 +3821,9 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
         fclose($fp);
         exit;
     }
-    $fp = fopen($absReal, 'rb');
+    $fp = fopen($selectedPath, 'rb');
     if ($fp) { fpassthru($fp); fclose($fp); }
-    else { readfile($absReal); }
+    else { readfile($selectedPath); }
     exit;
 }
 
@@ -4885,18 +5705,30 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
     // Prepare safe title (truncate to 255 chars to avoid DB overflow)
     $title = mb_substr($note, 0, 255, 'UTF-8');
 
-    // Persist full note text to a file (so we don't lose long notes)
-    $notesDir = __DIR__ . '/uploads/notes';
-    if (!is_dir($notesDir)) { @mkdir($notesDir, 0755, true); }
-    $filename = 'note_' . uniqid('', true) . '.txt';
+    // Persist full note text outside the document root (so we don't lose long notes).
+    $privateStorageError = '';
+    $notesDir = tp_private_storage_directory('notes', true, $privateStorageError);
+    if ($notesDir === null) {
+        log_console('ERROR', 'Evidence note private storage: ' . $privateStorageError);
+        flash('error', 'Private evidence storage is unavailable.');
+        if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+    }
+    $filename = 'note_' . date('Ymd_His') . '_' . bin2hex(random_bytes(12)) . '.txt';
     $destAbs = $notesDir . '/' . $filename;
-    $destRel = 'uploads/notes/' . $filename;
+    $destRel = tp_private_file_token('notes', $filename);
+    if ($destRel === null) {
+        flash('error', 'Unable to prepare the private note path.');
+        if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+    }
     $writeOk = @file_put_contents($destAbs, $note);
     if ($writeOk === false) {
         flash('error', 'Unable to store note file.');
         if ($redir_url !== '') { header('Location: ' . $redir_url); exit; }
         header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
+    @chmod($destAbs, 0600);
 
     $mime = 'text/plain';
     $size = filesize($destAbs) ?: strlen($note);
@@ -4911,7 +5743,7 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
             'other',
             $title,
             $destRel,
-            $storagePath,
+            dirname($notesDir),
             $filename,
             $mime,
             $size,
@@ -4925,6 +5757,7 @@ if (($_POST['action'] ?? '') === 'add_evidence_note') {
         log_case_event($pdo, $case_id, 'evidence_added', $title, 'Type: other (note). '.$notePreview, $newEvidenceId, null);
         flash('success', 'Evidence note added.');
     } catch (Throwable $e) {
+        if (is_file($destAbs)) { @unlink($destAbs); }
         $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to add evidence note.');
@@ -5056,8 +5889,15 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
 
-    $uploadDir = __DIR__ . '/uploads';
-    if (!is_dir($uploadDir)) { @mkdir($uploadDir, 0755, true); }
+    $privateStorageError = '';
+    $uploadDir = tp_private_storage_directory('evidence', true, $privateStorageError);
+    if ($uploadDir === null) {
+        log_console('ERROR', 'Evidence upload private storage: ' . $privateStorageError);
+        flash('error', 'Private evidence storage is unavailable.');
+        $redirUrl = trim($_POST['redirect_url'] ?? '');
+        if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+    }
 
     $f = $_FILES['evidence_file'];
     if ($f['error'] !== UPLOAD_ERR_OK) {
@@ -5074,8 +5914,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $origExt  = $origExt !== '' ? ('.' . strtolower($origExt)) : '';
 
     // 1) Move to a temporary unique path first
-    $tmpRel = 'uploads/tmp_' . uniqid('', true);
-    $tmpAbs = __DIR__ . '/' . $tmpRel;
+    $tmpAbs = $uploadDir . '/.upload-' . bin2hex(random_bytes(16));
     if (!move_uploaded_file($f['tmp_name'], $tmpAbs)) {
         flash('error', 'Unable to save uploaded file.');
         $redirUrl = trim($_POST['redirect_url'] ?? '');
@@ -5087,8 +5926,15 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     $hash = hash_file('sha256', $tmpAbs);
     $uniq = date('Ymd_His') . '_' . bin2hex(random_bytes(4)); // timestamp + 8 hex chars
     $finalName = $origBase . '_' . $uniq . '_' . substr($hash, 0, 12) . $origExt;
-    $destRel = 'uploads/' . $finalName;
-    $destAbs = __DIR__ . '/' . $destRel;
+    $destRel = tp_private_file_token('evidence', $finalName);
+    $destAbs = $uploadDir . '/' . $finalName;
+    if ($destRel === null) {
+        @unlink($tmpAbs);
+        flash('error', 'The uploaded filename is too long to store safely.');
+        $redirUrl = trim($_POST['redirect_url'] ?? '');
+        if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
+        header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
+    }
 
     // 3) Move temp file into place with final unique name
     if (!@rename($tmpAbs, $destAbs)) {
@@ -5099,6 +5945,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
         header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
+    @chmod($destAbs, 0600);
 
     $mime = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
     $size = filesize($destAbs) ?: 0;
@@ -5146,7 +5993,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
             $type,
             ($title !== '' ? $title : $finalName),
             $destRel,
-            $storagePath,
+            dirname($uploadDir),
             $safeName,
             $mime,
             $size,
@@ -5160,6 +6007,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         flash('success', 'Evidence uploaded.');
         log_console('SUCCESS', 'Evidence uploaded for case_id ' . $case_id . ' (' . ($title !== '' ? $title : $finalName) . ')');
     } catch (Throwable $e) {
+        if (is_file($destAbs)) { @unlink($destAbs); }
         $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to save evidence.');
@@ -5197,16 +6045,19 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
         echo json_encode(['ok'=>false,'error'=>'Upload error code: '.(int)$f['error']]); exit;
     }
 
-    $uploadDir = __DIR__ . '/uploads';
-    if (!is_dir($uploadDir)) { @mkdir($uploadDir, 0755, true); }
+    $privateStorageError = '';
+    $uploadDir = tp_private_storage_directory('evidence', true, $privateStorageError);
+    if ($uploadDir === null) {
+        log_console('ERROR', 'AJAX evidence private storage: ' . $privateStorageError);
+        echo json_encode(['ok'=>false,'error'=>'Private evidence storage is unavailable.']); exit;
+    }
 
     $safeName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', basename($f['name']));
     $origBase = pathinfo($safeName, PATHINFO_FILENAME);
     $origExt  = pathinfo($safeName, PATHINFO_EXTENSION);
     $origExt  = $origExt !== '' ? ('.' . strtolower($origExt)) : '';
 
-    $tmpRel = 'uploads/tmp_' . uniqid('', true);
-    $tmpAbs = __DIR__ . '/' . $tmpRel;
+    $tmpAbs = $uploadDir . '/.upload-' . bin2hex(random_bytes(16));
     if (!move_uploaded_file($f['tmp_name'], $tmpAbs)) {
         echo json_encode(['ok'=>false,'error'=>'Unable to save uploaded file.']); exit;
     }
@@ -5214,13 +6065,18 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
     $hash    = hash_file('sha256', $tmpAbs);
     $uniq    = date('Ymd_His') . '_' . bin2hex(random_bytes(4));
     $finalName = $origBase . '_' . $uniq . '_' . substr($hash, 0, 12) . $origExt;
-    $destRel = 'uploads/' . $finalName;
-    $destAbs = __DIR__ . '/' . $destRel;
+    $destRel = tp_private_file_token('evidence', $finalName);
+    $destAbs = $uploadDir . '/' . $finalName;
+    if ($destRel === null) {
+        @unlink($tmpAbs);
+        echo json_encode(['ok'=>false,'error'=>'The uploaded filename is too long to store safely.']); exit;
+    }
 
     if (!@rename($tmpAbs, $destAbs)) {
         @unlink($tmpAbs);
         echo json_encode(['ok'=>false,'error'=>'Unable to finalize uploaded file.']); exit;
     }
+    @chmod($destAbs, 0600);
 
     $mime    = mime_content_type($destAbs) ?: ($f['type'] ?? 'application/octet-stream');
     $size    = filesize($destAbs) ?: 0;
@@ -5252,7 +6108,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
         $stmt->execute([
             $case_id, $type,
             ($title !== '' ? $title : $finalName),
-            $destRel, $storagePath, $safeName, $mime, $size, $hash, $hash,
+            $destRel, dirname($uploadDir), $safeName, $mime, $size, $hash, $hash,
             $_SESSION['user']['id'] ?? null,
             $_SESSION['user']['id'] ?? null
         ]);
@@ -5261,9 +6117,466 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
         log_console('SUCCESS', 'AJAX evidence uploaded for case_id '.$case_id.' ('.$finalName.')');
         echo json_encode(['ok'=>true,'evidence_id'=>$newEvidenceId,'filename'=>$finalName]); exit;
     } catch (Throwable $e) {
+        if (is_file($destAbs)) { @unlink($destAbs); }
         log_console('ERROR', 'AJAX upload SQL: '.$e->getMessage());
         echo json_encode(['ok'=>false,'error'=>'Database error: unable to save evidence.']); exit;
     }
+}
+
+// Save a server-rendered public derivative from normalized canvas rectangles.
+if (($_POST['action'] ?? '') === 'save_evidence_redaction') {
+    throttle();
+    if (!check_csrf()) { tp_evidence_json_response(['ok' => false, 'error' => 'Security check failed. Refresh and try again.'], 403); }
+    if (empty($tp_evidence_redactions_ready)) {
+        tp_evidence_json_response(['ok' => false, 'error' => 'Evidence redaction is temporarily unavailable.'], 503);
+    }
+    $evidenceIdRaw = $_POST['evidence_id'] ?? '';
+    $caseIdRaw = $_POST['case_id'] ?? '';
+    $evidenceId = (is_string($evidenceIdRaw) || is_int($evidenceIdRaw)) && ctype_digit((string)$evidenceIdRaw) ? (int)$evidenceIdRaw : 0;
+    $caseId = (is_string($caseIdRaw) || is_int($caseIdRaw)) && ctype_digit((string)$caseIdRaw) ? (int)$caseIdRaw : 0;
+    $maskJson = $_POST['mask_json'] ?? '';
+    if ($evidenceId <= 0 || $caseId <= 0 || !is_string($maskJson)) {
+        tp_evidence_json_response(['ok' => false, 'error' => 'Invalid evidence redaction request.'], 400);
+    }
+
+    try {
+        $context = tp_fetch_evidence_redaction_context($pdo, $evidenceId);
+    } catch (Throwable $e) {
+        log_console('ERROR', 'Read evidence redaction #' . $evidenceId . ': ' . $e->getMessage());
+        tp_evidence_json_response(['ok' => false, 'error' => 'Unable to load the evidence.'], 500);
+    }
+    if (!$context || (int)($context['case_id'] ?? 0) !== $caseId || !tp_can_manage_evidence_redaction($context)) {
+        tp_evidence_json_response(['ok' => false, 'error' => 'Not found.'], 404);
+    }
+    if (strpos((string)($context['filepath'] ?? ''), 'uploads/people/') === 0) {
+        tp_evidence_json_response([
+            'ok' => false,
+            'error' => 'This evidence reuses a public profile photo. Upload a separate evidence copy before adding public blur areas.',
+        ], 409);
+    }
+    $originalPath = tp_resolve_uploaded_file((string)($context['filepath'] ?? ''));
+    if ($originalPath === null) { tp_evidence_json_response(['ok' => false, 'error' => 'The original image could not be found safely.'], 404); }
+    $rotation = (int)($context['rotation_degrees'] ?? 0);
+    if (!in_array($rotation, [0, 90, 180, 270], true)) { $rotation = 0; }
+    $detectedMime = null;
+    $loadError = '';
+    $image = tp_load_evidence_display_image($originalPath, $rotation, $detectedMime, $loadError);
+    if (!($image instanceof GdImage) || $detectedMime === null) {
+        tp_evidence_json_response(['ok' => false, 'error' => $loadError !== '' ? $loadError : 'This evidence is not a supported image.'], 415);
+    }
+    $sourceWidth = imagesx($image);
+    $sourceHeight = imagesy($image);
+    $canonicalJson = null;
+    $regions = null;
+    $maskError = '';
+    if (!tp_validate_evidence_redaction_mask($maskJson, $sourceWidth, $sourceHeight, $canonicalJson, $regions, $maskError)) {
+        tp_release_evidence_image($image);
+        tp_evidence_json_response(['ok' => false, 'error' => $maskError], 422);
+    }
+    $blurError = '';
+    if (!tp_apply_evidence_blur_regions($image, $regions ?: [], $detectedMime, $blurError)) {
+        tp_release_evidence_image($image);
+        tp_evidence_json_response(['ok' => false, 'error' => $blurError !== '' ? $blurError : 'Unable to blur the selected areas.'], 500);
+    }
+
+    $storageError = '';
+    $redactionDirectory = tp_evidence_redaction_directory($storageError);
+    if ($redactionDirectory === null) {
+        tp_release_evidence_image($image);
+        tp_evidence_json_response(['ok' => false, 'error' => $storageError], 500);
+    }
+    $temporaryPath = @tempnam($redactionDirectory, '.redaction-' . $evidenceId . '-');
+    if (!is_string($temporaryPath) || $temporaryPath === '') {
+        tp_release_evidence_image($image);
+        tp_evidence_json_response(['ok' => false, 'error' => 'Unable to prepare the public image.'], 500);
+    }
+    if (!tp_save_rotated_display_image($image, $detectedMime, $temporaryPath)) {
+        tp_release_evidence_image($image);
+        @unlink($temporaryPath);
+        tp_evidence_json_response(['ok' => false, 'error' => 'Unable to encode the public image.'], 500);
+    }
+    tp_release_evidence_image($image);
+    $publicSize = @filesize($temporaryPath);
+    $publicHash = @hash_file('sha256', $temporaryPath);
+    $sourceHash = @hash_file('sha256', $originalPath);
+    if (!is_int($publicSize) || $publicSize <= 0 || !is_string($publicHash) || !is_string($sourceHash)) {
+        @unlink($temporaryPath);
+        tp_evidence_json_response(['ok' => false, 'error' => 'Unable to verify the public image.'], 500);
+    }
+    $databaseSourceHash = strtolower(trim((string)($context['hash_sha256'] ?? $context['sha256_hex'] ?? '')));
+    if (preg_match('/\A[a-f0-9]{64}\z/D', $databaseSourceHash) && !hash_equals($databaseSourceHash, strtolower($sourceHash))) {
+        @unlink($temporaryPath);
+        tp_evidence_json_response(['ok' => false, 'error' => 'The original image no longer matches its evidence record.'], 409);
+    }
+    $extension = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'][$detectedMime] ?? null;
+    if ($extension === null) {
+        @unlink($temporaryPath);
+        tp_evidence_json_response(['ok' => false, 'error' => 'This image format cannot be saved safely.'], 415);
+    }
+    $privateEvidenceError = '';
+    $privateEvidenceDirectory = tp_private_storage_directory('evidence', true, $privateEvidenceError);
+    if ($privateEvidenceDirectory === null) {
+        @unlink($temporaryPath);
+        tp_evidence_json_response(['ok' => false, 'error' => $privateEvidenceError], 500);
+    }
+    $finalName = 'evidence_' . $evidenceId . '_public_' . date('Ymd_His') . '_' . bin2hex(random_bytes(8)) . '.' . $extension;
+    $finalRelative = tp_private_file_token('redactions', $finalName);
+    if ($finalRelative === null) {
+        @unlink($temporaryPath);
+        tp_evidence_json_response(['ok' => false, 'error' => 'Unable to prepare the private public-image path.'], 500);
+    }
+    $finalPath = $redactionDirectory . '/' . $finalName;
+    $installedDerivativePath = null;
+    $installedOriginalPath = null;
+    $installedOriginalToken = null;
+    $migrationTemporaryPath = null;
+    $legacyOriginalPath = null;
+    $legacyOriginalStoredPath = null;
+    $legacyOriginalWasRemoved = false;
+    $legacyDerivativeQuarantinePath = null;
+    $legacyDerivativePath = null;
+    $legacyDerivativeHash = null;
+    $oldPublicPath = null;
+
+    try {
+        $pdo->beginTransaction();
+        $locked = tp_fetch_evidence_redaction_context($pdo, $evidenceId, true);
+        if (!$locked || (int)($locked['case_id'] ?? 0) !== $caseId || !tp_can_manage_evidence_redaction($locked)) {
+            throw new RuntimeException('Evidence visibility changed while saving the redaction.');
+        }
+        $lockedRotation = (int)($locked['rotation_degrees'] ?? 0);
+        if (!in_array($lockedRotation, [0, 90, 180, 270], true)) { $lockedRotation = 0; }
+        if ((string)($locked['filepath'] ?? '') !== (string)($context['filepath'] ?? '') || $lockedRotation !== $rotation) {
+            throw new RuntimeException('Evidence orientation changed while saving the redaction.');
+        }
+        $lockedOriginalPath = tp_resolve_uploaded_file((string)$locked['filepath']);
+        $lockedSourceHash = $lockedOriginalPath ? @hash_file('sha256', $lockedOriginalPath) : false;
+        if (!is_string($lockedSourceHash) || !hash_equals(strtolower($sourceHash), strtolower($lockedSourceHash))) {
+            throw new RuntimeException('Original evidence changed while saving the redaction.');
+        }
+
+        // A first redaction save is also the migration boundary for legacy webroot
+        // originals. The public file must be gone before a redaction row can commit.
+        $lockedStoredPath = (string)($locked['filepath'] ?? '');
+        if (tp_parse_private_file_token($lockedStoredPath) === null) {
+            if (strpos($lockedStoredPath, 'uploads/people/') === 0) {
+                throw new RuntimeException('Evidence that reuses a public profile photo cannot be redacted safely.');
+            }
+            $privateOriginalName = 'evidence_' . $evidenceId . '_original_' . date('Ymd_His') . '_' . bin2hex(random_bytes(12)) . '.' . $extension;
+            $privateOriginalToken = tp_private_file_token('evidence', $privateOriginalName);
+            $privateOriginalPath = $privateEvidenceDirectory . '/' . $privateOriginalName;
+            if ($privateOriginalToken === null) {
+                throw new RuntimeException('Unable to prepare a private original-evidence path.');
+            }
+            $lockedSize = @filesize($lockedOriginalPath);
+            if (!is_int($lockedSize) || $lockedSize <= 0) {
+                throw new RuntimeException('Unable to verify the legacy original evidence size.');
+            }
+
+            $legacyOriginalPath = $lockedOriginalPath;
+            $legacyOriginalStoredPath = $lockedStoredPath;
+            if (@rename($lockedOriginalPath, $privateOriginalPath)) {
+                // Preferred same-filesystem path: the web-readable name disappears atomically.
+                $installedOriginalPath = $privateOriginalPath;
+                $legacyOriginalWasRemoved = true;
+            } else {
+                // Cross-filesystem fallback: verify the private copy, then require unlink
+                // success before the DB can point at the private token or publish a derivative.
+                $migrationTemporaryPath = @tempnam($privateEvidenceDirectory, '.migrate-' . $evidenceId . '-');
+                if (!is_string($migrationTemporaryPath) || $migrationTemporaryPath === ''
+                    || !@copy($lockedOriginalPath, $migrationTemporaryPath)) {
+                    throw new RuntimeException('Unable to copy the original evidence into private storage.');
+                }
+                $copiedHash = @hash_file('sha256', $migrationTemporaryPath);
+                $copiedSize = @filesize($migrationTemporaryPath);
+                if (!is_string($copiedHash) || !hash_equals(strtolower($sourceHash), strtolower($copiedHash))
+                    || !is_int($copiedSize) || $copiedSize !== $lockedSize
+                    || !@rename($migrationTemporaryPath, $privateOriginalPath)) {
+                    throw new RuntimeException('The private original-evidence copy failed integrity verification or installation.');
+                }
+                $migrationTemporaryPath = null;
+                $installedOriginalPath = $privateOriginalPath;
+                if (!@unlink($lockedOriginalPath)) {
+                    @unlink($privateOriginalPath);
+                    $installedOriginalPath = null;
+                    throw new RuntimeException('The legacy webroot original could not be removed safely.');
+                }
+                $legacyOriginalWasRemoved = true;
+            }
+
+            $installedOriginalToken = $privateOriginalToken;
+            $privateOriginalHash = @hash_file('sha256', $privateOriginalPath);
+            $privateOriginalSize = @filesize($privateOriginalPath);
+            if (!is_string($privateOriginalHash) || !hash_equals(strtolower($sourceHash), strtolower($privateOriginalHash))
+                || !is_int($privateOriginalSize) || $privateOriginalSize !== $lockedSize) {
+                throw new RuntimeException('The installed private original failed integrity verification.');
+            }
+            @chmod($privateOriginalPath, 0600);
+            $moveOriginal = $pdo->prepare('UPDATE evidence SET filepath = ?, storage_path = ? WHERE id = ? AND filepath = ? LIMIT 1');
+            $moveOriginal->execute([$privateOriginalToken, dirname($privateEvidenceDirectory), $evidenceId, $lockedStoredPath]);
+            if ($moveOriginal->rowCount() !== 1) {
+                throw new RuntimeException('Unable to attach the private original to its evidence record.');
+            }
+        }
+
+        $oldPublicPath = trim((string)($locked['public_filepath'] ?? '')) ?: null;
+        if ($oldPublicPath !== null) {
+            $legacyDerivativeError = '';
+            if (!tp_quarantine_legacy_redaction_file(
+                $oldPublicPath,
+                $evidenceId,
+                $legacyDerivativeQuarantinePath,
+                $legacyDerivativePath,
+                $legacyDerivativeHash,
+                $legacyDerivativeError
+            )) {
+                throw new RuntimeException($legacyDerivativeError !== '' ? $legacyDerivativeError : 'Unable to quarantine the legacy public derivative.');
+            }
+        }
+        if (!@rename($temporaryPath, $finalPath)) {
+            throw new RuntimeException('Unable to install the public derivative.');
+        }
+        $installedDerivativePath = $finalPath;
+        @chmod($finalPath, 0600);
+
+        $save = $pdo->prepare(
+            'INSERT INTO evidence_redactions '
+            . '(evidence_id, public_filepath, public_mime_type, public_size_bytes, public_sha256, source_sha256, source_rotation, source_width, source_height, mask_json, region_count, updated_by) '
+            . 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+            . 'ON DUPLICATE KEY UPDATE public_filepath = VALUES(public_filepath), public_mime_type = VALUES(public_mime_type), '
+            . 'public_size_bytes = VALUES(public_size_bytes), public_sha256 = VALUES(public_sha256), source_sha256 = VALUES(source_sha256), '
+            . 'source_rotation = VALUES(source_rotation), source_width = VALUES(source_width), source_height = VALUES(source_height), '
+            . 'mask_json = VALUES(mask_json), region_count = VALUES(region_count), updated_by = VALUES(updated_by), updated_at = CURRENT_TIMESTAMP'
+        );
+        $save->execute([
+            $evidenceId,
+            $finalRelative,
+            $detectedMime,
+            $publicSize,
+            strtolower($publicHash),
+            strtolower($sourceHash),
+            $rotation,
+            $sourceWidth,
+            $sourceHeight,
+            $canonicalJson,
+            count($regions ?: []),
+            (int)($_SESSION['user']['id'] ?? 0),
+        ]);
+        log_case_event(
+            $pdo,
+            $caseId,
+            'redactions_saved',
+            trim((string)($locked['title'] ?? '')) ?: ('Evidence #' . $evidenceId),
+            'Public image saved with ' . count($regions ?: []) . ' blur region' . (count($regions ?: []) === 1 ? '.' : 's.'),
+            $evidenceId,
+            null
+        );
+        $pdo->commit();
+        $installedDerivativePath = null;
+        $installedOriginalPath = null;
+        $installedOriginalToken = null;
+    } catch (Throwable $e) {
+        // A thrown commit can have an uncertain server outcome. Only an explicit,
+        // successful rollback of an active transaction permits webroot restoration.
+        $rollbackConfirmed = false;
+        try {
+            if ($pdo->inTransaction()) { $rollbackConfirmed = ($pdo->rollBack() === true); }
+        } catch (Throwable $rollbackError) {
+            $rollbackConfirmed = false;
+            log_console('ERROR', 'CRITICAL redaction transaction rollback failed for evidence #' . $evidenceId . ': ' . $rollbackError->getMessage());
+        }
+        if (is_string($installedDerivativePath) && is_file($installedDerivativePath)) { @unlink($installedDerivativePath); }
+        if (is_string($migrationTemporaryPath) && is_file($migrationTemporaryPath)) { @unlink($migrationTemporaryPath); }
+        if (is_string($legacyDerivativeQuarantinePath) && is_string($legacyDerivativePath) && is_string($legacyDerivativeHash)) {
+            $restoredDerivative = $rollbackConfirmed
+                && tp_restore_legacy_evidence_file($legacyDerivativeQuarantinePath, $legacyDerivativePath, $legacyDerivativeHash);
+            if (!$restoredDerivative) {
+                log_console('ERROR', 'Legacy public derivative rollback could not restore its old path for evidence #' . $evidenceId . '; private quarantine retained.');
+            }
+        }
+        $privatePointerRepairNeeded = false;
+        if ($legacyOriginalWasRemoved && is_string($installedOriginalPath) && is_string($legacyOriginalPath)) {
+            $restoredLegacy = $rollbackConfirmed
+                && tp_restore_legacy_evidence_file($installedOriginalPath, $legacyOriginalPath, strtolower($sourceHash));
+            $privatePointerRepairNeeded = !$restoredLegacy;
+        }
+        if ($privatePointerRepairNeeded) {
+            // Restoration failure must not delete the only retained original. Keep the
+            // private file and repair the evidence pointer outside the rolled-back tx.
+            // If rollback itself was uncertain, never recreate a public bypass path.
+            $repairSucceeded = false;
+            try {
+                if (!is_string($installedOriginalToken) || !is_string($legacyOriginalStoredPath)) {
+                    throw new RuntimeException('Private migration repair metadata is incomplete.');
+                }
+                $sentinelName = 'unavailable_' . $evidenceId . '_' . bin2hex(random_bytes(12)) . '.jpg';
+                $sentinelToken = tp_private_file_token('redactions', $sentinelName);
+                if ($sentinelToken === null) { throw new RuntimeException('Unable to create the fail-closed redaction sentinel.'); }
+
+                $pdo->beginTransaction();
+                $repairLock = $pdo->prepare('SELECT filepath FROM evidence WHERE id = ? LIMIT 1 FOR UPDATE');
+                $repairLock->execute([$evidenceId]);
+                $currentRepairPath = $repairLock->fetchColumn();
+                if (!is_string($currentRepairPath)) {
+                    throw new RuntimeException('The evidence row disappeared during private pointer repair.');
+                }
+                if (hash_equals($legacyOriginalStoredPath, $currentRepairPath)) {
+                    $repair = $pdo->prepare('UPDATE evidence SET filepath = ?, storage_path = ? WHERE id = ? AND filepath = ? LIMIT 1');
+                    $repair->execute([$installedOriginalToken, dirname($privateEvidenceDirectory), $evidenceId, $legacyOriginalStoredPath]);
+                    if ($repair->rowCount() !== 1) {
+                        throw new RuntimeException('Private migration pointer repair did not update the evidence row.');
+                    }
+                } elseif (!hash_equals($installedOriginalToken, $currentRepairPath)) {
+                    throw new RuntimeException('The evidence path changed unexpectedly during private pointer repair.');
+                }
+
+                // Ensure row existence even on a failed/uncertain first save. The sentinel
+                // intentionally names no file and has invalid mask metadata, so public serving
+                // returns 503 until a moderator successfully saves or explicitly removes it.
+                $sentinel = $pdo->prepare(
+                    'INSERT INTO evidence_redactions '
+                    . '(evidence_id, public_filepath, public_mime_type, public_size_bytes, public_sha256, source_sha256, source_rotation, source_width, source_height, mask_json, region_count, updated_by) '
+                    . 'VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 0, ?) '
+                    . 'ON DUPLICATE KEY UPDATE evidence_id = VALUES(evidence_id)'
+                );
+                $sentinel->execute([
+                    $evidenceId,
+                    $sentinelToken,
+                    in_array($detectedMime, ['image/jpeg', 'image/png', 'image/webp'], true) ? $detectedMime : 'image/jpeg',
+                    str_repeat('0', 64),
+                    strtolower($sourceHash),
+                    $rotation,
+                    $sourceWidth,
+                    $sourceHeight,
+                    '{"version":0,"regions":[]}',
+                    (int)($_SESSION['user']['id'] ?? 0),
+                ]);
+                $pdo->commit();
+
+                $repairCheck = $pdo->prepare('SELECT e.filepath, r.evidence_id AS redaction_evidence_id FROM evidence e LEFT JOIN evidence_redactions r ON r.evidence_id = e.id WHERE e.id = ? LIMIT 1');
+                $repairCheck->execute([$evidenceId]);
+                $repairRow = $repairCheck->fetch() ?: [];
+                $repairSucceeded = hash_equals($installedOriginalToken, (string)($repairRow['filepath'] ?? ''))
+                    && (int)($repairRow['redaction_evidence_id'] ?? 0) === $evidenceId;
+                if (!$repairSucceeded) {
+                    throw new RuntimeException('Private migration fail-closed repair did not verify.');
+                }
+            } catch (Throwable $repairError) {
+                try { if ($pdo->inTransaction()) { $pdo->rollBack(); } } catch (Throwable $ignored) {}
+                log_console('ERROR', 'CRITICAL private original pointer repair failed for evidence #' . $evidenceId . ': ' . $repairError->getMessage());
+            }
+            log_console(
+                'ERROR',
+                'CRITICAL legacy original rollback could not restore its old path for evidence #' . $evidenceId
+                . ($repairSucceeded ? '; DB pointer repaired to retained private copy.' : '; private copy retained for manual recovery.')
+            );
+        } elseif (is_string($installedOriginalPath) && is_file($installedOriginalPath)) {
+            // No legacy file was removed (or restoration succeeded elsewhere), so this
+            // installed copy is not authoritative and may be cleaned safely.
+            @unlink($installedOriginalPath);
+        }
+        if (is_file($temporaryPath)) { @unlink($temporaryPath); }
+        log_console('ERROR', 'Save evidence redaction #' . $evidenceId . ': ' . $e->getMessage());
+        tp_evidence_json_response(['ok' => false, 'error' => 'Unable to save the public blurred image. Reload and try again.'], 500);
+    }
+    if (is_string($legacyDerivativeQuarantinePath) && is_file($legacyDerivativeQuarantinePath)) {
+        @unlink($legacyDerivativeQuarantinePath);
+    }
+    if ($oldPublicPath !== null && $oldPublicPath !== $finalRelative) {
+        tp_delete_evidence_redaction_file($oldPublicPath);
+    }
+    tp_evidence_json_response([
+        'ok' => true,
+        'has_redaction' => true,
+        'region_count' => count($regions ?: []),
+        'message' => 'Public blurred image saved. The original remains available to admins and moderators.',
+    ]);
+}
+
+// Explicitly remove the public derivative. This makes the original public for otherwise public evidence.
+if (($_POST['action'] ?? '') === 'remove_evidence_redaction') {
+    throttle();
+    if (!check_csrf()) { tp_evidence_json_response(['ok' => false, 'error' => 'Security check failed. Refresh and try again.'], 403); }
+    if (empty($tp_evidence_redactions_ready)) {
+        tp_evidence_json_response(['ok' => false, 'error' => 'Evidence redaction is temporarily unavailable.'], 503);
+    }
+    $evidenceIdRaw = $_POST['evidence_id'] ?? '';
+    $caseIdRaw = $_POST['case_id'] ?? '';
+    $evidenceId = (is_string($evidenceIdRaw) || is_int($evidenceIdRaw)) && ctype_digit((string)$evidenceIdRaw) ? (int)$evidenceIdRaw : 0;
+    $caseId = (is_string($caseIdRaw) || is_int($caseIdRaw)) && ctype_digit((string)$caseIdRaw) ? (int)$caseIdRaw : 0;
+    if ($evidenceId <= 0 || $caseId <= 0) {
+        tp_evidence_json_response(['ok' => false, 'error' => 'Invalid evidence redaction request.'], 400);
+    }
+    $oldPublicPath = null;
+    $hadRedaction = false;
+    $legacyDerivativeQuarantinePath = null;
+    $legacyDerivativePath = null;
+    $legacyDerivativeHash = null;
+    try {
+        $pdo->beginTransaction();
+        $locked = tp_fetch_evidence_redaction_context($pdo, $evidenceId, true);
+        if (!$locked || (int)($locked['case_id'] ?? 0) !== $caseId || !tp_can_manage_evidence_redaction($locked)) {
+            throw new RuntimeException('Evidence not found or unavailable.');
+        }
+        $hadRedaction = (int)($locked['redaction_evidence_id'] ?? 0) === $evidenceId;
+        $oldPublicPath = trim((string)($locked['public_filepath'] ?? '')) ?: null;
+        if ($hadRedaction) {
+            if ($oldPublicPath !== null) {
+                $legacyDerivativeError = '';
+                if (!tp_quarantine_legacy_redaction_file(
+                    $oldPublicPath,
+                    $evidenceId,
+                    $legacyDerivativeQuarantinePath,
+                    $legacyDerivativePath,
+                    $legacyDerivativeHash,
+                    $legacyDerivativeError
+                )) {
+                    throw new RuntimeException($legacyDerivativeError !== '' ? $legacyDerivativeError : 'Unable to quarantine the legacy public derivative.');
+                }
+            }
+            $delete = $pdo->prepare('DELETE FROM evidence_redactions WHERE evidence_id = ? LIMIT 1');
+            $delete->execute([$evidenceId]);
+            log_case_event(
+                $pdo,
+                $caseId,
+                'redactions_removed',
+                trim((string)($locked['title'] ?? '')) ?: ('Evidence #' . $evidenceId),
+                'Public blurred image removed. Original evidence retained.',
+                $evidenceId,
+                null
+            );
+        }
+        $pdo->commit();
+    } catch (Throwable $e) {
+        // Do not recreate a public legacy URL unless rollback was explicit and certain.
+        $rollbackConfirmed = false;
+        try {
+            if ($pdo->inTransaction()) { $rollbackConfirmed = ($pdo->rollBack() === true); }
+        } catch (Throwable $rollbackError) {
+            $rollbackConfirmed = false;
+            log_console('ERROR', 'Evidence redaction removal rollback failed #' . $evidenceId . ': ' . $rollbackError->getMessage());
+        }
+        if (is_string($legacyDerivativeQuarantinePath) && is_string($legacyDerivativePath) && is_string($legacyDerivativeHash)) {
+            $restoredDerivative = $rollbackConfirmed
+                && tp_restore_legacy_evidence_file($legacyDerivativeQuarantinePath, $legacyDerivativePath, $legacyDerivativeHash);
+            if (!$restoredDerivative) {
+                log_console('ERROR', 'Removed-redaction rollback could not restore its legacy public derivative for evidence #' . $evidenceId . '; private quarantine retained.');
+            }
+        }
+        log_console('ERROR', 'Remove evidence redaction #' . $evidenceId . ': ' . $e->getMessage());
+        $status = strpos($e->getMessage(), 'not found') !== false ? 404 : 500;
+        tp_evidence_json_response(['ok' => false, 'error' => $status === 404 ? 'Not found.' : 'Unable to remove the public blurred image.'], $status);
+    }
+    if (is_string($legacyDerivativeQuarantinePath) && is_file($legacyDerivativeQuarantinePath)) {
+        @unlink($legacyDerivativeQuarantinePath);
+    }
+    if ($oldPublicPath !== null) { tp_delete_evidence_redaction_file($oldPublicPath); }
+    tp_evidence_json_response([
+        'ok' => true,
+        'has_redaction' => false,
+        'region_count' => 0,
+        'message' => $hadRedaction ? 'Public blurred image removed.' : 'This evidence did not have a public blurred image.',
+    ]);
 }
 
 // Rotate an evidence image's display orientation without rewriting the uploaded file.
@@ -5319,10 +6632,24 @@ if (($_POST['action'] ?? '') === 'rotate_evidence_image') {
         header('Location: ' . $redirectUrl); exit;
     }
 
-    $uploadsRoot = realpath(__DIR__ . '/uploads');
-    $uploadsPrefix = $uploadsRoot ? rtrim($uploadsRoot, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR : '';
-    $absolutePath = @realpath(__DIR__ . '/' . ltrim((string)($evidence['filepath'] ?? ''), '/'));
-    if (!$absolutePath || $uploadsPrefix === '' || strncmp($absolutePath, $uploadsPrefix, strlen($uploadsPrefix)) !== 0 || !is_file($absolutePath)) {
+    if (empty($tp_evidence_redactions_ready)) {
+        flash('error', 'Unable to verify whether this image has public blur areas.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+    try {
+        $redactionCheck = $pdo->prepare('SELECT 1 FROM evidence_redactions WHERE evidence_id = ? LIMIT 1');
+        $redactionCheck->execute([$evidence_id]);
+        if ($redactionCheck->fetchColumn()) {
+            flash('error', 'Remove this image\'s public blur areas before changing its orientation.');
+            header('Location: ' . $redirectUrl); exit;
+        }
+    } catch (Throwable $e) {
+        flash('error', 'Unable to verify whether this image has public blur areas.');
+        header('Location: ' . $redirectUrl); exit;
+    }
+
+    $absolutePath = tp_resolve_uploaded_file((string)($evidence['filepath'] ?? ''));
+    if ($absolutePath === null) {
         flash('error', 'The uploaded image could not be found safely.');
         header('Location: ' . $redirectUrl); exit;
     }
@@ -5362,6 +6689,11 @@ if (($_POST['action'] ?? '') === 'rotate_evidence_image') {
         $stillAuthorized = $lockedEvidence && (is_admin() || (is_moderator() && ($lockedEvidence['case_status'] ?? '') === 'Pending'));
         if (!$stillAuthorized || (string)($lockedEvidence['filepath'] ?? '') !== (string)($evidence['filepath'] ?? '')) {
             throw new RuntimeException('Evidence or permission changed during rotation.');
+        }
+        $redactionLock = $pdo->prepare('SELECT evidence_id FROM evidence_redactions WHERE evidence_id = ? FOR UPDATE');
+        $redactionLock->execute([$evidence_id]);
+        if ($redactionLock->fetchColumn()) {
+            throw new RuntimeException('Public blur areas were added during rotation.');
         }
         $lockedRotation = (int)($lockedEvidence['rotation_degrees'] ?? 0);
         if (!in_array($lockedRotation, [0, 90, 180, 270], true)) { $lockedRotation = 0; }
@@ -5418,6 +6750,12 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
     $type = $_POST['type'] ?? 'other';
     $allowedTypes = ['image','video','audio','pdf','doc','url','other'];
     if (!in_array($type, $allowedTypes, true)) $type = 'other';
+    $requestsUrlSourceMutation = $canFullyEditEvidence && !$titleOnly && $type === 'url';
+    if ($requestsUrlSourceMutation && empty($tp_evidence_redactions_ready)) {
+        flash('error', 'Unable to verify whether this evidence has a published blur. Its source was not changed.');
+        if ($ru !== '') { header('Location: '.$ru); exit; }
+        header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+    }
     try {
         if (!$canFullyEditEvidence || $titleOnly) {
             $type = (string)($prevEv['type'] ?? 'other');
@@ -5438,6 +6776,28 @@ if (($_POST['action'] ?? '') === 'update_evidence') {
                 $origName = ($host !== '' ? $host : 'url') . '.link';
             }
             $origName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', $origName);
+
+            // Serialize source changes with redaction saves. A published derivative
+            // belongs to the current file and must be explicitly removed first.
+            $pdo->beginTransaction();
+            $sourceLock = $pdo->prepare('SELECT title, type, filepath FROM evidence WHERE id = ? AND case_id = ? LIMIT 1 FOR UPDATE');
+            $sourceLock->execute([$evidence_id, $case_id]);
+            $lockedSource = $sourceLock->fetch();
+            if (!$lockedSource) {
+                throw new RuntimeException('Evidence not found while locking source update.');
+            }
+            $prevEv['title'] = (string)($lockedSource['title'] ?? '');
+            $prevEv['type'] = (string)($lockedSource['type'] ?? 'other');
+            $prevEv['filepath'] = (string)($lockedSource['filepath'] ?? '');
+
+            $redactionLock = $pdo->prepare('SELECT evidence_id FROM evidence_redactions WHERE evidence_id = ? LIMIT 1 FOR UPDATE');
+            $redactionLock->execute([$evidence_id]);
+            if ($redactionLock->fetchColumn() !== false) {
+                $pdo->rollBack();
+                flash('error', 'Remove Published Blur before changing this evidence to a URL.');
+                if ($ru !== '') { header('Location: '.$ru); exit; }
+                header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
+            }
             try {
                 $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ?, filepath = ?, original_filename = ?, mime_type = "text/url" WHERE id = ? AND case_id = ? LIMIT 1');
                 $u->execute([$title, $type, $url, $origName, $evidence_id, $case_id]);
@@ -5454,6 +6814,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
                     throw $e;
                 }
             }
+            $pdo->commit();
         } else {
             $u = $pdo->prepare('UPDATE evidence SET title = ?, type = ? WHERE id = ? AND case_id = ? LIMIT 1');
             $u->execute([$title, $type, $evidence_id, $case_id]);
@@ -5469,6 +6830,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             flash('success', 'Evidence updated.');
         }
     } catch (Throwable $e) {
+        if ($pdo->inTransaction()) {
+            try { $pdo->rollBack(); } catch (Throwable $rollbackError) {}
+        }
         $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to update evidence.');
@@ -5493,24 +6857,40 @@ if (($_POST['action'] ?? '') === 'delete_evidence') {
     if ($evidence_id <= 0 || $case_id <= 0) { flash('error', 'Invalid evidence.'); if($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
 
     $evForLog = [];
-    try { $sf = $pdo->prepare('SELECT title, type FROM evidence WHERE id = ? AND case_id = ? LIMIT 1'); $sf->execute([$evidence_id, $case_id]); $evForLog = $sf->fetch() ?: []; } catch (Throwable $e) {}
+    $originalRelative = null;
+    $publicRelative = null;
     try {
-        // fetch row for path
-        $s = $pdo->prepare('SELECT filepath FROM evidence WHERE id = ? AND case_id = ? LIMIT 1');
+        $pdo->beginTransaction();
+        $redactionSelect = !empty($tp_evidence_redactions_ready) ? ', r.public_filepath' : ', NULL AS public_filepath';
+        $redactionJoin = !empty($tp_evidence_redactions_ready) ? ' LEFT JOIN evidence_redactions r ON r.evidence_id = e.id' : '';
+        $s = $pdo->prepare('SELECT e.title, e.type, e.filepath' . $redactionSelect . ' FROM evidence e' . $redactionJoin . ' WHERE e.id = ? AND e.case_id = ? LIMIT 1 FOR UPDATE');
         $s->execute([$evidence_id, $case_id]);
         $row = $s->fetch();
-        if ($row) {
-            $rel = $row['filepath'];
-            $abs = __DIR__ . '/' . ltrim($rel, '/');
+        if (!$row) { throw new RuntimeException('Evidence not found.'); }
+        $evForLog = $row;
+        $originalRelative = (string)($row['filepath'] ?? '');
+        $publicRelative = trim((string)($row['public_filepath'] ?? '')) ?: null;
+        if (!empty($tp_evidence_redactions_ready)) {
+            $deleteRedaction = $pdo->prepare('DELETE FROM evidence_redactions WHERE evidence_id = ? LIMIT 1');
+            $deleteRedaction->execute([$evidence_id]);
         }
-        // delete row first
         $d = $pdo->prepare('DELETE FROM evidence WHERE id = ? AND case_id = ? LIMIT 1');
         $d->execute([$evidence_id, $case_id]);
         log_case_event($pdo, $case_id, 'evidence_deleted', $evForLog['title'] ?? ('Evidence #'.$evidence_id), 'Type: '.($evForLog['type'] ?? ''), $evidence_id, null);
-        // best-effort remove file
-        if (!empty($abs) && is_file($abs) && strpos(realpath($abs), realpath(__DIR__ . '/uploads')) === 0) { @unlink($abs); }
+        $pdo->commit();
+
+        $originalAbsolute = $originalRelative !== null ? tp_resolve_uploaded_file($originalRelative) : null;
+        if ($originalAbsolute !== null) { @unlink($originalAbsolute); }
+        if ($publicRelative !== null) { tp_delete_evidence_redaction_file($publicRelative); }
+        foreach ([
+            __DIR__ . '/uploads/redactions/mask_' . $evidence_id . '.json',
+            __DIR__ . '/uploads/masks/mask_' . $evidence_id . '.json',
+        ] as $legacyMask) {
+            if (is_file($legacyMask)) { @unlink($legacyMask); }
+        }
         flash('success', 'Evidence deleted.');
     } catch (Throwable $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
         $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to delete evidence.');
@@ -5542,14 +6922,26 @@ if (($_POST['action'] ?? '') === 'delete_all_evidence') {
     $deletedCount = 0;
     try {
         $pdo->beginTransaction();
+        $redactionSelect = !empty($tp_evidence_redactions_ready) ? ', r.public_filepath' : ', NULL AS public_filepath';
+        $redactionJoin = !empty($tp_evidence_redactions_ready) ? ' LEFT JOIN evidence_redactions r ON r.evidence_id = e.id' : '';
         if ($isAdminUser) {
-            $selectEvidence = $pdo->prepare('SELECT id, filepath FROM evidence WHERE case_id = ? FOR UPDATE');
+            $selectEvidence = $pdo->prepare('SELECT e.id, e.filepath' . $redactionSelect . ' FROM evidence e' . $redactionJoin . ' WHERE e.case_id = ? FOR UPDATE');
             $selectEvidence->execute([$case_id]);
         } else {
-            $selectEvidence = $pdo->prepare('SELECT id, filepath FROM evidence WHERE case_id = ? AND uploaded_by = ? FOR UPDATE');
+            $selectEvidence = $pdo->prepare('SELECT e.id, e.filepath' . $redactionSelect . ' FROM evidence e' . $redactionJoin . ' WHERE e.case_id = ? AND e.uploaded_by = ? FOR UPDATE');
             $selectEvidence->execute([$case_id, (int)($_SESSION['user']['id'] ?? 0)]);
         }
         $files = $selectEvidence->fetchAll() ?: [];
+
+        if (!empty($tp_evidence_redactions_ready) && $files) {
+            $evidenceIds = array_map(static function (array $row): int { return (int)($row['id'] ?? 0); }, $files);
+            $evidenceIds = array_values(array_filter($evidenceIds, static function (int $id): bool { return $id > 0; }));
+            if ($evidenceIds) {
+                $placeholders = implode(',', array_fill(0, count($evidenceIds), '?'));
+                $deleteRedactions = $pdo->prepare('DELETE FROM evidence_redactions WHERE evidence_id IN (' . $placeholders . ')');
+                $deleteRedactions->execute($evidenceIds);
+            }
+        }
 
         if ($isAdminUser) {
             $deleteEvidence = $pdo->prepare('DELETE FROM evidence WHERE case_id = ?');
@@ -5576,19 +6968,19 @@ if (($_POST['action'] ?? '') === 'delete_all_evidence') {
         header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
     }
 
-    // Remove uploaded files and redaction masks only after the database commit succeeds.
-    $uploadsRoot = realpath(__DIR__ . '/uploads');
+    // Remove originals, public derivatives, and legacy masks only after the database commit succeeds.
     foreach ($files as $row) {
         $rel = (string)($row['filepath'] ?? '');
-        if ($rel !== '' && $uploadsRoot) {
-            $absReal = @realpath(__DIR__ . '/' . ltrim($rel, '/'));
-            $uploadsPrefix = $uploadsRoot . DIRECTORY_SEPARATOR;
-            if ($absReal && strncmp($absReal, $uploadsPrefix, strlen($uploadsPrefix)) === 0 && is_file($absReal)) {
-                @unlink($absReal);
-            }
+        $absReal = $rel !== '' ? tp_resolve_uploaded_file($rel) : null;
+        if ($absReal !== null) { @unlink($absReal); }
+        tp_delete_evidence_redaction_file((string)($row['public_filepath'] ?? ''));
+        $deletedEvidenceId = (int)($row['id'] ?? 0);
+        foreach ([
+            __DIR__ . '/uploads/redactions/mask_' . $deletedEvidenceId . '.json',
+            __DIR__ . '/uploads/masks/mask_' . $deletedEvidenceId . '.json',
+        ] as $legacyMask) {
+            if ($deletedEvidenceId > 0 && is_file($legacyMask)) { @unlink($legacyMask); }
         }
-        $maskFile = __DIR__ . '/uploads/masks/mask_' . (int)($row['id'] ?? 0) . '.json';
-        if ((int)($row['id'] ?? 0) > 0 && is_file($maskFile)) { @unlink($maskFile); }
     }
 
     if ($deletedCount > 0) {
@@ -5619,18 +7011,26 @@ if (($_POST['action'] ?? '') === 'delete_case') {
     try { $s0 = $pdo->prepare('SELECT case_name FROM cases WHERE id = ? LIMIT 1'); $s0->execute([$case_id]); $r0 = $s0->fetch(); $case_name_for_log = $r0['case_name'] ?? ''; } catch (Throwable $e) {}
     log_case_event($pdo, $case_id, 'case_deleted', $case_name_for_log !== '' ? $case_name_for_log : $case_code, 'Case deleted');
 
-    // Collect file paths for later removal
     $files = [];
     try {
-        $s = $pdo->prepare('SELECT filepath FROM evidence WHERE case_id = ?');
-        $s->execute([$case_id]);
-        $files = $s->fetchAll();
-    } catch (Throwable $e) { $_SESSION['sql_error'] = $e->getMessage();
-log_console('ERROR', 'SQL: ' . $e->getMessage()); }
-
-    try {
         $pdo->beginTransaction();
-        // Delete evidence, notes, then case row
+        // Lock and collect every original/public file before deleting its metadata.
+        $redactionSelect = !empty($tp_evidence_redactions_ready) ? ', r.public_filepath' : ', NULL AS public_filepath';
+        $redactionJoin = !empty($tp_evidence_redactions_ready) ? ' LEFT JOIN evidence_redactions r ON r.evidence_id = e.id' : '';
+        $selectFiles = $pdo->prepare('SELECT e.id, e.filepath' . $redactionSelect . ' FROM evidence e' . $redactionJoin . ' WHERE e.case_id = ? FOR UPDATE');
+        $selectFiles->execute([$case_id]);
+        $files = $selectFiles->fetchAll() ?: [];
+
+        // Delete evidence, notes, then the case row.
+        if (!empty($tp_evidence_redactions_ready) && $files) {
+            $evidenceIds = array_map(static function (array $row): int { return (int)($row['id'] ?? 0); }, $files);
+            $evidenceIds = array_values(array_filter($evidenceIds, static function (int $id): bool { return $id > 0; }));
+            if ($evidenceIds) {
+                $placeholders = implode(',', array_fill(0, count($evidenceIds), '?'));
+                $deleteRedactions = $pdo->prepare('DELETE FROM evidence_redactions WHERE evidence_id IN (' . $placeholders . ')');
+                $deleteRedactions->execute($evidenceIds);
+            }
+        }
         $d1 = $pdo->prepare('DELETE FROM evidence WHERE case_id = ?');
         $d1->execute([$case_id]);
         $d2 = $pdo->prepare('DELETE FROM case_notes WHERE case_id = ?');
@@ -5652,49 +7052,21 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     if ($files) {
         foreach ($files as $row) {
             $rel = $row['filepath'] ?? '';
-            if ($rel !== '') {
-                $abs = __DIR__ . '/' . ltrim($rel, '/');
-                $uploadsRoot = realpath(__DIR__ . '/uploads');
-                $absReal = @realpath($abs);
-                if ($uploadsRoot && $absReal && strncmp($absReal, $uploadsRoot, strlen($uploadsRoot)) === 0 && is_file($absReal)) {
-                    @unlink($absReal);
-                }
+            $absReal = $rel !== '' ? tp_resolve_uploaded_file((string)$rel) : null;
+            if ($absReal !== null) { @unlink($absReal); }
+            tp_delete_evidence_redaction_file((string)($row['public_filepath'] ?? ''));
+            $deletedEvidenceId = (int)($row['id'] ?? 0);
+            foreach ([
+                __DIR__ . '/uploads/redactions/mask_' . $deletedEvidenceId . '.json',
+                __DIR__ . '/uploads/masks/mask_' . $deletedEvidenceId . '.json',
+            ] as $legacyMask) {
+                if ($deletedEvidenceId > 0 && is_file($legacyMask)) { @unlink($legacyMask); }
             }
         }
     }
 
     flash('success', 'Case and all associated evidence/notes deleted.');
     header('Location: ?view=cases#cases'); exit;
-// Handle save redaction mask (redaction mask handler)
-if (($_POST['action'] ?? '') === 'save_redaction_mask') {
-    throttle();
-    if (!check_csrf()) { flash('error', 'Security check failed.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    if (empty($_SESSION['user']) || (($_SESSION['user']['role'] ?? '') !== 'admin')) { flash('error', 'Unauthorized.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    $evidence_id = (int)($_POST['evidence_id'] ?? 0);
-    $mask_json = $_POST['mask_json'] ?? '';
-    if ($evidence_id <= 0) { flash('error', 'Invalid evidence.'); header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit; }
-    $decoded = json_decode($mask_json, true);
-    $maskDir = __DIR__ . '/uploads/redactions';
-    if (!is_dir($maskDir)) { @mkdir($maskDir, 0755, true); }
-    $maskFile = $maskDir . '/mask_' . $evidence_id . '.json';
-    $ok = @file_put_contents($maskFile, $mask_json);
-    if ($ok === false) {
-        flash('error', 'Unable to save redaction mask.');
-    } else {
-        $regions = is_array($decoded) ? count($decoded) : 0;
-        // Determine case_id from evidence
-        try {
-            $q = $pdo->prepare('SELECT case_id, title FROM evidence WHERE id = ? LIMIT 1');
-            $q->execute([$evidence_id]);
-            $er = $q->fetch();
-            if ($er) {
-                log_case_event($pdo, (int)$er['case_id'], 'redactions_saved', $er['title'] ?? ('Evidence #'.$evidence_id), 'Regions: '.$regions, $evidence_id, null);
-            }
-        } catch (Throwable $e) {}
-        flash('success', 'Redaction mask saved.');
-    }
-    $ru = trim($_POST['redirect_url'] ?? ''); if ($ru!==''){header('Location: '.$ru); exit;} header('Location: '. strtok($_SERVER['REQUEST_URI'], '?')); exit;
-}
 }
 
 // Handle removal request submission (public)
@@ -6033,7 +7405,6 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                 imagedestroy($qCrop);
                 imagedestroy($queryImg);
 
-                $uploadsRoot = realpath(__DIR__ . '/uploads');
                 $sensFilter  = can_moderate_cases() ? '' : "AND c.sensitivity != 'Sealed'";
                 $scored      = [];
 
@@ -6112,11 +7483,8 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                          LIMIT 400"
                     );
                     foreach ($sq->fetchAll() as $row) {
-                        $absPath = __DIR__ . '/' . ltrim($row['filepath'], '/');
-                        $absReal = @realpath($absPath);
-                        if (!$absReal || !$uploadsRoot || strncmp($absReal, $uploadsRoot, strlen($uploadsRoot)) !== 0) {
-                            continue;
-                        }
+                        $absReal = tp_resolve_uploaded_file((string)($row['filepath'] ?? ''));
+                        if ($absReal === null) { continue; }
                         $cImg = tp_scanner_load_image($absReal);
                         if (!$cImg) continue;
                         $cp    = tp_scanner_prepare_pixels($cImg); // 1 GD op
@@ -6672,6 +8040,39 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
       margin: 0 auto;
       object-fit: contain;
     }
+    .evidence-redaction-stage {
+      display: inline-block;
+      line-height: 0;
+      max-width: 100%;
+      position: relative;
+      user-select: none;
+    }
+    .evidence-redaction-stage img {
+      display: block;
+      margin: 0;
+      max-height: 75vh;
+      max-width: 100%;
+      object-fit: contain;
+      width: auto;
+    }
+    .evidence-redaction-canvas {
+      height: 100%;
+      inset: 0;
+      pointer-events: none;
+      position: absolute;
+      touch-action: auto;
+      width: 100%;
+      z-index: 2;
+    }
+    .evidence-redaction-stage.is-drawing .evidence-redaction-canvas { cursor: crosshair; pointer-events: auto; touch-action: none; }
+    .evidence-redaction-stage.is-public-preview .evidence-redaction-canvas { display: none; }
+    .evidence-redaction-count {
+      align-items: center;
+      display: flex;
+      justify-content: space-between;
+      min-height: 1.5rem;
+    }
+    .evidence-redaction-status { min-height: 1.35rem; }
     .evidence-modal .modal-fullscreen .modal-content {
       height: 100vh;
       height: 100dvh;
@@ -12168,6 +13569,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                           $mediaDateLabel = $mediaTimestamp !== false ? date('j M Y, H:i', $mediaTimestamp) : ($mediaDateRaw !== '' ? $mediaDateRaw : 'Date unavailable');
                           $mediaCanPreviewVideo = $mediaIsVideo && empty($tp_isRestrictedForNonAdmin);
                           $mediaCanGenerateThumbnail = !$mediaIsVideo && in_array($mediaMime, ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'], true);
+                          $mediaCanRedact = !empty($tp_evidence_redactions_ready)
+                            && can_moderate_cases()
+                            && !$mediaIsVideo
+                            && in_array($mediaMime, ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'], true);
                         ?>
                           <div class="col">
                             <button type="button"
@@ -12201,12 +13606,20 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                             </button>
                             <div class="case-media-meta d-flex flex-column flex-sm-row align-items-sm-center justify-content-between gap-1">
                               <time class="small text-secondary" datetime="<?php echo htmlspecialchars($mediaDateRaw); ?>">Uploaded <?php echo htmlspecialchars($mediaDateLabel); ?></time>
-                              <?php if ($tp_canEditCaseEvidence): ?>
+                              <?php if ($tp_canEditCaseEvidence || $mediaCanRedact): ?>
                                 <div class="d-flex gap-1">
+                                  <?php if ($tp_canEditCaseEvidence): ?>
                                   <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
                                           data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($mediaTitle); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>" aria-label="Edit <?php echo $mediaIsVideo ? 'video' : 'image'; ?> evidence">
                                     <i class="bi bi-pencil" aria-hidden="true"></i><span class="visually-hidden">Edit</span>
                                   </button>
+                                  <?php endif; ?>
+                                  <?php if ($mediaCanRedact): ?>
+                                  <button type="button" class="btn btn-sm btn-outline-info btn-redact-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                          data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>&amp;variant=original" data-title="<?php echo htmlspecialchars($mediaTitle); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'image'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>" aria-label="Blur sensitive areas in this image" title="Blur sensitive areas">
+                                    <i class="bi bi-bounding-box-circles" aria-hidden="true"></i><span class="visually-hidden">Blur sensitive areas</span>
+                                  </button>
+                                  <?php endif; ?>
                                   <?php if (is_admin()): ?>
                                   <form method="post" action="" onsubmit="return confirm('Delete this evidence permanently?');">
                                     <input type="hidden" name="action" value="delete_evidence">
@@ -12244,7 +13657,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                             $fileDateRaw = trim((string)($e['created_at'] ?? ''));
                             $fileTimestamp = $fileDateRaw !== '' ? strtotime($fileDateRaw) : false;
                             $fileDateLabel = $fileTimestamp !== false ? date('j M Y, H:i', $fileTimestamp) : ($fileDateRaw !== '' ? $fileDateRaw : '—');
-                            $isEvidenceNote = (($e['type'] ?? '') === 'note') || (($e['mime_type'] ?? '') === 'text/plain' && strpos((string)($e['filepath'] ?? ''), 'uploads/notes/') === 0);
+                            $evidenceNotePath = (string)($e['filepath'] ?? '');
+                            $isEvidenceNote = (($e['type'] ?? '') === 'note') || (($e['mime_type'] ?? '') === 'text/plain'
+                              && (strpos($evidenceNotePath, 'uploads/notes/') === 0 || strpos($evidenceNotePath, 'private:notes/') === 0));
                           ?>
                             <tr>
                               <td><?php echo htmlspecialchars($e['title'] ?? ('Evidence #' . (int)$e['id'])); ?></td>
@@ -12254,14 +13669,14 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                 <div class="d-inline-flex gap-1">
                                   <?php if ($isEvidenceNote): ?>
                                     <button type="button" class="btn btn-sm btn-outline-light btn-view-note" data-bs-toggle="modal" data-bs-target="#noteModal"
-                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath'] ?? ''); ?>" data-title="<?php echo htmlspecialchars(is_logged_in() ? ($e['title'] ?? 'Note') : 'Evidence'); ?>">View</button>
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars(is_logged_in() ? ($e['title'] ?? 'Note') : 'Evidence'); ?>">View</button>
                                   <?php else: ?>
                                     <button type="button" class="btn btn-sm btn-outline-light btn-view-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
                                             data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars(is_logged_in() ? ($e['title'] ?? 'Evidence') : 'Evidence'); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>">View</button>
                                   <?php endif; ?>
                                   <?php if ($tp_canEditCaseEvidence): ?>
                                     <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="<?php echo $isEvidenceNote ? htmlspecialchars($e['filepath'] ?? '') : '?action=serve_evidence&amp;id=' . (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title'] ?? ''); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>">Edit</button>
+                                            data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$viewCaseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title'] ?? ''); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type'] ?? ''); ?>">Edit</button>
                                     <?php if (is_admin()): ?>
                                       <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
                                         <input type="hidden" name="action" value="delete_evidence">
@@ -12734,18 +14149,19 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       <td><?php echo htmlspecialchars($e['type']); ?></td>
                       <td><?php echo htmlspecialchars($e['title']); ?></td>
                       <td>
-                        <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain' && strpos($e['filepath'], 'uploads/notes/') === 0)) { ?>
+                        <?php if (($e['type'] ?? '') === 'note' || (isset($e['mime_type'], $e['filepath']) && $e['mime_type'] === 'text/plain'
+                          && (strpos($e['filepath'], 'uploads/notes/') === 0 || strpos($e['filepath'], 'private:notes/') === 0))) { ?>
                           <button type="button" class="btn btn-sm btn-outline-light btn-view-note"
                                   data-bs-toggle="modal" data-bs-target="#noteModal"
                                   data-id="<?php echo (int)$e['id']; ?>"
                                   data-case-id="<?php echo (int)$caseId; ?>"
-                                  data-src="<?php echo htmlspecialchars($e['filepath']); ?>"
+                                  data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>"
                                   data-title="<?php echo htmlspecialchars($e['title'] ?? 'Note'); ?>">
                             View
                           </button>
                           <div class="btn-group ms-1">
                             <button type="button" class="btn btn-sm btn-outline-warning btn-edit-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
-                                    data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="<?php echo htmlspecialchars($e['filepath']); ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                    data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
                               Edit
                             </button>
                             <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
@@ -12759,6 +14175,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                           </div>
                         <?php } else {
                             $isUrl = (($e['type'] ?? '') === 'url') || (($e['mime_type'] ?? '') === 'text/url');
+                            $isImage = (($e['type'] ?? '') === 'image') || strpos(strtolower((string)($e['mime_type'] ?? '')), 'image/') === 0;
+                            $canRedactImage = !empty($tp_evidence_redactions_ready)
+                              && in_array(strtolower((string)($e['mime_type'] ?? '')), ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'], true);
                             if ($isUrl) { ?>
                               <a class="btn btn-sm btn-outline-light"
                                  href="<?php echo htmlspecialchars($e['filepath']); ?>"
@@ -12795,6 +14214,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                                         data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'other'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
                                   Edit
                                 </button>
+                                <?php if ($isImage && $canRedactImage): ?>
+                                <button type="button" class="btn btn-sm btn-outline-info btn-redact-evidence" data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                        data-id="<?php echo (int)$e['id']; ?>" data-case-id="<?php echo (int)$caseId; ?>" data-src="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>&amp;variant=original" data-title="<?php echo htmlspecialchars($e['title']); ?>" data-type="<?php echo htmlspecialchars($e['type'] ?? 'image'); ?>" data-mime="<?php echo htmlspecialchars($e['mime_type']); ?>" data-admin="1">
+                                  Blur
+                                </button>
+                                <?php endif; ?>
                                 <form method="post" action="" class="d-inline" onsubmit="return confirm('Delete this evidence permanently?');">
                                   <input type="hidden" name="action" value="delete_evidence">
                                   <?php csrf_field(); ?>
@@ -12843,7 +14268,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <?php if ($ev) { $hasPdf=false; foreach ($ev as $e) { if ($e['type']==='pdf') { $hasPdf=true; ?>
                 <li class="list-group-item bg-transparent text-white d-flex justify-content-between align-items-center">
                   <span><i class="bi bi-filetype-pdf me-2"></i><?php echo htmlspecialchars($e['title']); ?></span>
-                  <a href="<?php echo htmlspecialchars($e['filepath']); ?>" target="_blank" class="btn btn-sm btn-outline-light">Open</a>
+                  <a href="?action=serve_evidence&amp;id=<?php echo (int)$e['id']; ?>" target="_blank" rel="noopener" class="btn btn-sm btn-outline-light">Open</a>
                 </li>
               <?php } } if(!$hasPdf) { ?>
                 <li class="list-group-item bg-transparent text-secondary">No PDFs yet.</li>
@@ -13118,8 +14543,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           $databaseHealth['message'] = 'The application could not complete its database health query.';
         }
 
-        $storageDirectory = rtrim((string)$storagePath, '/');
-        $storageExists = is_dir($storageDirectory);
+        $storageConfigError = '';
+        $resolvedStorageDirectory = tp_private_storage_root(false, $storageConfigError);
+        $storageDirectory = $resolvedStorageDirectory ?? rtrim((string)$storagePath, '/');
+        $storageExists = $resolvedStorageDirectory !== null && is_dir($storageDirectory);
         $storageReadable = $storageExists && is_readable($storageDirectory);
         $storageWritable = $storageExists && is_writable($storageDirectory);
         $storageFree = $storageExists ? @disk_free_space($storageDirectory) : false;
@@ -13131,7 +14558,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         $storageStatus = ($storageExists && $storageReadable && $storageWritable) ? 'success' : 'danger';
         if ($storageStatus === 'success' && $storageUsedPercent !== null && $storageUsedPercent >= 90) { $storageStatus = 'warning'; }
         $storageMessage = !$storageExists
-          ? 'The evidence storage directory does not exist.'
+          ? ($storageConfigError !== '' ? $storageConfigError : 'The evidence storage directory does not exist.')
           : (!$storageReadable || !$storageWritable
             ? 'The evidence storage directory does not have the required permissions.'
             : (($storageUsedPercent !== null && $storageUsedPercent >= 90) ? 'Storage is operational but running low on free space.' : 'Evidence storage is readable and writable.'));
@@ -13591,6 +15018,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
   <?php
     $tp_showEvidenceEditor = is_admin() || (($view ?? '') === 'case' && !empty($tp_canEditCaseEvidence));
+    $tp_showEvidenceRedactor = can_moderate_cases() && !empty($tp_evidence_redactions_ready);
     $tp_showEvidenceRotator = !empty($tp_evidence_rotation_ready) && (
       is_admin()
       || (is_moderator() && ($view ?? '') === 'case' && ($viewCase['status'] ?? '') === 'Pending')
@@ -13621,10 +15049,12 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                 <div class="text-secondary small">No preview available</div>
               </div>
             </div>
-            <?php if ($tp_showEvidenceEditor): ?>
+            <?php if ($tp_showEvidenceEditor || $tp_showEvidenceRedactor): ?>
             <div class="col-lg-4 d-none" id="evEditPanel">
               <div class="card glass">
                 <div class="card-body">
+                  <?php if ($tp_showEvidenceEditor): ?>
+                  <div id="evTitleEditPanel">
                   <h6 class="mb-3">Edit Evidence Title</h6>
                   <form method="post" action="" id="evEditForm">
                     <input type="hidden" name="action" value="update_evidence">
@@ -13642,6 +15072,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       <button class="btn btn-primary" type="submit"><i class="bi bi-save me-1"></i> Save Title</button>
                     </div>
                   </form>
+                  </div>
                   <?php if ($tp_showEvidenceRotator): ?>
                   <div class="mt-3 pt-3 border-top d-none" id="evRotatePanel">
                     <h6 class="mb-2">Image Orientation</h6>
@@ -13658,6 +15089,37 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                         <div class="col-4"><button class="btn btn-sm btn-outline-light w-100 px-1 text-nowrap" type="submit" name="direction" value="right"><i class="bi bi-arrow-clockwise me-1" aria-hidden="true"></i>90° Right</button></div>
                       </div>
                     </form>
+                  </div>
+                  <?php endif; ?>
+                  <?php endif; ?>
+                  <?php if ($tp_showEvidenceRedactor): ?>
+                  <div class="<?php echo $tp_showEvidenceEditor ? 'mt-3 pt-3 border-top ' : ''; ?>d-none" id="evRedactionPanel">
+                    <input type="hidden" id="evRedactionCsrf" value="<?php echo htmlspecialchars($_SESSION['csrf_token']); ?>">
+                    <div class="d-flex align-items-center justify-content-between gap-2 mb-2">
+                      <h6 class="mb-0">Public Image Blur</h6>
+                      <span class="badge text-bg-secondary" id="evRedactionPublishedBadge">Not published</span>
+                    </div>
+                    <p class="small text-secondary mb-3">Drag over sensitive areas. You can add multiple boxes. Saving creates a separate public copy and keeps the original unchanged.</p>
+                    <div class="btn-group w-100 mb-2" role="group" aria-label="Evidence image version">
+                      <button type="button" class="btn btn-sm btn-primary" id="evRedactionOriginalBtn"><i class="bi bi-shield-lock me-1" aria-hidden="true"></i>Original</button>
+                      <button type="button" class="btn btn-sm btn-outline-light" id="evRedactionPublicBtn"><i class="bi bi-eye me-1" aria-hidden="true"></i>Public version</button>
+                    </div>
+                    <div class="d-grid gap-2 mb-2">
+                      <button type="button" class="btn btn-sm btn-outline-info" id="evRedactionDrawBtn" aria-pressed="false"><i class="bi bi-bounding-box-circles me-1" aria-hidden="true"></i><span id="evRedactionDrawLabel">Loading blur tool…</span></button>
+                    </div>
+                    <div class="row g-2 mb-2">
+                      <div class="col-6"><button type="button" class="btn btn-sm btn-outline-light w-100" id="evRedactionUndoBtn"><i class="bi bi-arrow-counterclockwise me-1" aria-hidden="true"></i>Undo</button></div>
+                      <div class="col-6"><button type="button" class="btn btn-sm btn-outline-warning w-100" id="evRedactionClearBtn"><i class="bi bi-eraser me-1" aria-hidden="true"></i>Clear boxes</button></div>
+                    </div>
+                    <div class="evidence-redaction-count small mb-2">
+                      <span class="text-secondary">Blur sections</span>
+                      <span class="badge text-bg-dark border" id="evRedactionCount">0</span>
+                    </div>
+                    <div class="evidence-redaction-status small text-secondary mb-2" id="evRedactionStatus" role="status" aria-live="polite">Open an image to begin.</div>
+                    <div class="d-grid gap-2">
+                      <button type="button" class="btn btn-primary" id="evRedactionSaveBtn" disabled><i class="bi bi-save me-1" aria-hidden="true"></i>Save Public Blur</button>
+                      <button type="button" class="btn btn-outline-danger d-none" id="evRedactionRemoveBtn"><i class="bi bi-eye-slash me-1" aria-hidden="true"></i>Remove Published Blur</button>
+                    </div>
                   </div>
                   <?php endif; ?>
                 </div>
@@ -14095,13 +15557,53 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       var preview = document.getElementById('evPreview');
       var previewColumn = document.getElementById('evPreviewColumn');
       var editPanel = document.getElementById('evEditPanel');
+      var titleEditPanel = document.getElementById('evTitleEditPanel');
       var rotatePanel = document.getElementById('evRotatePanel');
+      var redactionPanel = document.getElementById('evRedactionPanel');
+      var redactionOriginalButton = document.getElementById('evRedactionOriginalBtn');
+      var redactionPublicButton = document.getElementById('evRedactionPublicBtn');
+      var redactionDrawButton = document.getElementById('evRedactionDrawBtn');
+      var redactionDrawLabel = document.getElementById('evRedactionDrawLabel');
+      var redactionUndoButton = document.getElementById('evRedactionUndoBtn');
+      var redactionClearButton = document.getElementById('evRedactionClearBtn');
+      var redactionSaveButton = document.getElementById('evRedactionSaveBtn');
+      var redactionRemoveButton = document.getElementById('evRedactionRemoveBtn');
+      var redactionCount = document.getElementById('evRedactionCount');
+      var redactionStatus = document.getElementById('evRedactionStatus');
+      var redactionPublishedBadge = document.getElementById('evRedactionPublishedBadge');
+      var redactionCsrf = document.getElementById('evRedactionCsrf');
       var prevButton = document.getElementById('evGalleryPrev');
       var nextButton = document.getElementById('evGalleryNext');
       var position = document.getElementById('evGalleryPosition');
       var galleryTriggers = Array.prototype.slice.call(document.querySelectorAll('[data-gallery="case-media"]'));
       var galleryIndex = -1;
       var showEvidenceTitles = <?php echo is_logged_in() ? 'true' : 'false'; ?>;
+      var canRedactEvidence = <?php echo $tp_showEvidenceRedactor ? 'true' : 'false'; ?>;
+      var redactionRequestSequence = 0;
+      var maxRedactionRegions = 100;
+      var redactionState = {
+        item: null,
+        stage: null,
+        image: null,
+        canvas: null,
+        context: null,
+        resizeObserver: null,
+        resizeHandler: null,
+        regions: [],
+        draft: null,
+        pointerStart: null,
+        activePointerId: null,
+        drawing: false,
+        published: false,
+        version: 'original',
+        sourceWidth: 0,
+        sourceHeight: 0,
+        sourceRotation: 0,
+        metadataLoaded: false,
+        metadataFailed: false,
+        generation: 0,
+        saving: false
+      };
 
       document.querySelectorAll('.case-media-video-thumb').forEach(function (videoThumbnail) {
         var revealThumbnail = function () { videoThumbnail.classList.add('is-ready'); };
@@ -14128,6 +15630,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           id: trigger.getAttribute('data-id') || '',
           caseId: trigger.getAttribute('data-case-id') || '',
           isEditMode: trigger.classList.contains('btn-edit-evidence'),
+          isRedactMode: trigger.classList.contains('btn-redact-evidence'),
           isGallery: trigger.getAttribute('data-gallery') === 'case-media',
           isUrl: trigger.getAttribute('data-url') === '1' || type === 'url' || mime === 'text/url'
         };
@@ -14135,6 +15638,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
       function stopPreviewMedia() {
         if (!preview) return;
+        teardownRedactionStage();
         preview.querySelectorAll('video, audio').forEach(function (media) {
           try { media.pause(); } catch (e) {}
           media.removeAttribute('src');
@@ -14173,10 +15677,473 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         return item.type === 'image';
       }
 
+      function isRedactableImageItem(item) {
+        return ['image/jpeg', 'image/jpg', 'image/pjpeg', 'image/png', 'image/webp'].indexOf(item.mime) !== -1;
+      }
+
       function isVideoItem(item) {
         if (item.mime.indexOf('video/') === 0 || item.mime === 'application/ogg' || item.mime === 'application/mp4') return true;
         if (item.mime && item.mime !== 'application/octet-stream') return false;
         return item.type === 'video';
+      }
+
+      function evidenceActionUrl(action, evidenceId) {
+        var url = new URL(window.location.href);
+        url.hash = '';
+        url.search = '';
+        url.searchParams.set('action', action);
+        url.searchParams.set('id', evidenceId);
+        return url.toString();
+      }
+
+      function evidenceVariantUrl(src, variant) {
+        try {
+          var url = new URL(src, window.location.href);
+          if (url.origin !== window.location.origin || url.searchParams.get('action') !== 'serve_evidence') return src;
+          url.searchParams.set('variant', variant);
+          url.searchParams.set('v', String(Date.now()));
+          return url.pathname + url.search + url.hash;
+        } catch (e) {
+          return src;
+        }
+      }
+
+      function setRedactionStatus(message, tone) {
+        if (!redactionStatus) return;
+        redactionStatus.textContent = message;
+        redactionStatus.className = 'evidence-redaction-status small mb-2 ' + (tone || 'text-secondary');
+      }
+
+      function teardownRedactionStage() {
+        redactionRequestSequence++;
+        if (redactionState.resizeObserver) redactionState.resizeObserver.disconnect();
+        if (redactionState.resizeHandler) window.removeEventListener('resize', redactionState.resizeHandler);
+        redactionState.stage = null;
+        redactionState.image = null;
+        redactionState.canvas = null;
+        redactionState.context = null;
+        redactionState.resizeObserver = null;
+        redactionState.resizeHandler = null;
+        redactionState.draft = null;
+        redactionState.pointerStart = null;
+        redactionState.activePointerId = null;
+      }
+
+      function resetRedactionState() {
+        teardownRedactionStage();
+        redactionState.item = null;
+        redactionState.regions = [];
+        redactionState.drawing = false;
+        redactionState.published = false;
+        redactionState.version = 'original';
+        redactionState.sourceWidth = 0;
+        redactionState.sourceHeight = 0;
+        redactionState.sourceRotation = 0;
+        redactionState.metadataLoaded = false;
+        redactionState.metadataFailed = false;
+        redactionState.generation++;
+        redactionState.saving = false;
+        updateRedactionControls();
+      }
+
+      function updateRedactionControls() {
+        var count = redactionState.regions.length;
+        var isPublic = redactionState.version === 'public';
+        var editorReady = redactionState.metadataLoaded && !redactionState.metadataFailed && !!redactionState.item;
+        if (redactionCount) redactionCount.textContent = String(count);
+        if (redactionUndoButton) redactionUndoButton.disabled = count === 0 || isPublic || redactionState.saving || !editorReady;
+        if (redactionClearButton) redactionClearButton.disabled = count === 0 || isPublic || redactionState.saving || !editorReady;
+        if (redactionSaveButton) redactionSaveButton.disabled = count === 0 || isPublic || redactionState.saving || !editorReady;
+        if (redactionRemoveButton) {
+          redactionRemoveButton.classList.toggle('d-none', !redactionState.published);
+          redactionRemoveButton.disabled = redactionState.saving || !editorReady;
+        }
+        if (redactionPublicButton) redactionPublicButton.disabled = !redactionState.published || redactionState.saving || !editorReady;
+        if (redactionOriginalButton) redactionOriginalButton.disabled = redactionState.saving || !editorReady;
+        if (redactionDrawButton) {
+          redactionDrawButton.disabled = isPublic || redactionState.saving || !editorReady;
+          redactionDrawButton.setAttribute('aria-pressed', redactionState.drawing && !isPublic && editorReady ? 'true' : 'false');
+          redactionDrawButton.classList.toggle('btn-info', redactionState.drawing && !isPublic && editorReady);
+          redactionDrawButton.classList.toggle('btn-outline-info', !redactionState.drawing || isPublic || !editorReady);
+        }
+        if (redactionDrawLabel) redactionDrawLabel.textContent = !redactionState.metadataLoaded
+          ? 'Loading blur tool…'
+          : (!editorReady ? 'Blur tool unavailable' : (redactionState.drawing && !isPublic ? 'Drawing blur boxes' : 'Drawing paused'));
+        if (redactionOriginalButton) {
+          redactionOriginalButton.classList.toggle('btn-primary', !isPublic);
+          redactionOriginalButton.classList.toggle('btn-outline-light', isPublic);
+        }
+        if (redactionPublicButton) {
+          redactionPublicButton.classList.toggle('btn-primary', isPublic);
+          redactionPublicButton.classList.toggle('btn-outline-light', !isPublic);
+        }
+        if (redactionPublishedBadge) {
+          redactionPublishedBadge.textContent = redactionState.published ? 'Public copy saved' : 'Not published';
+          redactionPublishedBadge.className = 'badge ' + (redactionState.published ? 'text-bg-success' : 'text-bg-secondary');
+        }
+        if (redactionState.stage) {
+          redactionState.stage.classList.toggle('is-drawing', redactionState.drawing && !isPublic && editorReady);
+          redactionState.stage.classList.toggle('is-public-preview', isPublic);
+        }
+      }
+
+      function cleanClientRegion(region) {
+        if (!region || typeof region !== 'object') return null;
+        var x = Number(region.x);
+        var y = Number(region.y);
+        var width = Number(region.width);
+        var height = Number(region.height);
+        if (![x, y, width, height].every(Number.isFinite)) return null;
+        x = Math.max(0, Math.min(1, x));
+        y = Math.max(0, Math.min(1, y));
+        width = Math.max(0, Math.min(1 - x, width));
+        height = Math.max(0, Math.min(1 - y, height));
+        if (width <= 0 || height <= 0) return null;
+        return {x:x, y:y, width:width, height:height};
+      }
+
+      function pointerPosition(event) {
+        if (!redactionState.canvas) return null;
+        var bounds = redactionState.canvas.getBoundingClientRect();
+        if (bounds.width <= 0 || bounds.height <= 0) return null;
+        return {
+          x: Math.max(0, Math.min(1, (event.clientX - bounds.left) / bounds.width)),
+          y: Math.max(0, Math.min(1, (event.clientY - bounds.top) / bounds.height))
+        };
+      }
+
+      function regionBetween(start, end) {
+        if (!start || !end) return null;
+        return {
+          x: Math.min(start.x, end.x),
+          y: Math.min(start.y, end.y),
+          width: Math.abs(end.x - start.x),
+          height: Math.abs(end.y - start.y)
+        };
+      }
+
+      function paintRedactions() {
+        var canvas = redactionState.canvas;
+        var context = redactionState.context;
+        var image = redactionState.image;
+        if (!canvas || !context || !image || !image.complete || image.naturalWidth <= 0 || redactionState.version === 'public') return;
+        var width = canvas.clientWidth;
+        var height = canvas.clientHeight;
+        if (width <= 0 || height <= 0) return;
+        var ratio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+        var targetWidth = Math.max(1, Math.round(width * ratio));
+        var targetHeight = Math.max(1, Math.round(height * ratio));
+        if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
+          canvas.width = targetWidth;
+          canvas.height = targetHeight;
+        }
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        context.clearRect(0, 0, width, height);
+
+        var regions = redactionState.regions.slice();
+        if (redactionState.draft) regions.push(redactionState.draft);
+        regions.forEach(function (region, index) {
+          var x = region.x * width;
+          var y = region.y * height;
+          var regionWidth = region.width * width;
+          var regionHeight = region.height * height;
+          if (regionWidth < 1 || regionHeight < 1) return;
+
+          context.save();
+          context.beginPath();
+          context.rect(x, y, regionWidth, regionHeight);
+          context.clip();
+          context.filter = 'blur(14px)';
+          context.drawImage(image, 0, 0, width, height);
+          context.restore();
+
+          context.save();
+          context.fillStyle = 'rgba(13, 202, 240, .16)';
+          context.strokeStyle = '#0dcaf0';
+          context.lineWidth = 2;
+          if (index === regions.length - 1 && redactionState.draft) context.setLineDash([6, 4]);
+          context.fillRect(x, y, regionWidth, regionHeight);
+          context.strokeRect(x + 1, y + 1, Math.max(0, regionWidth - 2), Math.max(0, regionHeight - 2));
+          context.restore();
+        });
+      }
+
+      function sizeRedactionCanvas() {
+        window.requestAnimationFrame(paintRedactions);
+      }
+
+      function bindRedactionCanvas(canvas) {
+        canvas.addEventListener('pointerdown', function (event) {
+          if (!redactionState.drawing || redactionState.version !== 'original' || redactionState.saving || redactionState.activePointerId !== null) return;
+          if (event.isPrimary === false || event.button !== 0) return;
+          if (redactionState.regions.length >= maxRedactionRegions) {
+            setRedactionStatus('This image already has the maximum of ' + maxRedactionRegions + ' blur sections.', 'text-warning');
+            return;
+          }
+          var point = pointerPosition(event);
+          if (!point) return;
+          event.preventDefault();
+          redactionState.activePointerId = event.pointerId;
+          redactionState.pointerStart = point;
+          redactionState.draft = {x:point.x, y:point.y, width:0, height:0};
+          try { canvas.setPointerCapture(event.pointerId); } catch (e) {}
+          paintRedactions();
+        });
+
+        canvas.addEventListener('pointermove', function (event) {
+          if (!redactionState.pointerStart || redactionState.version !== 'original' || event.pointerId !== redactionState.activePointerId) return;
+          var point = pointerPosition(event);
+          if (!point) return;
+          event.preventDefault();
+          redactionState.draft = regionBetween(redactionState.pointerStart, point);
+          paintRedactions();
+        });
+
+        function finishPointer(event, cancelled) {
+          if (!redactionState.pointerStart || event.pointerId !== redactionState.activePointerId) return;
+          var draft = redactionState.draft;
+          redactionState.pointerStart = null;
+          redactionState.draft = null;
+          redactionState.activePointerId = null;
+          try { canvas.releasePointerCapture(event.pointerId); } catch (e) {}
+          if (!cancelled && draft) {
+            var bounds = canvas.getBoundingClientRect();
+            if (draft.width * bounds.width >= 8 && draft.height * bounds.height >= 8) {
+              redactionState.regions.push(draft);
+              setRedactionStatus('Blur box added. Add another or save the public copy.', 'text-info');
+            } else {
+              setRedactionStatus('Draw a slightly larger box over the sensitive area.', 'text-warning');
+            }
+          }
+          updateRedactionControls();
+          paintRedactions();
+        }
+
+        canvas.addEventListener('pointerup', function (event) { finishPointer(event, false); });
+        canvas.addEventListener('pointercancel', function (event) { finishPointer(event, true); });
+        canvas.addEventListener('lostpointercapture', function (event) { finishPointer(event, true); });
+      }
+
+      function loadRedactionMetadata(item) {
+        var requestId = ++redactionRequestSequence;
+        setRedactionStatus('Loading saved blur areas…', 'text-secondary');
+        fetch(evidenceActionUrl('get_evidence_redaction', item.id), {
+          credentials: 'same-origin',
+          headers: {'Accept':'application/json'}
+        }).then(function (response) {
+          return response.json().catch(function () { return {}; }).then(function (data) {
+            if (!response.ok || !data.ok) throw new Error(data.error || 'Unable to load saved blur areas.');
+            return data;
+          });
+        }).then(function (data) {
+          if (requestId !== redactionRequestSequence || redactionState.item !== item) return;
+          var authoritativeWidth = Number(data.source_width);
+          var authoritativeHeight = Number(data.source_height);
+          if (!Number.isInteger(authoritativeWidth) || !Number.isInteger(authoritativeHeight) || authoritativeWidth <= 0 || authoritativeHeight <= 0) {
+            throw new Error('The server returned invalid image dimensions. Reload and try again.');
+          }
+          redactionState.regions = Array.isArray(data.regions) ? data.regions.map(cleanClientRegion).filter(Boolean) : [];
+          redactionState.published = !!data.has_redaction;
+          redactionState.sourceWidth = authoritativeWidth;
+          redactionState.sourceHeight = authoritativeHeight;
+          redactionState.sourceRotation = Number(data.source_rotation) || 0;
+          redactionState.metadataLoaded = true;
+          redactionState.metadataFailed = false;
+          redactionState.drawing = true;
+          updateRedactionControls();
+          paintRedactions();
+          if (data.stale) {
+            setRedactionStatus(data.warning || 'The saved public version is stale. Remove it or draw and save new blur areas.', 'text-warning');
+            return;
+          }
+          setRedactionStatus(
+            redactionState.published
+              ? 'Loaded the saved public blur. Adjust the boxes and save to replace it.'
+              : 'Draw one or more boxes over anything the public must not see.',
+            redactionState.published ? 'text-success' : 'text-secondary'
+          );
+        }).catch(function (error) {
+          if (requestId !== redactionRequestSequence || redactionState.item !== item) return;
+          redactionState.metadataLoaded = true;
+          redactionState.metadataFailed = true;
+          redactionState.drawing = false;
+          updateRedactionControls();
+          setRedactionStatus(error.message || 'Unable to load saved blur areas.', 'text-danger');
+        });
+      }
+
+      function renderRedactionEditor(item) {
+        if (!preview) return;
+        stopPreviewMedia();
+        preview.classList.remove('ratio', 'ratio-16x9');
+        redactionState.generation++;
+        redactionState.item = item;
+        redactionState.regions = [];
+        redactionState.draft = null;
+        redactionState.drawing = false;
+        redactionState.published = false;
+        redactionState.version = 'original';
+        redactionState.metadataLoaded = false;
+        redactionState.metadataFailed = false;
+        redactionState.saving = false;
+
+        var stage = document.createElement('div');
+        stage.className = 'evidence-redaction-stage';
+        var image = document.createElement('img');
+        image.alt = item.title;
+        image.draggable = false;
+        var canvas = document.createElement('canvas');
+        canvas.className = 'evidence-redaction-canvas';
+        canvas.setAttribute('aria-label', 'Draw blur boxes over sensitive areas');
+        stage.appendChild(image);
+        stage.appendChild(canvas);
+        preview.appendChild(stage);
+
+        redactionState.stage = stage;
+        redactionState.image = image;
+        redactionState.canvas = canvas;
+        redactionState.context = canvas.getContext('2d');
+        if (!redactionState.context) {
+          redactionState.metadataLoaded = true;
+          redactionState.metadataFailed = true;
+          setRedactionStatus('Your browser cannot open the blur drawing tool.', 'text-danger');
+          updateRedactionControls();
+          return;
+        }
+        bindRedactionCanvas(canvas);
+
+        image.addEventListener('load', function () {
+          if (redactionState.image !== image) return;
+          if (redactionState.version === 'original') {
+            redactionState.sourceWidth = image.naturalWidth;
+            redactionState.sourceHeight = image.naturalHeight;
+          }
+          sizeRedactionCanvas();
+          if (!redactionState.metadataLoaded) loadRedactionMetadata(item);
+        });
+        image.addEventListener('error', function () {
+          if (redactionState.image !== image) return;
+          if (redactionState.version === 'public' && redactionState.metadataLoaded && !redactionState.metadataFailed) {
+            redactionState.version = 'original';
+            redactionState.drawing = true;
+            updateRedactionControls();
+            setRedactionStatus('The saved public image is unavailable. Showing the protected original so you can replace or remove the published blur.', 'text-warning');
+            image.src = evidenceVariantUrl(item.src, 'original');
+            return;
+          }
+          redactionState.metadataLoaded = true;
+          redactionState.metadataFailed = true;
+          redactionState.drawing = false;
+          updateRedactionControls();
+          setRedactionStatus('Unable to load this image for blurring.', 'text-danger');
+        });
+        image.src = evidenceVariantUrl(item.src, 'original');
+
+        if (typeof ResizeObserver === 'function') {
+          redactionState.resizeObserver = new ResizeObserver(sizeRedactionCanvas);
+          redactionState.resizeObserver.observe(stage);
+        } else {
+          redactionState.resizeHandler = sizeRedactionCanvas;
+          window.addEventListener('resize', redactionState.resizeHandler);
+        }
+        updateRedactionControls();
+      }
+
+      function setRedactionVersion(version) {
+        if (!redactionState.item || !redactionState.image || !redactionState.metadataLoaded || redactionState.metadataFailed) return;
+        if (version === 'public' && !redactionState.published) return;
+        redactionState.version = version === 'public' ? 'public' : 'original';
+        if (redactionState.version === 'public') redactionState.drawing = false;
+        redactionState.image.src = evidenceVariantUrl(redactionState.item.src, redactionState.version);
+        updateRedactionControls();
+        if (redactionState.version === 'public') {
+          setRedactionStatus('Showing the saved version served to public visitors.', 'text-success');
+        } else {
+          redactionState.drawing = true;
+          updateRedactionControls();
+          setRedactionStatus('Showing the protected original. Drag to add more blur boxes.', 'text-info');
+        }
+      }
+
+      function postRedactionAction(action, extraFields) {
+        if (!redactionState.item) return Promise.reject(new Error('No evidence image selected.'));
+        var formData = new FormData();
+        formData.append('action', action);
+        formData.append('csrf_token', redactionCsrf ? redactionCsrf.value : '');
+        formData.append('evidence_id', redactionState.item.id);
+        formData.append('case_id', redactionState.item.caseId);
+        Object.keys(extraFields || {}).forEach(function (key) { formData.append(key, extraFields[key]); });
+        var target = new URL(window.location.href);
+        target.hash = '';
+        return fetch(target.toString(), {
+          method: 'POST',
+          body: formData,
+          credentials: 'same-origin',
+          headers: {'Accept':'application/json', 'X-Requested-With':'XMLHttpRequest'}
+        }).then(function (response) {
+          return response.json().catch(function () { return {}; }).then(function (data) {
+            if (!response.ok || !data.ok) throw new Error(data.error || 'The blur could not be saved.');
+            return data;
+          });
+        });
+      }
+
+      function saveRedactions() {
+        if (!redactionState.item || !redactionState.metadataLoaded || redactionState.metadataFailed || redactionState.regions.length === 0 || redactionState.regions.length > maxRedactionRegions || redactionState.saving) return;
+        var operationItem = redactionState.item;
+        var operationGeneration = redactionState.generation;
+        var operationIsCurrent = function () {
+          return redactionState.item === operationItem && redactionState.generation === operationGeneration;
+        };
+        redactionState.saving = true;
+        updateRedactionControls();
+        setRedactionStatus('Creating the separate blurred public copy…', 'text-info');
+        var mask = {
+          version: 1,
+          source_width: redactionState.sourceWidth,
+          source_height: redactionState.sourceHeight,
+          regions: redactionState.regions
+        };
+        postRedactionAction('save_evidence_redaction', {mask_json:JSON.stringify(mask)}).then(function (data) {
+          if (!operationIsCurrent()) return;
+          redactionState.published = true;
+          setRedactionStatus(data.message || 'Public blurred copy saved. The original remains protected.', 'text-success');
+        }).catch(function (error) {
+          if (!operationIsCurrent()) return;
+          setRedactionStatus(error.message || 'The blur could not be saved.', 'text-danger');
+        }).finally(function () {
+          if (!operationIsCurrent()) return;
+          redactionState.saving = false;
+          updateRedactionControls();
+        });
+      }
+
+      function removePublishedRedaction() {
+        if (!redactionState.item || !redactionState.metadataLoaded || redactionState.metadataFailed || !redactionState.published || redactionState.saving) return;
+        if (!window.confirm('Remove the published blur? The unblurred image will become the public version. This cannot be undone.')) return;
+        var operationItem = redactionState.item;
+        var operationGeneration = redactionState.generation;
+        var operationIsCurrent = function () {
+          return redactionState.item === operationItem && redactionState.generation === operationGeneration;
+        };
+        redactionState.saving = true;
+        updateRedactionControls();
+        setRedactionStatus('Removing the public blurred copy…', 'text-warning');
+        postRedactionAction('remove_evidence_redaction', {}).then(function (data) {
+          if (!operationIsCurrent()) return;
+          redactionState.published = false;
+          redactionState.regions = [];
+          setRedactionVersion('original');
+          setRedactionStatus(data.message || 'Published blur removed. The original is now the public version.', 'text-warning');
+        }).catch(function (error) {
+          if (!operationIsCurrent()) return;
+          setRedactionStatus(error.message || 'The published blur could not be removed.', 'text-danger');
+        }).finally(function () {
+          if (!operationIsCurrent()) return;
+          redactionState.saving = false;
+          updateRedactionControls();
+          paintRedactions();
+        });
       }
 
       function renderPreview(item) {
@@ -14246,18 +16213,26 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
       function renderEvidence(item) {
         var isImage = isImageItem(item);
-        var activeGallery = item.isGallery && !item.isEditMode;
+        var redactionMode = canRedactEvidence && isImage && isRedactableImageItem(item) && (item.isRedactMode || item.isEditMode) && !!redactionPanel;
+        var showSidePanel = (item.isEditMode || item.isRedactMode) && !!editPanel;
+        var activeGallery = item.isGallery && !item.isEditMode && !item.isRedactMode;
         var titleElement = document.getElementById('evModalTitle');
         if (titleElement) titleElement.textContent = showEvidenceTitles ? item.title : 'Evidence';
 
         if (previewColumn) {
-          previewColumn.classList.toggle('col-lg-8', item.isEditMode && !!editPanel);
-          previewColumn.classList.toggle('col-12', !item.isEditMode || !editPanel);
+          previewColumn.classList.toggle('col-lg-8', showSidePanel);
+          previewColumn.classList.toggle('col-12', !showSidePanel);
         }
-        if (editPanel) editPanel.classList.toggle('d-none', !item.isEditMode);
+        if (editPanel) editPanel.classList.toggle('d-none', !showSidePanel);
+        if (titleEditPanel) titleEditPanel.classList.toggle('d-none', !item.isEditMode);
         if (rotatePanel) rotatePanel.classList.toggle('d-none', !item.isEditMode || !isImage);
+        if (redactionPanel) redactionPanel.classList.toggle('d-none', !redactionMode);
         setGalleryChrome(activeGallery);
-        renderPreview(item);
+        if (redactionMode) renderRedactionEditor(item);
+        else {
+          resetRedactionState();
+          renderPreview(item);
+        }
 
         var evId = document.getElementById('evId');
         var evCaseId = document.getElementById('evCaseId');
@@ -14297,6 +16272,31 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
       if (prevButton) prevButton.addEventListener('click', function () { showRelativeGalleryItem(-1); });
       if (nextButton) nextButton.addEventListener('click', function () { showRelativeGalleryItem(1); });
+      if (redactionOriginalButton) redactionOriginalButton.addEventListener('click', function () { setRedactionVersion('original'); });
+      if (redactionPublicButton) redactionPublicButton.addEventListener('click', function () { setRedactionVersion('public'); });
+      if (redactionDrawButton) redactionDrawButton.addEventListener('click', function () {
+        if (redactionState.version !== 'original' || !redactionState.metadataLoaded || redactionState.metadataFailed) return;
+        redactionState.drawing = !redactionState.drawing;
+        updateRedactionControls();
+        setRedactionStatus(redactionState.drawing ? 'Drawing enabled. Drag over each sensitive area.' : 'Drawing paused. Existing boxes are still ready to save.', 'text-info');
+      });
+      if (redactionUndoButton) redactionUndoButton.addEventListener('click', function () {
+        if (redactionState.regions.length === 0 || redactionState.version !== 'original') return;
+        redactionState.regions.pop();
+        updateRedactionControls();
+        paintRedactions();
+        setRedactionStatus('Removed the most recent blur box.', 'text-secondary');
+      });
+      if (redactionClearButton) redactionClearButton.addEventListener('click', function () {
+        if (redactionState.regions.length === 0 || redactionState.version !== 'original') return;
+        if (!window.confirm('Clear all draft blur boxes? The published version is unchanged. Draw a new box before saving, or use Remove Published Blur to make the original public.')) return;
+        redactionState.regions = [];
+        updateRedactionControls();
+        paintRedactions();
+        setRedactionStatus('Draft boxes cleared. Any published public copy is unchanged.', 'text-warning');
+      });
+      if (redactionSaveButton) redactionSaveButton.addEventListener('click', saveRedactions);
+      if (redactionRemoveButton) redactionRemoveButton.addEventListener('click', removePublishedRedaction);
       document.addEventListener('keydown', function (event) {
         if (!evModal.classList.contains('show') || galleryIndex < 0 || galleryTriggers.length < 2) return;
         if (event.target && (event.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT|VIDEO|AUDIO)$/.test(event.target.tagName))) return;
@@ -14311,6 +16311,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
 
       evModal.addEventListener('hidden.bs.modal', function () {
         stopPreviewMedia();
+        resetRedactionState();
         if (preview) {
           var emptyMessage = document.createElement('div');
           emptyMessage.className = 'text-secondary small';
@@ -14325,7 +16326,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           previewColumn.classList.add('col-12');
         }
         if (editPanel) editPanel.classList.add('d-none');
+        if (titleEditPanel) titleEditPanel.classList.add('d-none');
         if (rotatePanel) rotatePanel.classList.add('d-none');
+        if (redactionPanel) redactionPanel.classList.add('d-none');
         var evRotateId = document.getElementById('evRotateId');
         var evRotateCaseId = document.getElementById('evRotateCaseId');
         if (evRotateId) evRotateId.value = '';

@@ -1,4 +1,11 @@
 <?php
+// Historical source snapshot only. Never expose this legacy application entry point over HTTP.
+if (PHP_SAPI !== 'cli') {
+    http_response_code(404);
+    header('Cache-Control: no-store');
+    exit('Not found');
+}
+
 // ---- Minimal auth bootstrap (no frameworks) ----
 if (session_status() === PHP_SESSION_NONE) {
     // Secure session settings

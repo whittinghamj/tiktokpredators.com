@@ -1,0 +1,11 @@
+Options -Indexes
+
+# Evidence originals, notes, masks, and public derivatives must only be read by
+# index.php after it has applied case visibility and original/public-variant rules.
+<IfModule mod_authz_core.c>
+  Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+  Order allow,deny
+  Deny from all
+</IfModule>

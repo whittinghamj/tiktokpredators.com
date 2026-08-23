@@ -1,0 +1,13 @@
+Options -Indexes
+
+# Case profile photos are intentional display assets. Override the uploads-level
+# evidence denial only for the raster extensions the application creates.
+<FilesMatch "(?i)\.(?:jpe?g|png|webp)$">
+  <IfModule mod_authz_core.c>
+    Require all granted
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Order allow,deny
+    Allow from all
+  </IfModule>
+</FilesMatch>
