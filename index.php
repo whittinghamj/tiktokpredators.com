@@ -6481,6 +6481,41 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
     .case-grid .card:hover { transform: translateY(-2px); box-shadow: 0 6px 32px rgba(0,0,0,.35); }
     .avatar { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; }
     .dropzone { border: 2px dashed rgba(255,255,255,.25); border-radius: 1rem; padding: 2rem; text-align: center; }
+    .evidence-upload-file { display: flex; align-items: center; gap: .75rem; min-width: 0; }
+    .evidence-upload-preview {
+      position: relative;
+      display: flex;
+      flex: 0 0 72px;
+      width: 72px;
+      height: 72px;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,.2);
+      border-radius: .5rem;
+      background: rgba(0,0,0,.32);
+      color: rgba(255,255,255,.72);
+    }
+    .evidence-upload-preview img,
+    .evidence-upload-preview video { width: 100%; height: 100%; display: block; object-fit: contain; }
+    .evidence-upload-preview video { pointer-events: none; }
+    .evidence-upload-preview-icon { font-size: 1.65rem; line-height: 1; }
+    .evidence-upload-preview-label {
+      position: absolute;
+      right: .2rem;
+      bottom: .2rem;
+      padding: .08rem .28rem;
+      border-radius: .25rem;
+      background: rgba(0,0,0,.72);
+      color: #fff;
+      font-size: .58rem;
+      font-weight: 700;
+      line-height: 1.25;
+      letter-spacing: .03em;
+      text-transform: uppercase;
+    }
+    .evidence-upload-file-meta { min-width: 0; }
+    .evidence-upload-file-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .timeline { border-left: 2px solid rgba(255,255,255,.1); padding-left: 1rem; }
     .timeline .item { position: relative; margin-bottom: 1rem; }
     .timeline .item::before { content: ""; position: absolute; left: -1.1rem; top: .25rem; width: .65rem; height: .65rem; background: var(--tp-primary); border-radius: 50%; box-shadow: 0 0 0 3px rgba(124,77,255,.25); }
@@ -11672,7 +11707,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <input type="file" id="evMultiFileInput" multiple accept="image/*,video/mp4,video/webm,video/ogg,audio/*,application/pdf,.doc,.docx,.txt" class="d-none">
               <!-- Staged file list (shown after selection) -->
               <div id="evFileList" class="d-none">
-                <p class="small text-secondary mb-2">Give each file a title/tag before uploading:</p>
+                <p class="small text-secondary mb-2">Use the preview to identify each file, then give it a title/tag before uploading:</p>
                 <div class="table-responsive">
                   <table class="table table-sm align-middle mb-2" id="evFileTable">
                     <thead class="table-dark">
@@ -12651,7 +12686,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             </div>
             <input type="file" id="adminEvFileInput" multiple accept="image/*,video/mp4,video/webm,video/ogg,audio/*,application/pdf,.doc,.docx,.txt" class="d-none">
             <div id="adminEvFileList" class="d-none">
-              <p class="small text-secondary mb-2">Give each file a title/tag before uploading:</p>
+              <p class="small text-secondary mb-2">Use the preview to identify each file, then give it a title/tag before uploading:</p>
               <div class="table-responsive">
                 <table class="table table-sm align-middle mb-2" id="adminEvFileTable">
                   <thead class="table-dark">
@@ -14502,6 +14537,76 @@ document.addEventListener('click', function (ev) {
     return (bytes / 1048576).toFixed(1) + ' MB';
   }
 
+  function previewIcon(type) {
+    return {
+      image: 'bi-file-earmark-image',
+      video: 'bi-file-earmark-play',
+      audio: 'bi-file-earmark-music',
+      pdf:   'bi-file-earmark-pdf',
+      doc:   'bi-file-earmark-word',
+      other: 'bi-file-earmark'
+    }[type] || 'bi-file-earmark';
+  }
+
+  function previewLabel(type) {
+    return {image:'Image',video:'Video',audio:'Audio',pdf:'PDF',doc:'Doc',other:'File'}[type] || 'File';
+  }
+
+  function addPreviewFallback(preview, type) {
+    var label = preview.querySelector('.evidence-upload-preview-label');
+    preview.replaceChildren();
+    var icon = document.createElement('i');
+    icon.className = 'bi ' + previewIcon(type) + ' evidence-upload-preview-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    preview.appendChild(icon);
+    if (label) preview.appendChild(label);
+  }
+
+  function buildPreview(file, type, rememberUrl) {
+    var preview = document.createElement('div');
+    preview.className = 'evidence-upload-preview';
+    preview.setAttribute('aria-hidden', 'true');
+    preview.title = file.name;
+
+    var canPreview = type === 'image' || type === 'video';
+    var canCreateUrl = window.URL && typeof window.URL.createObjectURL === 'function';
+    if (!canPreview || !canCreateUrl) {
+      addPreviewFallback(preview, type);
+    } else {
+      var objectUrl = window.URL.createObjectURL(file);
+      rememberUrl(objectUrl);
+
+      if (type === 'image') {
+        var image = document.createElement('img');
+        image.src = objectUrl;
+        image.alt = '';
+        image.addEventListener('error', function () { addPreviewFallback(preview, type); }, {once:true});
+        preview.appendChild(image);
+      } else {
+        var video = document.createElement('video');
+        video.src = objectUrl;
+        video.preload = 'metadata';
+        video.muted = true;
+        video.playsInline = true;
+        video.setAttribute('aria-hidden', 'true');
+        video.addEventListener('loadedmetadata', function () {
+          if (Number.isFinite(video.duration) && video.duration > 0) {
+            try { video.currentTime = Math.min(.1, video.duration / 2); } catch (e) {}
+          }
+        }, {once:true});
+        video.addEventListener('error', function () { addPreviewFallback(preview, type); }, {once:true});
+        preview.appendChild(video);
+      }
+    }
+
+    var label = document.createElement('span');
+    label.className = 'evidence-upload-preview-label';
+    label.textContent = previewLabel(type);
+    label.setAttribute('aria-hidden', 'true');
+    preview.appendChild(label);
+    return preview;
+  }
+
   // Build the type <select> for a row
   function typeSelect(detected, rowId) {
     var types = ['image','video','audio','pdf','doc','other'];
@@ -14522,6 +14627,21 @@ document.addEventListener('click', function (ev) {
   function initUploader(config) {
     var files = []; // [{file, rowId}]
     var rowCounter = 0;
+    var previewUrls = [];
+
+    function rememberPreviewUrl(url) {
+      previewUrls.push(url);
+    }
+
+    function releasePreviewUrls() {
+      if (!window.URL || typeof window.URL.revokeObjectURL !== 'function') return;
+      previewUrls.forEach(function (url) { window.URL.revokeObjectURL(url); });
+      previewUrls = [];
+    }
+
+    window.addEventListener('pagehide', function (event) {
+      if (!event.persisted) releasePreviewUrls();
+    });
 
     function populateList(newFiles) {
       for (var i = 0; i < newFiles.length; i++) {
@@ -14533,16 +14653,22 @@ document.addEventListener('click', function (ev) {
         var row = document.createElement('tr');
         row.id = 'evRow_' + rid;
         row.innerHTML =
-          '<td class="text-truncate" style="max-width:140px;" title="'+escHtml(f.name)+'">'
-            + '<span class="text-white small">'+escHtml(f.name)+'</span>'
-            + '<br><span class="text-secondary" style="font-size:.75rem">'+fmtSize(f.size)+'</span>'
+          '<td style="max-width:220px;">'
+            + '<div class="evidence-upload-file">'
+              + '<div class="evidence-upload-preview-slot"></div>'
+              + '<div class="evidence-upload-file-meta">'
+                + '<span class="text-white small evidence-upload-file-name" title="'+escHtml(f.name)+'">'+escHtml(f.name)+'</span>'
+                + '<span class="text-secondary" style="font-size:.75rem">'+fmtSize(f.size)+'</span>'
+              + '</div>'
+            + '</div>'
           + '</td>'
-          + '<td><input type="text" class="form-control form-control-sm" id="evTitle_'+rid+'" placeholder="Title / tag" value="'+escHtml(f.name.replace(/\.[^.]+$/, ''))+'"></td>'
+          + '<td><input type="text" class="form-control form-control-sm" id="evTitle_'+rid+'" aria-label="Title or tag for '+escHtml(f.name)+'" placeholder="Title / tag" value="'+escHtml(f.name.replace(/\.[^.]+$/, ''))+'"></td>'
           + '<td>'+typeSelect(detected, rid)+'</td>'
           + '<td id="evStatus_'+rid+'">'
               + '<div class="progress" style="height:6px;"><div class="progress-bar" id="evProg_'+rid+'" style="width:0%"></div></div>'
               + '<span class="small text-secondary" id="evProgTxt_'+rid+'">Pending</span>'
           + '</td>';
+        row.querySelector('.evidence-upload-preview-slot').replaceWith(buildPreview(f, detected, rememberPreviewUrl));
         config.listBodyEl.appendChild(row);
       }
       config.listEl.classList.remove('d-none');
