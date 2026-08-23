@@ -37,10 +37,37 @@ if (session_status() === PHP_SESSION_NONE) {
 }
 
 // Evidence storage path. New evidence is never written below the document root.
+//
+// Production installs under /var/www use the system data directory provisioned by
+// update.sh. Local/dev checkouts use the account's durable data directory, outside
+// source trees that may be publicly served or cloud-synchronised. An explicit
+// override remains authoritative and is validated before any file access.
 $tpPrivateStorageOverride = getenv('EVIDENCE_PRIVATE_STORAGE_PATH');
-$storagePath = is_string($tpPrivateStorageOverride) && trim($tpPrivateStorageOverride) !== ''
-    ? trim($tpPrivateStorageOverride)
-    : '/var/lib/tiktokpredators/evidence';
+if (is_string($tpPrivateStorageOverride) && trim($tpPrivateStorageOverride) !== '') {
+    $storagePath = trim($tpPrivateStorageOverride);
+} else {
+    $tpApplicationDirectory = @realpath(__DIR__) ?: __DIR__;
+    $tpIsSystemWebInstall = $tpApplicationDirectory === '/var/www'
+        || strncmp($tpApplicationDirectory, '/var/www/', 9) === 0;
+    if ($tpIsSystemWebInstall) {
+        $storagePath = '/var/lib/tiktokpredators/evidence';
+    } else {
+        $tpLocalDataHome = getenv('XDG_DATA_HOME');
+        if (!is_string($tpLocalDataHome)
+            || trim($tpLocalDataHome) === ''
+            || trim($tpLocalDataHome)[0] !== '/') {
+            $tpLocalHome = getenv('HOME');
+            $tpLocalDataHome = is_string($tpLocalHome)
+                && trim($tpLocalHome) !== ''
+                && trim($tpLocalHome)[0] === '/'
+                ? rtrim(trim($tpLocalHome), '/\\') . '/.local/share'
+                : '';
+        }
+        $storagePath = $tpLocalDataHome !== ''
+            ? rtrim(trim($tpLocalDataHome), '/\\') . '/tiktokpredators/evidence'
+            : '';
+    }
+}
 
 // Console log path
 $CONSOLE_LOG_PATH = '/var/www/html/tiktokpredators.com/logs/console.log';
@@ -1631,7 +1658,9 @@ function tp_private_storage_root(bool $create = false, ?string &$error = null): 
     $created = false;
     if (!is_dir($candidate)) {
         if (!$create || (!@mkdir($candidate, 0700, true) && !is_dir($candidate))) {
-            $error = 'Private evidence storage does not exist or could not be created.';
+            $error = 'Private evidence storage does not exist or could not be created. '
+                . 'Ask the server operator to run `sudo bash update.sh --provision-private-storage` '
+                . 'from the current deployment.';
             return null;
         }
         $created = true;
@@ -2121,13 +2150,22 @@ function tp_apply_evidence_blur_regions(GdImage $image, array $regions, string $
     if (!tp_prepare_evidence_redaction_work($imageWidth, $imageHeight, $regions, $workRegions, $error)) {
         return false;
     }
+    // Privacy redactions need to destroy detail rather than merely soften it. Each padded
+    // crop is reduced to a very small sample grid, blurred while detail is absent, then
+    // enlarged and blurred again. Capping both axes also prevents a very large selection
+    // from retaining readable text or anatomical detail just because its source is large.
+    $downsampleDivisor = 48;
+    $maximumSamplesPerAxis = 12;
+    $lowResolutionBlurPasses = 6;
+    $fullResolutionBlurPasses = 8;
     $largestCropPixels = 0;
     $largestSmallPixels = 0;
     foreach ($workRegions ?: [] as $work) {
         $largestCropPixels = max($largestCropPixels, (int)$work['crop_pixels']);
         $largestSmallPixels = max(
             $largestSmallPixels,
-            max(1, (int)ceil((int)$work['crop_width'] / 18)) * max(1, (int)ceil((int)$work['crop_height'] / 18))
+            min($maximumSamplesPerAxis, max(1, (int)ceil((int)$work['crop_width'] / $downsampleDivisor)))
+                * min($maximumSamplesPerAxis, max(1, (int)ceil((int)$work['crop_height'] / $downsampleDivisor)))
         );
     }
     $memoryLimit = tp_evidence_ini_bytes((string)ini_get('memory_limit'));
@@ -2167,10 +2205,11 @@ function tp_apply_evidence_blur_regions(GdImage $image, array $regions, string $
             return false;
         }
 
-        // Destroy fine detail before the Gaussian passes. This is intentionally much stronger
-        // than a cosmetic CSS blur because the derivative may contain intimate or identifying data.
-        $smallWidth = max(1, (int)ceil($cropWidth / 18));
-        $smallHeight = max(1, (int)ceil($cropHeight / 18));
+        // Destructive downsampling removes high-frequency source detail before any blur is
+        // applied. The tiny capped grid is deliberate: this derivative may cover intimate
+        // imagery, faces, addresses, account numbers, or other identifying information.
+        $smallWidth = min($maximumSamplesPerAxis, max(1, (int)ceil($cropWidth / $downsampleDivisor)));
+        $smallHeight = min($maximumSamplesPerAxis, max(1, (int)ceil($cropHeight / $downsampleDivisor)));
         $small = imagecreatetruecolor($smallWidth, $smallHeight);
         if (!($small instanceof GdImage)) {
             tp_release_evidence_image($small);
@@ -2180,6 +2219,11 @@ function tp_apply_evidence_blur_regions(GdImage $image, array $regions, string $
         }
         tp_prepare_evidence_canvas($small, $mime);
         $resampledDown = imagecopyresampled($small, $crop, 0, 0, 0, 0, $smallWidth, $smallHeight, $cropWidth, $cropHeight);
+        if ($resampledDown) {
+            for ($pass = 0; $pass < $lowResolutionBlurPasses; $pass++) {
+                @imagefilter($small, IMG_FILTER_GAUSSIAN_BLUR);
+            }
+        }
         $resampledUp = $resampledDown
             && imagecopyresampled($crop, $small, 0, 0, 0, 0, $cropWidth, $cropHeight, $smallWidth, $smallHeight);
         tp_release_evidence_image($small);
@@ -2188,7 +2232,9 @@ function tp_apply_evidence_blur_regions(GdImage $image, array $regions, string $
             $error = 'Unable to render blur area ' . ((int)$index + 1) . '.';
             return false;
         }
-        for ($pass = 0; $pass < 6; $pass++) { @imagefilter($crop, IMG_FILTER_GAUSSIAN_BLUR); }
+        for ($pass = 0; $pass < $fullResolutionBlurPasses; $pass++) {
+            @imagefilter($crop, IMG_FILTER_GAUSSIAN_BLUR);
+        }
 
         $sourceX = $left - $cropLeft;
         $sourceY = $top - $cropTop;
@@ -15853,7 +15899,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           context.beginPath();
           context.rect(x, y, regionWidth, regionHeight);
           context.clip();
-          context.filter = 'blur(14px)';
+          // The canvas is only a preview; use a visibly heavy blur so the editor
+          // reflects the deliberately destructive server-rendered public copy.
+          context.filter = 'blur(32px)';
           context.drawImage(image, 0, 0, width, height);
           context.restore();
 
