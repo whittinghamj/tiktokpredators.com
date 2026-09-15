@@ -752,6 +752,7 @@ function tp_create_user_notification(PDO $pdo, int $userId, string $type, string
       'adult-predator' => 'Adult Predator',
       'child-predator' => 'Child Predator',
       'domestic-abuse' => 'Domestic Abuse',
+      'animal-abuse' => 'Animal Abuse',
       'scammer' => 'Scammer',
       'grooming' => 'Grooming',
       'sextortion' => 'Sextortion',
