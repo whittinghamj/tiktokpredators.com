@@ -1,0 +1,11 @@
+# Performance changes and deployment
+
+Deploy all changed files together, including `scripts/`. Before routing traffic to the new version, run `php scripts/migrate.php` with the production PHP installation and the same DB_DSN, DB_USER and DB_PASS environment used by PHP-FPM. `update.sh` now runs this step after pulling. Back up the database before upgrades. The migration preserves the existing legacy upgrades and backfills, and adds composite analytics indexes and an evidence date index. It requires DDL privileges; normal requests no longer do. It upgrades an existing database, not an empty installation. Do not run simultaneous migrations.
+
+Normal requests no longer execute schema checks, ALTER/CREATE commands, settings/tag seeds, or username backfills. A read-only redaction schema probe remains so evidence protection fails closed if that table is unavailable.
+
+The public cases grid displays 24 cases per page with Previous/Next links preserving search and tag filters. View counts and tags are fetched in batches for that page. Images load lazily and video previews do not fetch metadata until needed. Apache compresses text responses where mod_deflate is installed, and caches public CSS/JS/fonts where mod_expires is installed.
+
+Page-view analytics retain request and device data, scoring and alerts, and geo headers supplied by the edge. Page loads no longer call the external GeoIP service; ISP/proxy/location enrichment can be populated separately with the existing `backfill_case_views_geoip.php` CLI job. Submission metadata still performs its deliberate GeoIP lookup. Proxy/hosting-based alerts on a new view will only have header/basic data until separate enrichment; the existing backfill does not recompute alerts.
+
+Validation here is local syntax and isolated behavior checks (`php tests/performance.php`). Production database query plans, timings, Apache configuration, and browser behavior need verification on the deployed environment. Compare cases, a case detail, evidence thumbnails, and authenticated admin requests before/after with cold and warm caches; confirm pagination/filter links, redacted evidence, analytics updates and account actions. The remaining recent-activity ordering aggregates evidence by case; large databases may benefit from a transactionally maintained activity column after query-plan measurement.

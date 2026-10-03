@@ -165,4 +165,10 @@ if ! git pull; then
     exit 1
 fi
 
+# Run upgrades once at deployment, not on visitors' requests.
+if ! php "$WEBROOT/scripts/migrate.php"; then
+    echo "Error: database migration failed. Resolve it before serving the updated application."
+    exit 1
+fi
+
 echo "Update complete."
