@@ -47,4 +47,17 @@ $viewStart = strpos($source, 'function log_case_view(');
 $viewEnd = strpos($source, 'function get_case_view_count', $viewStart);
 check(!str_contains(substr($source, $viewStart, $viewEnd - $viewStart), 'tp_geo_lookup_api('), 'Page-view tracking must not make network calls.');
 check(!preg_match('/\$pdo->exec\([\s\S]{0,10}[\'\"](?:ALTER|CREATE)/', $source), 'Runtime schema DDL returned.');
+// HTML analytics must only issue tickets, with no DB writes or scans.
+$queueStart = strpos($source, '    function log_case_view(');
+$queueEnd = strpos($source, '    function tp_write_case_view', $queueStart);
+eval(substr($source, $queueStart, $queueEnd - $queueStart));
+$pdo->queries = [];
+$_SESSION = []; $_SERVER['REQUEST_URI'] = '/?view=case&code=EXAMPLE';
+for ($i = 0; $i < 15; $i++) { log_case_view($pdo, $i); }
+check(count($pdo->queries) === 0, 'HTML analytics accessed the database.');
+check(count($_SESSION['pending_case_views']) === 12, 'Pending tickets are not bounded.');
+$ticket = $GLOBALS['tp_view_ticket'];
+check($_SESSION['pending_case_views'][$ticket]['case_id'] === 14, 'Ticket is not bound to its case.');
+check($_SESSION['pending_case_views'][$ticket]['request']['REQUEST_URI'] === $_SERVER['REQUEST_URI'], 'Original request context was lost.');
+check(strpos($source, 'session_write_close();', strpos($source, 'unset($_SESSION[\'pending_case_views\'][$ticket]);')) < strpos($source, 'tp_write_case_view($pdo, $caseId);', strpos($source, 'if (($_POST[\'action\'] ?? \'\') === \'update_view_client\')')), 'Async analytics must release the session before querying.');
 echo "Performance regression checks passed.\n";
