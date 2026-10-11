@@ -81,13 +81,13 @@ CREATE TABLE IF NOT EXISTS project_settings (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 SQL
   );
-  $defaultSettings = [
+  $defaultSettings = array_merge([
     'site_title' => 'TikTokPredators',
     'meta_data' => 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.',
     'openai_api_key' => '',
     'discord_webhook_key' => '',
     'discord_webhooks' => '[]',
-  ];
+  ], tp_ollama_settings_defaults());
   $seed = $pdo->prepare('INSERT IGNORE INTO project_settings (setting_key, setting_value) VALUES (?, ?)');
   foreach ($defaultSettings as $settingKey => $settingValue) {
     $seed->execute([$settingKey, $settingValue]);
@@ -343,6 +343,40 @@ try {
 } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
 }
+// Private Ollama reports deliberately live outside cases, so public case queries
+// cannot accidentally select the report or chat history.
+try {
+  $pdo->exec("CREATE TABLE IF NOT EXISTS case_ollama_reports (
+    case_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+    requested_version BIGINT UNSIGNED NOT NULL DEFAULT 1,
+    processed_version BIGINT UNSIGNED NOT NULL DEFAULT 0,
+    status ENUM('Queued','Processing','Ready','Partial','Failed') NOT NULL DEFAULT 'Queued',
+    processing_token VARCHAR(64) NULL,
+    report_text LONGTEXT NULL,
+    report_json LONGTEXT NULL,
+    model VARCHAR(255) NULL,
+    error_message VARCHAR(1000) NULL,
+    queued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    generated_at DATETIME NULL,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_ollama_queue (status, queued_at)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  $pdo->exec("CREATE TABLE IF NOT EXISTS case_ollama_messages (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    case_id BIGINT UNSIGNED NOT NULL,
+    user_id BIGINT UNSIGNED NOT NULL,
+    report_version BIGINT UNSIGNED NOT NULL,
+    question TEXT NOT NULL,
+    answer LONGTEXT NOT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_ollama_chat (case_id, user_id, report_version, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  // Existing cases are queued once; rerunning migrations preserves their reports.
+  $pdo->exec('INSERT IGNORE INTO case_ollama_reports (case_id) SELECT id FROM cases');
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
+
 // --- Persistent account notifications ---
 try {
   $pdo->exec("

@@ -1,0 +1,10 @@
+[Unit]
+Description=Process queued private case reports automatically
+
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=20s
+Unit=tiktokpredators-ollama.service
+
+[Install]
+WantedBy=timers.target

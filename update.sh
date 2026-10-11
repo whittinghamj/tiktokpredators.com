@@ -171,4 +171,9 @@ if ! php "$WEBROOT/scripts/migrate.php"; then
     exit 1
 fi
 
+if ! bash "$WEBROOT/scripts/install-ollama-worker.sh" "$WEBROOT" "$PRIVATE_STORAGE"; then
+    echo "Error: automatic Ollama report worker installation failed. See OLLAMA.md."
+    exit 1
+fi
+
 echo "Update complete."

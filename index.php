@@ -1,5 +1,8 @@
 <?php
 
+require_once __DIR__ . '/lib/ollama.php';
+require_once __DIR__ . '/lib/case-ollama.php';
+
 // --- Cross-subdomain session cookie for tiktokpredators.com and www.tiktokpredators.com
 // Must be set BEFORE session_start()
 $tp_cookie_domain = '.tiktokpredators.com'; // covers apex and www
@@ -287,13 +290,13 @@ function tp_normalize_account_username($input): string {
 function tp_project_settings(PDO $pdo): array {
   static $cache = null;
   if ($cache !== null) { return $cache; }
-  $cache = [
+  $cache = array_merge([
     'site_title' => 'TikTokPredators',
     'meta_data' => 'A public, auditable repository documenting abusive behaviour by TikTok accounts — case records, evidence, and verifiable proof to expose predators and support accountability.',
     'openai_api_key' => '',
     'discord_webhook_key' => '',
     'discord_webhooks' => '[]',
-  ];
+  ], tp_ollama_settings_defaults());
   try {
     $stmt = $pdo->query('SELECT setting_key, setting_value FROM project_settings');
     foreach ($stmt->fetchAll() as $row) {
@@ -311,6 +314,18 @@ function tp_project_settings(PDO $pdo): array {
 function tp_project_setting(PDO $pdo, string $key, string $default = ''): string {
   $settings = tp_project_settings($pdo);
   return (string)($settings[$key] ?? $default);
+}
+
+/** Shared connection configuration for services using the custom Ollama server. */
+function tp_ollama_config(PDO $pdo): array {
+  $settings = tp_project_settings($pdo);
+  return [
+    'base_url' => $settings['ollama_base_url'],
+    'api_key' => $settings['ollama_api_key'],
+    'default_model' => $settings['ollama_default_model'],
+    'vision_model' => $settings['ollama_vision_model'],
+    'timeout' => (int)$settings['ollama_timeout'],
+  ];
 }
 
 function tp_discord_webhooks(PDO $pdo): array {
@@ -2424,6 +2439,11 @@ if (PHP_SAPI === 'cli' && defined('TP_RUN_MIGRATIONS')) {
     fwrite(STDOUT, "Database migrations complete.\n");
     exit(0);
 }
+// The report worker loads shared helpers and the connection, then avoids all web flows.
+if (PHP_SAPI === 'cli' && defined('TP_OLLAMA_WORKER')) {
+    if (!isset($pdo)) { fwrite(STDERR, "Database connection failed.\n"); exit(1); }
+    return;
+}
 // Keep redaction failures closed without running DDL on evidence requests.
 $tp_evidence_redactions_ready = false;
 $tp_evidence_rotation_ready = false;
@@ -2443,6 +2463,10 @@ if (($_GET['view'] ?? '') === 'catch_a_pred' || strpos((string)($_POST['action']
 }
 
 function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = null, ?string $detail = null, ?int $refEvidenceId = null, ?int $refNoteId = null): void {
+    // A tiny durable queue write; file extraction and model calls run in the worker.
+    if (in_array($type, ['case_created', 'case_submitted_for_review', 'case_resubmitted', 'case_approved', 'case_rejected', 'case_returned_to_building', 'case_updated', 'ai_suggestion_approved', 'note_added', 'evidence_added', 'evidence_updated', 'evidence_deleted', 'evidence_rotated', 'person_photo_rotated'], true)) {
+        tp_case_ollama_enqueue($pdo, $caseId);
+    }
     try {
         [$publicIp, $forwardedFor] = tp_client_ip();
         $forwardedFor = substr($forwardedFor, 0, 255);
@@ -3947,6 +3971,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
     header('Location: '. $redir); exit;
 }
 
+// Private case reports and chat have their own admin/CSRF checks before any reads.
+require __DIR__ . '/lib/case-ollama-http.php';
+
 // Test an OpenAI API key without saving or exposing it (main admin only).
 if (($_POST['action'] ?? '') === 'test_openai_api_key') {
     throttle();
@@ -3970,6 +3997,31 @@ if (($_POST['action'] ?? '') === 'test_openai_api_key') {
 
     $openAiApiKey = trim((string)($_POST['openai_api_key'] ?? ''));
     [$ok, $httpCode, $message] = tp_test_openai_api_key($openAiApiKey);
+    if ($isAjax) { $respondJson($ok, $message, $httpCode); }
+    flash($ok ? 'success' : 'error', $message);
+    header('Location: ?view=project_settings#project-settings'); exit;
+}
+
+// Test submitted Ollama connection details without saving (main admin only).
+if (($_POST['action'] ?? '') === 'test_ollama_server') {
+    throttle();
+    $isAjax = (strtolower((string)($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest') || (($_POST['ajax'] ?? '') === '1');
+    $respondJson = function (bool $ok, string $message, int $httpCode = 0): void {
+      header('Content-Type: application/json');
+      echo json_encode(['ok' => $ok, 'message' => $message, 'http_code' => $httpCode]);
+      exit;
+    };
+    if (!check_csrf()) {
+      if ($isAjax) { $respondJson(false, 'Security check failed.'); }
+      flash('error', 'Security check failed.');
+      header('Location: ?view=project_settings#project-settings'); exit;
+    }
+    if (!tp_is_main_admin()) {
+      if ($isAjax) { $respondJson(false, 'Unauthorized. Main admin only.'); }
+      flash('error', 'Unauthorized. Main admin only.');
+      header('Location: ?view=project_settings#project-settings'); exit;
+    }
+    [$ok, $httpCode, $message] = tp_test_ollama_server($_POST);
     if ($isAjax) { $respondJson($ok, $message, $httpCode); }
     flash($ok ? 'success' : 'error', $message);
     header('Location: ?view=project_settings#project-settings'); exit;
@@ -4105,6 +4157,13 @@ if (($_POST['action'] ?? '') === 'test_discord_webhook') {
     $webhookUrls = $_POST['discord_webhook_url'] ?? [];
     $redir = trim($_POST['redirect_url'] ?? '?view=project_settings#project-settings');
 
+    try {
+      $ollamaSettings = tp_validate_ollama_settings($_POST + tp_project_settings($pdo));
+    } catch (InvalidArgumentException $e) {
+      flash('error', $e->getMessage());
+      header('Location: '. $redir); exit;
+    }
+
     if ($siteTitle === '') { $siteTitle = 'TikTokPredators'; }
 
     $discordWebhooks = [];
@@ -4152,6 +4211,9 @@ if (($_POST['action'] ?? '') === 'test_discord_webhook') {
       $stmt->execute(['site_title', $siteTitle]);
       $stmt->execute(['meta_data', $metaData]);
       $stmt->execute(['openai_api_key', $openAiApiKey]);
+      foreach ($ollamaSettings as $settingKey => $settingValue) {
+        $stmt->execute([$settingKey, $settingValue]);
+      }
       $stmt->execute(['discord_webhooks', $discordWebhooksJson]);
       $stmt->execute(['discord_webhook_key', $legacyWebhook]);
       flash('success', 'Project settings saved.');
@@ -4472,7 +4534,6 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
         save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         save_case_tags($pdo, $case_id, array_keys($case_tags));
         tp_record_case_submission_metadata($pdo, $case_id, (int)($_SESSION['user']['id'] ?? 0));
-        log_case_event($pdo, $case_id, 'case_created', $case_name, 'Viewer created case. Status set to Being Built');
 
         // Optional person photo
         if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
@@ -4493,6 +4554,7 @@ if (($_POST['action'] ?? '') === 'viewer_submit_case') {
             }
         }
 
+        log_case_event($pdo, $case_id, 'case_created', $case_name, 'Viewer created case. Status set to Being Built');
         flash('success', 'Case created. Build the case and add evidence, then submit it for review when it is ready.');
         log_console('SUCCESS', 'Viewer created case ' . $case_code . ' by user_id ' . (int)($_SESSION['user']['id'] ?? 0));
         header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
@@ -4578,7 +4640,6 @@ if (($_POST['action'] ?? '') === 'create_case') {
         save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         save_case_tags($pdo, $case_id, array_keys($case_tags));
         tp_record_case_submission_metadata($pdo, $case_id, (int)($_SESSION['user']['id'] ?? 0));
-        log_case_event($pdo, $case_id, 'case_created', $case_name, 'Case created with status '.$status.' and sensitivity '.$sensitivity);
         // Optional: handle person photo upload
         if (!empty($_FILES['person_photo']['name']) && $_FILES['person_photo']['error'] === UPLOAD_ERR_OK) {
             $pf = $_FILES['person_photo'];
@@ -4602,6 +4663,7 @@ if (($_POST['action'] ?? '') === 'create_case') {
                 @move_uploaded_file($pf['tmp_name'], $destAbs);
             }
         }
+        log_case_event($pdo, $case_id, 'case_created', $case_name, 'Case created with status '.$status.' and sensitivity '.$sensitivity);
         flash('success', 'Case created as Being Built. Add the evidence and details, then submit it for review. ID: ' . htmlspecialchars($case_code));
         log_console('SUCCESS', 'Case created ' . $case_code . ' by user_id ' . (int)($_SESSION['user']['id'] ?? 0));
         // jump to full case view
@@ -5170,6 +5232,9 @@ if (($_POST['action'] ?? '') === 'update_case') {
         ]);
         $tiktok_username = save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         $savedCaseTags = save_case_tags($pdo, $case_id, array_keys($case_tags));
+        if ($remove_person_photo || !empty($_FILES['person_photo']['name'])) {
+            tp_case_ollama_enqueue($pdo, $case_id);
+        }
         // Build diff summary
         $changes = [];
         $fields = ['case_name','person_name','date_of_birth','location','phone_number','snapchat_username','discord_username','tiktok_username','case_tags','initial_summary','sensitivity','status'];
@@ -6630,6 +6695,10 @@ if (($_POST['action'] ?? '') === 'delete_case') {
         $d2->execute([$case_id]);
         $d3 = $pdo->prepare('DELETE FROM case_tiktok_usernames WHERE case_id = ?');
         $d3->execute([$case_id]);
+        foreach (['case_ollama_reports', 'case_ollama_messages'] as $privateTable) {
+            $deletePrivate = $pdo->prepare('DELETE FROM ' . $privateTable . ' WHERE case_id = ?');
+            $deletePrivate->execute([$case_id]);
+        }
         $d4 = $pdo->prepare('DELETE FROM cases WHERE id = ? LIMIT 1');
         $d4->execute([$case_id]);
         $pdo->commit();
@@ -7145,10 +7214,12 @@ $tpMetaImageAlt = $tpPageTitle;
 $tpDiscordWebhooks = [];
 $tpDiscordWebhookCount = 0;
 $tpOpenAiApiKey = '';
+$tpOllamaSettings = tp_ollama_settings_defaults();
 if (isset($pdo) && $pdo instanceof PDO) {
     $tpSiteTitle = tp_project_setting($pdo, 'site_title', $tpSiteTitle);
     $tpMetaDescription = tp_project_setting($pdo, 'meta_data', $tpMetaDescription);
   $tpOpenAiApiKey = tp_project_setting($pdo, 'openai_api_key', '');
+  $tpOllamaSettings = array_intersect_key(tp_project_settings($pdo), $tpOllamaSettings);
   $tpDiscordWebhooks = tp_discord_webhooks($pdo);
 }
 $tpPageTitle = $tpSiteTitle . ' — Cases & Evidence';
@@ -11782,6 +11853,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
           </div>
         </div>
+        <?php if (is_admin() && $viewCaseId > 0) { require __DIR__ . '/lib/case-ollama-panel.php'; } ?>
         <?php if ($viewCaseId > 0 && in_array(($viewCase['status'] ?? ''), ['Being Built', 'Pending', 'Rejected'], true) && ($tp_isCaseOwner || can_moderate_cases())): ?>
         <div class="card glass mb-3" id="case-readiness">
           <div class="card-body">
@@ -13810,6 +13882,38 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       <div class="small text-secondary mt-1" id="openAiTestStatus" role="status" aria-live="polite">Test not run.</div>
                     </div>
 
+                    <fieldset class="border rounded p-3" id="ollama-server-settings">
+                      <legend class="float-none w-auto px-2 fs-6 mb-0">Custom Ollama Server</legend>
+                      <p class="small text-secondary mb-3">Configure the server used for private evidence reports and case chat.</p>
+                      <div class="mb-3">
+                        <label class="form-label" for="ollamaBaseUrl">Server URL</label>
+                        <input type="url" id="ollamaBaseUrl" name="ollama_base_url" class="form-control font-monospace" value="<?php echo htmlspecialchars($tpOllamaSettings['ollama_base_url']); ?>" placeholder="http://192.168.1.10:11434" maxlength="2048" autocomplete="off" spellcheck="false" aria-describedby="ollamaUrlHelp">
+                        <div class="form-text text-secondary" id="ollamaUrlHelp">Enter the base URL without /api or /v1. The server must be reachable from this web server.</div>
+                      </div>
+                      <div class="mb-3">
+                        <label class="form-label" for="ollamaApiKey">API Key <span class="text-secondary small">(optional)</span></label>
+                        <input type="password" id="ollamaApiKey" name="ollama_api_key" class="form-control font-monospace" value="<?php echo htmlspecialchars($tpOllamaSettings['ollama_api_key']); ?>" placeholder="Leave blank if authentication is not required" maxlength="4096" autocomplete="off" spellcheck="false" aria-describedby="ollamaKeyHelp">
+                        <div class="form-text text-secondary" id="ollamaKeyHelp">Sent as a Bearer token if your server or proxy requires authentication.</div>
+                      </div>
+                      <div class="row g-3 mb-3">
+                        <div class="col-md-8">
+                          <label class="form-label" for="ollamaDefaultModel">Default Model</label>
+                          <input type="text" id="ollamaDefaultModel" name="ollama_default_model" class="form-control font-monospace" value="<?php echo htmlspecialchars($tpOllamaSettings['ollama_default_model']); ?>" placeholder="Model name, including its tag" maxlength="255" autocomplete="off" spellcheck="false">
+                        </div>
+                        <div class="col-md-4">
+                          <label class="form-label" for="ollamaTimeout">Timeout (seconds)</label>
+                          <input type="number" id="ollamaTimeout" name="ollama_timeout" class="form-control" value="<?php echo htmlspecialchars($tpOllamaSettings['ollama_timeout']); ?>" min="5" max="600" step="1" required>
+                        </div>
+                      </div>
+                      <div class="mb-3">
+                        <label class="form-label" for="ollamaVisionModel">Vision Model <span class="text-secondary small">(optional)</span></label>
+                        <input type="text" id="ollamaVisionModel" name="ollama_vision_model" class="form-control font-monospace" value="<?php echo htmlspecialchars($tpOllamaSettings['ollama_vision_model']); ?>" placeholder="Use the default model for images" maxlength="255" autocomplete="off" spellcheck="false">
+                        <div class="form-text text-secondary">Evidence images and PDF pages need a model that supports vision. Set the Default Model for reports and case chat; set a separate Vision Model here if needed.</div>
+                      </div>
+                      <button type="button" class="btn btn-outline-info" id="testOllamaServerBtn"><i class="bi bi-broadcast me-1"></i>Test Connection</button>
+                      <div class="small text-secondary mt-2" id="ollamaTestStatus" role="status" aria-live="polite">Test not run. Testing uses the details above; click Save Settings to store them.</div>
+                    </fieldset>
+
                     <div>
                       <div class="d-flex align-items-center justify-content-between mb-2">
                         <label class="form-label mb-0">Discord Webhooks</label>
@@ -13892,6 +13996,42 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         var openAiKeyInput = document.getElementById('openAiApiKey');
         var openAiTestStatus = document.getElementById('openAiTestStatus');
         var csrfToken = <?php echo json_encode($_SESSION['csrf_token'] ?? ''); ?>;
+
+        var ollamaTestBtn = document.getElementById('testOllamaServerBtn');
+        var ollamaTestStatus = document.getElementById('ollamaTestStatus');
+        if (ollamaTestBtn && ollamaTestStatus) {
+          ollamaTestBtn.addEventListener('click', function () {
+            var fields = document.querySelectorAll('#ollama-server-settings input');
+            for (var i = 0; i < fields.length; i++) {
+              if (!fields[i].reportValidity()) return;
+            }
+            var fd = new FormData();
+            fd.append('action', 'test_ollama_server');
+            fd.append('csrf_token', csrfToken);
+            fd.append('ajax', '1');
+            fields.forEach(function (field) { fd.append(field.name, field.value); });
+
+            ollamaTestBtn.disabled = true;
+            ollamaTestStatus.className = 'small text-info mt-2';
+            ollamaTestStatus.textContent = 'Testing Ollama connection...';
+            fetch(window.location.href, {
+              method: 'POST',
+              headers: { 'X-Requested-With': 'XMLHttpRequest' },
+              body: fd
+            }).then(function (res) {
+              return res.json();
+            }).then(function (data) {
+              var succeeded = !!(data && data.ok);
+              ollamaTestStatus.className = 'small ' + (succeeded ? 'text-success' : 'text-danger') + ' mt-2';
+              ollamaTestStatus.textContent = ((data && data.message) ? String(data.message) : 'Ollama returned an unexpected response.') + ' Details have not been saved by this test.';
+            }).catch(function () {
+              ollamaTestStatus.className = 'small text-danger mt-2';
+              ollamaTestStatus.textContent = 'Unable to complete the Ollama test request.';
+            }).finally(function () {
+              ollamaTestBtn.disabled = false;
+            });
+          });
+        }
 
         if (openAiTestBtn && openAiKeyInput && openAiTestStatus) {
           openAiTestBtn.addEventListener('click', function () {
