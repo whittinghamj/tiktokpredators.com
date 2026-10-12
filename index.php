@@ -8588,6 +8588,7 @@ try {
   $caseOffset = ($casePage - 1) * $casesPerPage;
   $caseHasNext = false;
   $caseTagsById = [];
+  $caseAiBadgesById = [];
   $queryParams = [];
   if ($search !== '') {
     $like = '%' . $search . '%';
@@ -8626,6 +8627,7 @@ try {
     $tagsStmt = $pdo->prepare('SELECT ctl.case_id, t.slug, t.label FROM case_tag_links ctl JOIN case_tags t ON t.id = ctl.tag_id WHERE ctl.case_id IN (' . implode(',', array_fill(0, count($ids), '?')) . ') ORDER BY t.label ASC');
     $tagsStmt->execute($ids);
     foreach ($tagsStmt as $tagRow) { $caseTagsById[(int)$tagRow['case_id']][$tagRow['slug']] = $tagRow['label']; }
+    $caseAiBadgesById = tp_case_ollama_listing_badges($pdo, $ids);
   }
 } catch (Throwable $e) {
   $_SESSION['sql_error'] = $e->getMessage();
@@ -8705,6 +8707,7 @@ if ($rs && count($rs) > 0):
           <div class="mb-2 d-flex gap-1 flex-wrap"><?php echo render_case_tag_badges($caseTags); ?></div>
         <?php endif; ?>
         <div class="mt-2 d-flex gap-2 flex-wrap">
+          <?php if (is_admin()): ?><?php echo $caseAiBadgesById[(int)$row['id']] ?? ''; ?><?php endif; ?>
           <span class="badge text-bg-dark border"><i class="bi bi-files me-1"></i><?php echo $evc; ?> evidence</span>
           <span class="badge text-bg-dark border"><i class="bi bi-shield-lock me-1"></i><?php echo htmlspecialchars($sens); ?></span>
           <span class="badge text-bg-dark border" title="Last activity">

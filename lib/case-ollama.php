@@ -2,6 +2,55 @@
 
 class TpOllamaEvidenceException extends RuntimeException {}
 
+/** Render only private report metadata; never include report content or model errors. */
+function tp_case_ollama_summary_badge(?array $report, bool $available = true): string {
+  if (!is_admin()) { return ''; }
+  $label = 'Not started'; $color = 'secondary'; $icon = 'circle';
+  $title = 'An AI evidence summary has not been queued or generated.';
+  if (!$available) {
+    $label = 'Unavailable'; $icon = 'exclamation-circle';
+    $title = 'AI summary status is unavailable. Check the database migration.';
+  } elseif ($report !== null) {
+    $status = $report['status'] ?? '';
+    $current = (int)($report['requested_version'] ?? 0) > 0
+      && (int)($report['processed_version'] ?? 0) === (int)$report['requested_version'];
+    if ($current && $status === 'Ready') {
+      $label = 'Complete'; $color = 'success'; $icon = 'check-circle';
+      $title = 'The AI evidence summary is complete for the current case version.';
+    } elseif ($current && $status === 'Partial') {
+      $label = 'Partial'; $color = 'warning'; $icon = 'exclamation-triangle';
+      $title = 'A summary is available, but some evidence could not be analysed. Check the private report coverage.';
+    } elseif (in_array($status, ['Queued', 'Processing', 'Ready', 'Partial'], true)) {
+      $label = 'Pending'; $color = 'warning'; $icon = 'hourglass-split';
+      $title = $status === 'Processing' ? 'The AI evidence summary is being generated.' : 'Waiting for an AI evidence summary of the current case version.';
+    } elseif ($status === 'Failed') {
+      $label = 'Failed'; $color = 'danger'; $icon = 'exclamation-circle';
+      $title = 'AI summary generation failed. Open the private case report to inspect the error and retry.';
+    } else {
+      $label = 'Unavailable'; $icon = 'exclamation-circle';
+      $title = 'The AI summary status could not be determined.';
+    }
+  }
+  return '<span class="badge text-bg-' . $color . ' border" title="' . htmlspecialchars($title, ENT_QUOTES, 'UTF-8') . '"><i class="bi bi-' . $icon . ' me-1" aria-hidden="true"></i>AI Summary: ' . $label . '</span>';
+}
+
+/** One bounded metadata query for the cases on the current page, restricted to admins. */
+function tp_case_ollama_listing_badges(PDO $pdo, array $caseIds): array {
+  if (!is_admin()) { return []; }
+  $caseIds = array_values(array_unique(array_filter(array_map('intval', $caseIds), static fn($id) => $id > 0)));
+  if (!$caseIds) { return []; }
+  $badges = array_fill_keys($caseIds, tp_case_ollama_summary_badge(null));
+  try {
+    $query = $pdo->prepare('SELECT case_id, status, requested_version, processed_version FROM case_ollama_reports WHERE case_id IN (' . implode(',', array_fill(0, count($caseIds), '?')) . ')');
+    $query->execute($caseIds);
+    foreach ($query as $report) { $badges[(int)$report['case_id']] = tp_case_ollama_summary_badge($report); }
+  } catch (Throwable $e) {
+    // Missing migrations must not hide the cases or mislabel them as not started.
+    $badges = array_fill_keys($caseIds, tp_case_ollama_summary_badge(null, false));
+  }
+  return $badges;
+}
+
 /** Queue within the caller's transaction. Invalidate removed/changed evidence immediately. */
 function tp_case_ollama_enqueue(PDO $pdo, int $caseId): bool {
   if ($caseId <= 0) { return false; }
