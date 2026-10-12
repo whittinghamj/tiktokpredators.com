@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/lib/ollama.php';
+require_once __DIR__ . '/lib/ollama-worker-monitor.php';
 require_once __DIR__ . '/lib/case-ollama.php';
 
 // --- Cross-subdomain session cookie for tiktokpredators.com and www.tiktokpredators.com
@@ -7753,6 +7754,7 @@ document.addEventListener('DOMContentLoaded', function () {
           <a class="nav-link <?php echo in_array($view, ['users', 'user_profile'], true) ? 'active' : ''; ?>" href="?view=users#users"><i class="bi bi-people"></i><span>Users</span></a>
           <a class="nav-link <?php echo ($view === 'viewer_stats') ? 'active' : ''; ?>" href="?view=viewer_stats#viewer-stats"><i class="bi bi-bar-chart"></i><span>Viewer Stats</span></a>
           <a class="nav-link <?php echo ($view === 'system_health') ? 'active' : ''; ?>" href="?view=system_health#system-health"><i class="bi bi-heart-pulse"></i><span>System Health</span></a>
+          <a class="nav-link" href="?view=system_health#ollama-worker-monitor"><i class="bi bi-terminal"></i><span>Ollama Worker Log</span></a>
           <?php if (tp_is_main_admin()): ?>
             <a class="nav-link <?php echo ($view === 'project_settings') ? 'active' : ''; ?>" href="?view=project_settings#project-settings"><i class="bi bi-sliders"></i><span>Project Settings</span></a>
           <?php endif; ?>
@@ -13568,6 +13570,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
   <?php if ($view === 'admin' && is_admin()): ?>
   <section class="py-5 border-top" id="admin">
     <div class="container-xl">
+      <?php require __DIR__ . '/lib/ollama-worker-panel.php'; ?>
       <div class="row g-4">
         <div class="col-lg-6">
           <div class="card glass h-100">
@@ -13724,6 +13727,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <a class="btn btn-outline-light btn-sm" href="?view=system_health#system-health"><i class="bi bi-arrow-clockwise me-1"></i>Refresh Checks</a>
             </div>
           </div>
+
+          <?php require __DIR__ . '/lib/ollama-worker-panel.php'; ?>
 
           <div class="alert alert-<?php echo htmlspecialchars($overallMeta['badge']); ?> d-flex justify-content-between align-items-center">
             <span><strong><?php echo $healthOperationalCount; ?> of 4</strong> health areas currently report operational.</span>

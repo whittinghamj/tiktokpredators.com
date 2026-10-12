@@ -6,6 +6,7 @@ $directory = realpath($directory);
 putenv('TP_CASE_OLLAMA_TEST_STORAGE=' . $directory);
 putenv('TP_CASE_OLLAMA_TEST_DB=' . $directory . '/fixture.sqlite');
 putenv('TP_CASE_OLLAMA_TEST_LOG=' . $directory . '/requests.jsonl');
+if (in_array('--monitor-preview', $argv, true)) { putenv('TP_OLLAMA_TEST_WORKER_RUNNING=1'); }
 require __DIR__ . '/fixtures/case-ollama-bootstrap.php';
 function case_ai_check(bool $condition, string $message): void { if (!$condition) { throw new RuntimeException($message); } }
 function case_ai_server(string $directory): array {
@@ -36,8 +37,10 @@ try {
   $pdo->exec('CREATE TABLE evidence (id INTEGER PRIMARY KEY, case_id INTEGER, type TEXT, title TEXT, filepath TEXT, original_filename TEXT, mime_type TEXT, size_bytes INTEGER, hash_sha256 TEXT, rotation_degrees INTEGER DEFAULT 0, created_at TEXT)');
   $pdo->exec('CREATE TABLE case_notes (id INTEGER PRIMARY KEY, case_id INTEGER, note_text TEXT, created_at TEXT)');
   $pdo->exec('CREATE TABLE case_events (case_id INTEGER, event_type TEXT, subject TEXT, detail TEXT, ref_evidence_id INTEGER, ref_note_id INTEGER, created_by INTEGER, public_ip TEXT, forwarded_for TEXT)');
-  $pdo->exec("CREATE TABLE case_ollama_reports (case_id INTEGER PRIMARY KEY, requested_version INTEGER DEFAULT 1, processed_version INTEGER DEFAULT 0, status TEXT DEFAULT 'Queued', processing_token TEXT, report_text TEXT, report_json TEXT, model TEXT, error_message TEXT, queued_at TEXT DEFAULT CURRENT_TIMESTAMP, generated_at TEXT)");
+  $pdo->exec("CREATE TABLE case_ollama_reports (case_id INTEGER PRIMARY KEY, requested_version INTEGER DEFAULT 1, processed_version INTEGER DEFAULT 0, status TEXT DEFAULT 'Queued', processing_token TEXT, report_text TEXT, report_json TEXT, model TEXT, error_message TEXT, queued_at TEXT DEFAULT CURRENT_TIMESTAMP, generated_at TEXT, updated_at TEXT DEFAULT CURRENT_TIMESTAMP)");
   $pdo->exec('CREATE TABLE case_ollama_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER, user_id INTEGER, report_version INTEGER, question TEXT, answer TEXT, created_at TEXT DEFAULT CURRENT_TIMESTAMP)');
+  $pdo->exec("CREATE TABLE ollama_worker_state (id INTEGER PRIMARY KEY, run_id TEXT, status TEXT, case_id INTEGER, evidence_id INTEGER, source_label TEXT DEFAULT '', source_index INTEGER DEFAULT 0, source_total INTEGER DEFAULT 0, part_index INTEGER DEFAULT 0, parts_done INTEGER DEFAULT 0, model TEXT DEFAULT '', phase TEXT DEFAULT '', message TEXT DEFAULT '', started_at TEXT, heartbeat_at TEXT, phase_started_at TEXT)");
+  $pdo->exec("CREATE TABLE ollama_worker_events (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT, level TEXT, case_id INTEGER, evidence_id INTEGER, source_label TEXT DEFAULT '', source_index INTEGER DEFAULT 0, source_total INTEGER DEFAULT 0, part_index INTEGER DEFAULT 0, parts_done INTEGER DEFAULT 0, model TEXT DEFAULT '', phase TEXT DEFAULT '', message TEXT DEFAULT '', created_at TEXT DEFAULT CURRENT_TIMESTAMP)");
   $pdo->exec("INSERT INTO cases (id, case_code, case_name, initial_summary, status, sensitivity) VALUES (1, 'CASE1', 'Fixture case', 'CASE1 supplied summary', 'Pending', 'Restricted'), (2, 'CASE2', 'Other case', 'SECRET_CASE2_CONTENT', 'Verified', 'Standard')");
   $text = str_repeat('Recorded statement with a date and a username. ', 500) . ' FINAL_TEXT_SENTINEL';
   file_put_contents($directory . '/evidence/statement.txt', $text);
@@ -80,8 +83,36 @@ try {
   putenv('TP_CASE_OLLAMA_TEST_URL=' . $apiUrl);
   [$process, $webUrl] = case_ai_server($directory); $servers[] = $process;
   $config = tp_ollama_config($pdo);
+  tp_ollama_worker_monitor_start($pdo, false);
   $job = tp_case_ollama_work_one($pdo, $config);
   case_ai_check($job['status'] === 'Partial', 'Unsupported evidence was not recorded as partial.');
+  $workerState = $pdo->query('SELECT * FROM ollama_worker_state WHERE id = 1')->fetch();
+  case_ai_check($workerState['phase'] === 'Completed' && (int)$workerState['source_total'] === 6 && (int)$workerState['parts_done'] > 0, 'Worker progress did not record source/part completion.');
+  $workerEvents = $pdo->query('SELECT message FROM ollama_worker_events')->fetchAll(PDO::FETCH_COLUMN);
+  case_ai_check(count(array_filter($workerEvents, static fn($message) => str_contains($message, 'Waiting for Ollama'))) > 0, 'In-flight model request events were not recorded.');
+  case_ai_check(!str_contains(json_encode($workerEvents), 'FINAL_TEXT_SENTINEL') && !str_contains(json_encode($workerEvents), 'fixture-token'), 'Worker log recorded evidence content or credentials.');
+  $pdo->exec("UPDATE ollama_worker_state SET heartbeat_at = '2000-01-01 00:00:00' WHERE id = 1");
+  tp_ollama_worker_heartbeat(true);
+  case_ai_check($pdo->query('SELECT heartbeat_at FROM ollama_worker_state')->fetchColumn() !== '2000-01-01 00:00:00', 'Worker heartbeat did not update during an active run.');
+  $workerInput = ['action' => 'ollama_worker_status', 'csrf_token' => 'test-csrf', 'after_id' => '0'];
+  foreach (['viewer', 'moderator', ''] as $role) {
+    [$code, $response] = case_ai_post($webUrl . '/web?role=' . urlencode($role), $workerInput);
+    case_ai_check($code === 403 && !isset($response['events']), 'A non-admin could read the worker log.');
+  }
+  [$code] = case_ai_post($webUrl . '/web', array_replace($workerInput, ['csrf_token' => 'bad']));
+  case_ai_check($code === 403, 'Worker log accepted invalid CSRF.');
+  [$code] = case_ai_post($webUrl . '/web', array_replace($workerInput, ['after_id' => ['array']]));
+  case_ai_check($code === 400, 'Worker log accepted an invalid cursor.');
+  [$code, $monitor] = case_ai_post($webUrl . '/web', $workerInput);
+  case_ai_check($code === 200 && $monitor['monitor_available'] && count($monitor['events']) > 0 && $monitor['counts']['Partial'] === 1, 'Admin worker monitor snapshot failed.');
+  $lastEventId = (string)end($monitor['events'])['id'];
+  [$code, $incremental] = case_ai_post($webUrl . '/web', array_replace($workerInput, ['after_id' => $lastEventId]));
+  case_ai_check($incremental['events'] === [], 'The worker cursor repeated old events.');
+  tp_ollama_worker_event('INFO', 'Incremental cursor test event.');
+  [$code, $incremental] = case_ai_post($webUrl . '/web', array_replace($workerInput, ['after_id' => $lastEventId]));
+  case_ai_check(count($incremental['events']) === 1 && $incremental['events'][0]['message'] === 'Incremental cursor test event.', 'New live events were not returned once.');
+  [$code] = case_ai_post($webUrl . '/web?user=0', $workerInput);
+  case_ai_check($code === 403, 'An invalid admin identity could read worker logs.');
   $report = $pdo->query('SELECT * FROM case_ollama_reports WHERE case_id = 1')->fetch();
   $data = json_decode($report['report_json'], true);
   case_ai_check(count($data['coverage']) === 6, 'Evidence, notes or case details were omitted.');
@@ -143,12 +174,31 @@ try {
   case_ai_check(!str_contains($requests, 'SECRET_CASE2_CONTENT'), 'An inference request contained another case.');
   $source = file_get_contents(dirname(__DIR__) . '/index.php');
   case_ai_check(str_contains($source, "if (is_admin() && \$viewCaseId > 0) { require __DIR__ . '/lib/case-ollama-panel.php'; }"), 'Case panel lost its admin-only rendering guard.');
+  if (!in_array('--preview', $argv, true) && !in_array('--monitor-preview', $argv, true)) {
+    $pdo->beginTransaction();
+    $insertEvent = $pdo->prepare("INSERT INTO ollama_worker_events (run_id, level, message) VALUES ('retention-test', 'INFO', 'Synthetic retention event')");
+    for ($i = 0; $i < 5005; $i++) { $insertEvent->execute(); }
+    $pdo->commit();
+    tp_ollama_worker_monitor_start($pdo, false);
+    case_ai_check((int)$pdo->query('SELECT COUNT(*) FROM ollama_worker_events')->fetchColumn() === 5000, 'Worker event retention was not bounded.');
+    $pdo->exec('DROP TABLE ollama_worker_events'); $pdo->exec('DROP TABLE ollama_worker_state');
+    tp_ollama_worker_monitor_start($pdo, false);
+    tp_case_ollama_enqueue($pdo, 1);
+    $withoutMonitor = tp_case_ollama_work_one($pdo, tp_ollama_config($pdo));
+    case_ai_check($withoutMonitor['status'] === 'Partial', 'A monitoring storage outage stopped report generation.');
+  }
   echo "Private evidence extraction, chunking, vision, report storage, access control, chat isolation, stale-report and model-error checks passed.\n";
-  if (in_array('--preview', $argv, true)) {
+  if (in_array('--preview', $argv, true) || in_array('--monitor-preview', $argv, true)) {
     tp_case_ollama_enqueue($pdo, 1); tp_case_ollama_work_one($pdo, tp_ollama_config($pdo));
-    echo 'Browser preview: ' . $webUrl . '/ui' . "\n";
+    if (in_array('--monitor-preview', $argv, true)) {
+      tp_ollama_worker_monitor_start($pdo, false);
+      $pdo->exec("UPDATE case_ollama_reports SET status = 'Processing', processing_token = 'fixture-preview' WHERE case_id = 1");
+      tp_ollama_worker_event('INFO', 'Extracting screenshot content.', ['status' => 'Processing', 'phase' => 'Extracting', 'case_id' => 1, 'evidence_id' => 102, 'source_label' => 'screenshot.png', 'source_index' => 2, 'source_total' => 6, 'parts_done' => 3, 'part_index' => 1, 'model' => 'fixture-vision']);
+      tp_ollama_worker_event('INFO', 'Waiting for Ollama /api/chat.', ['phase' => 'Waiting for Ollama']);
+    }
+    echo 'Browser preview: ' . $webUrl . (in_array('--monitor-preview', $argv, true) ? '/monitor' : '/ui') . "\n";
     echo 'Stop preview by creating: ' . $directory . '/stop-preview' . "\n";
-    while (!is_file($directory . '/stop-preview')) { sleep(1); }
+    while (!is_file($directory . '/stop-preview')) { tp_ollama_worker_heartbeat(); sleep(1); }
   }
 } finally {
   foreach ($servers as $server) { proc_terminate($server); proc_close($server); }

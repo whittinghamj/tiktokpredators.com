@@ -146,6 +146,17 @@ function tp_ollama_request(array $config, string $endpoint, array $payload): arr
       $response .= $data; return strlen($data);
     },
   ]);
+  $requestStarted = microtime(true);
+  if (!empty($GLOBALS['tp_ollama_worker_monitor'])) {
+    tp_ollama_worker_event('INFO', 'Waiting for Ollama /api/' . $endpoint . '.', ['phase' => $endpoint === 'show' ? 'Checking vision model' : 'Waiting for Ollama', 'model' => (string)($payload['model'] ?? '')]);
+    $progressOption = defined('CURLOPT_XFERINFOFUNCTION') ? CURLOPT_XFERINFOFUNCTION : CURLOPT_PROGRESSFUNCTION;
+    curl_setopt_array($ch, [
+      CURLOPT_NOPROGRESS => false,
+      $progressOption => static function ($handle, $downloadTotal, $downloadNow, $uploadTotal, $uploadNow): int {
+        tp_ollama_worker_heartbeat(); return 0;
+      },
+    ]);
+  }
   $result = curl_exec($ch);
   $httpCode = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
   if ($tooLarge) { throw new RuntimeException('Ollama returned a response that exceeded the size limit.'); }
@@ -154,6 +165,11 @@ function tp_ollama_request(array $config, string $endpoint, array $payload): arr
   if ($httpCode < 200 || $httpCode >= 300) { throw new RuntimeException('Ollama request failed (HTTP ' . $httpCode . '). Check the server URL and installed model.'); }
   $decoded = json_decode($response, true);
   if (!is_array($decoded) || !empty($decoded['error'])) { throw new RuntimeException('Ollama returned an invalid or unsuccessful response.'); }
+  if (!empty($GLOBALS['tp_ollama_worker_monitor'])) {
+    $message = 'Ollama response received in ' . number_format(microtime(true) - $requestStarted, 1) . ' seconds.';
+    if (isset($decoded['eval_count']) && is_numeric($decoded['eval_count'])) { $message .= ' Output tokens: ' . max(0, (int)$decoded['eval_count']) . '.'; }
+    tp_ollama_worker_event('INFO', $message, ['phase' => 'Received response']);
+  }
   return $decoded;
 }
 

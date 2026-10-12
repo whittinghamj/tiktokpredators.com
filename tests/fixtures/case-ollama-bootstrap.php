@@ -1,6 +1,7 @@
 <?php
 if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'cli-server') { http_response_code(404); exit; }
 require_once dirname(__DIR__, 2) . '/lib/ollama.php';
+require_once dirname(__DIR__, 2) . '/lib/ollama-worker-monitor.php';
 require_once dirname(__DIR__, 2) . '/lib/case-ollama.php';
 
 // Use a real SQLite database for behavioral tests, translating only MySQL syntax.
@@ -12,10 +13,16 @@ class CaseOllamaTestDatabase extends CaseOllamaSqliteBase {
     $function = static fn($condition, $yes, $no) => $condition ? $yes : $no;
     if (method_exists($this, 'createFunction')) { $this->createFunction('IF', $function, 3); }
     else { $this->sqliteCreateFunction('IF', $function, 3); }
+    $lock = static fn($name) => getenv('TP_OLLAMA_TEST_WORKER_RUNNING') === '1' ? 123 : null;
+    if (method_exists($this, 'createFunction')) { $this->createFunction('IS_USED_LOCK', $lock, 1); }
+    else { $this->sqliteCreateFunction('IS_USED_LOCK', $lock, 1); }
   }
   private function translate(string $sql): string {
     $sql = str_replace([' FOR UPDATE', 'NOW()'], ['', 'CURRENT_TIMESTAMP'], $sql);
-    $sql = str_replace('ON DUPLICATE KEY UPDATE', 'ON CONFLICT(case_id) DO UPDATE SET', $sql);
+    $key = strpos($sql, 'INSERT INTO ollama_worker_state') === 0 ? 'id' : 'case_id';
+    $sql = str_replace('ON DUPLICATE KEY UPDATE', 'ON CONFLICT(' . $key . ') DO UPDATE SET', $sql);
+    $sql = preg_replace('/VALUES\(([a-z_][a-z0-9_]*)\)/i', 'excluded.$1', $sql);
+    $sql = preg_replace('/TIMESTAMPDIFF\(SECOND, ([a-z0-9_.]+), CURRENT_TIMESTAMP\)/i', "CAST((julianday('now') - julianday($1)) * 86400 AS INTEGER)", $sql);
     $sql = preg_replace('/SELECT (?:GET_LOCK|RELEASE_LOCK)\(\?,[^)]*\)|SELECT RELEASE_LOCK\(\?\)/', 'SELECT CASE WHEN ? IS NOT NULL THEN 1 ELSE 0 END', $sql);
     return $sql;
   }

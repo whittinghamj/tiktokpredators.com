@@ -371,6 +371,41 @@ try {
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_ollama_chat (case_id, user_id, report_version, id)
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  $pdo->exec("CREATE TABLE IF NOT EXISTS ollama_worker_state (
+    id TINYINT UNSIGNED NOT NULL PRIMARY KEY,
+    run_id VARCHAR(32) NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'Starting',
+    case_id BIGINT UNSIGNED NULL,
+    evidence_id BIGINT UNSIGNED NULL,
+    source_label VARCHAR(300) NOT NULL DEFAULT '',
+    source_index INT UNSIGNED NOT NULL DEFAULT 0,
+    source_total INT UNSIGNED NOT NULL DEFAULT 0,
+    part_index INT UNSIGNED NOT NULL DEFAULT 0,
+    parts_done INT UNSIGNED NOT NULL DEFAULT 0,
+    model VARCHAR(255) NOT NULL DEFAULT '',
+    phase VARCHAR(64) NOT NULL DEFAULT '',
+    message VARCHAR(1000) NOT NULL DEFAULT '',
+    started_at DATETIME NOT NULL,
+    heartbeat_at DATETIME NOT NULL,
+    phase_started_at DATETIME NOT NULL
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+  $pdo->exec("CREATE TABLE IF NOT EXISTS ollama_worker_events (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    run_id VARCHAR(32) NOT NULL,
+    level VARCHAR(16) NOT NULL,
+    case_id BIGINT UNSIGNED NULL,
+    evidence_id BIGINT UNSIGNED NULL,
+    source_label VARCHAR(300) NOT NULL DEFAULT '',
+    source_index INT UNSIGNED NOT NULL DEFAULT 0,
+    source_total INT UNSIGNED NOT NULL DEFAULT 0,
+    part_index INT UNSIGNED NOT NULL DEFAULT 0,
+    parts_done INT UNSIGNED NOT NULL DEFAULT 0,
+    model VARCHAR(255) NOT NULL DEFAULT '',
+    phase VARCHAR(64) NOT NULL DEFAULT '',
+    message VARCHAR(1000) NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_ollama_worker_case (case_id, id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
   // Existing cases are queued once; rerunning migrations preserves their reports.
   $pdo->exec('INSERT IGNORE INTO case_ollama_reports (case_id) SELECT id FROM cases');
 } catch (Throwable $e) {

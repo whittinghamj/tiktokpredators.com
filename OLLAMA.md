@@ -16,7 +16,27 @@ Deploy all changed files together. Run `php scripts/migrate.php` with the same D
 
 PHP CLI needs curl, mbstring, GD, ZIP and DOM. The installed worker has a 512 MiB PHP memory limit. PDF ingestion additionally needs Poppler's `pdfinfo`, `pdftotext` and `pdftoppm` (typically the `poppler-utils` package on Debian/Ubuntu). Poppler runs through argument arrays, without shell interpolation. Temporary extraction files are created in a random private directory and removed after each job; the systemd service also has a private temporary directory.
 
-The timer runs the next queued job 20 seconds after the previous worker finishes. Monitor it with `systemctl status tiktokpredators-ollama.timer` and `journalctl -u tiktokpredators-ollama.service`. Logs contain case IDs/status only, not reports or credentials. On a host without systemd, schedule `php /var/www/html/tiktokpredators.com/scripts/ollama-worker.php` every minute as the storage owner with the PHP-FPM database environment. Overlapping invocations exit without processing a second job.
+The timer runs the next queued job 20 seconds after the previous worker finishes. Monitor it with `systemctl status tiktokpredators-ollama.timer` and `journalctl -u tiktokpredators-ollama.service`. Logs contain progress metadata, not reports or credentials. On a host without systemd, schedule `php /var/www/html/tiktokpredators.com/scripts/ollama-worker.php` every minute as the storage owner with the PHP-FPM database environment. Overlapping invocations exit without processing a second job.
+
+## Live worker monitoring
+
+Open **Administration → Ollama Worker Log** (also shown on System Health and the admin dashboard). The panel refreshes every three seconds and shows the active case, current source, source/part progress, selected model, activity duration, heartbeat age, queue counts and the latest events. Live updates and automatic scrolling can be paused independently. It detects when a Processing job no longer has an active database worker lock, rather than treating a saved Processing status as proof that a worker is still running.
+
+The worker records progress at extraction, model requests, analysis completion, overview synthesis and report saves. During cURL waits and document extraction, its heartbeat updates at most once every ten seconds. The database retains approximately 5,000 recent events; the browser shows up to 500 during a viewing session. Stored event metadata can include original filenames, but never prompts, extracted evidence text, model answers or API credentials. Journal lines use numeric case/evidence IDs instead of source filenames. Monitoring failures do not block report generation.
+
+Deploy this change with `update.sh` so the new `ollama_worker_state` and `ollama_worker_events` tables are created. A worker already running older code can finish; the panel shows its current case and explains that detailed progress starts with the next invocation. The update does not require killing or restarting an in-progress report.
+
+On the web server, follow the service's journal with:
+
+```sh
+sudo journalctl -u tiktokpredators-ollama.service -n 100 -f
+```
+
+Inspect the current service and timer with:
+
+```sh
+sudo systemctl status tiktokpredators-ollama.service tiktokpredators-ollama.timer
+```
 
 After deployment, enter the server/models in Project Settings, test the connection, open an admin case page and confirm that its report completes. Check one public, moderator and submitter case view to confirm the private panel is absent. Inspect coverage before relying on answers.
 

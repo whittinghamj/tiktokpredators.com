@@ -1,7 +1,7 @@
 <?php
 if (!function_exists('is_admin')) { http_response_code(404); return; }
 // This file is included by index.php after the database and auth bootstrap.
-if (!in_array($_POST['action'] ?? '', ['case_ollama_status', 'case_ollama_refresh', 'case_ollama_chat', 'case_ollama_clear_chat'], true)) { return; }
+if (!in_array($_POST['action'] ?? '', ['case_ollama_status', 'case_ollama_refresh', 'case_ollama_chat', 'case_ollama_clear_chat', 'ollama_worker_status'], true)) { return; }
 
 function tp_case_ollama_respond(array $payload, int $status = 200): void {
   http_response_code($status);
@@ -14,12 +14,21 @@ function tp_case_ollama_respond(array $payload, int $status = 200): void {
 
 if (!is_admin()) { tp_case_ollama_respond(['ok' => false, 'error' => 'Unauthorized. Admins only.'], 403); }
 if (!check_csrf()) { tp_case_ollama_respond(['ok' => false, 'error' => 'Security check failed. Refresh and try again.'], 403); }
+$adminId = (int)($_SESSION['user']['id'] ?? 0);
+if ($adminId <= 0) { tp_case_ollama_respond(['ok' => false, 'error' => 'Unauthorized. Admins only.'], 403); }
+if (($_POST['action'] ?? '') === 'ollama_worker_status') {
+  if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
+  $afterValue = $_POST['after_id'] ?? '0';
+  if (!is_string($afterValue) || !ctype_digit($afterValue) || strlen($afterValue) > 18) {
+    tp_case_ollama_respond(['ok' => false, 'error' => 'Invalid log cursor.'], 400);
+  }
+  try { tp_case_ollama_respond(['ok' => true] + tp_ollama_worker_snapshot($pdo, (int)$afterValue)); }
+  catch (Throwable $e) { tp_case_ollama_respond(['ok' => false, 'error' => 'Worker monitoring is unavailable. Run update.sh and check the database connection.'], 503); }
+}
 $caseIdValue = $_POST['case_id'] ?? '';
 $caseId = is_string($caseIdValue) && ctype_digit($caseIdValue) ? (int)$caseIdValue : 0;
 $caseCode = tp_post_string('case_code');
 if ($caseId <= 0 || $caseCode === '') { tp_case_ollama_respond(['ok' => false, 'error' => 'Invalid case.'], 400); }
-$adminId = (int)($_SESSION['user']['id'] ?? 0);
-if ($adminId <= 0) { tp_case_ollama_respond(['ok' => false, 'error' => 'Unauthorized. Admins only.'], 403); }
 // Long inference requests must not block other tabs, approvals or uploads.
 if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
 $chatLock = null;
