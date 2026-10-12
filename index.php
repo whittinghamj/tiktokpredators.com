@@ -3,6 +3,7 @@
 require_once __DIR__ . '/lib/ollama.php';
 require_once __DIR__ . '/lib/ollama-worker-monitor.php';
 require_once __DIR__ . '/lib/case-ollama.php';
+require_once __DIR__ . '/lib/case-ollama-failures.php';
 
 // --- Cross-subdomain session cookie for tiktokpredators.com and www.tiktokpredators.com
 // Must be set BEFORE session_start()
@@ -961,6 +962,11 @@ function tp_create_user_notification(PDO $pdo, int $userId, string $type, string
     return $html;
   }
 $view = $_GET['view'] ?? 'cases';
+if ($view === 'ai_summary_failures') {
+  if (!is_admin() || (int)($_SESSION['user']['id'] ?? 0) <= 0) { http_response_code(403); }
+  header('Cache-Control: private, no-store, max-age=0');
+  header('Vary: Cookie');
+}
 function throttle(){
     $now = time();
     if ($now - ($_SESSION['auth_last'] ?? 0) < 3) { sleep(1); }
@@ -3973,6 +3979,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
 }
 
 // Private case reports and chat have their own admin/CSRF checks before any reads.
+require __DIR__ . '/lib/case-ollama-failures-http.php';
 require __DIR__ . '/lib/case-ollama-http.php';
 
 // Test an OpenAI API key without saving or exposing it (main admin only).
@@ -7755,6 +7762,7 @@ document.addEventListener('DOMContentLoaded', function () {
           <a class="nav-link <?php echo ($view === 'viewer_stats') ? 'active' : ''; ?>" href="?view=viewer_stats#viewer-stats"><i class="bi bi-bar-chart"></i><span>Viewer Stats</span></a>
           <a class="nav-link <?php echo ($view === 'system_health') ? 'active' : ''; ?>" href="?view=system_health#system-health"><i class="bi bi-heart-pulse"></i><span>System Health</span></a>
           <a class="nav-link" href="?view=system_health#ollama-worker-monitor"><i class="bi bi-terminal"></i><span>Ollama Worker Log</span></a>
+          <a class="nav-link <?php echo ($view === 'ai_summary_failures') ? 'active' : ''; ?>" href="?view=ai_summary_failures#ai-summary-failures"><i class="bi bi-exclamation-triangle"></i><span>AI Summary Failures</span></a>
           <?php if (tp_is_main_admin()): ?>
             <a class="nav-link <?php echo ($view === 'project_settings') ? 'active' : ''; ?>" href="?view=project_settings#project-settings"><i class="bi bi-sliders"></i><span>Project Settings</span></a>
           <?php endif; ?>
@@ -13633,6 +13641,10 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
       </section>
     <?php else: ?>
     <?php endif; ?>
+  <?php endif; ?>
+
+  <?php if ($view === 'ai_summary_failures'): ?>
+    <?php require __DIR__ . '/lib/case-ollama-failures-page.php'; ?>
   <?php endif; ?>
 
   <?php if ($view === 'system_health'): ?>

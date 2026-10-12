@@ -30,6 +30,13 @@ function case_ai_post(string $url, array $input): array {
   case_ai_check(is_array($result), 'Private endpoint returned invalid JSON: ' . $body);
   return [$status, $result];
 }
+function case_ai_page(string $url, ?array $input = null): array {
+  $ch = curl_init($url);
+  curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 10]);
+  if ($input !== null) { curl_setopt_array($ch, [CURLOPT_POST => true, CURLOPT_POSTFIELDS => http_build_query($input)]); }
+  $body = curl_exec($ch);
+  return [(int)curl_getinfo($ch, CURLINFO_HTTP_CODE), (string)$body, (string)curl_getinfo($ch, CURLINFO_REDIRECT_URL)];
+}
 $servers = [];
 try {
   $pdo = new CaseOllamaTestDatabase($directory . '/fixture.sqlite');
@@ -166,6 +173,59 @@ try {
   tp_case_ollama_work_one($pdo, $config);
   $failed = $pdo->query('SELECT * FROM case_ollama_reports WHERE case_id = 1')->fetch();
   case_ai_check($failed['status'] === 'Failed' && !str_contains($failed['error_message'], 'sensitive remote error'), 'Model failure was hidden or leaked its raw response.');
+  $_SESSION = ['user' => ['id' => 1, 'role' => 'admin']];
+  $pdo->exec("INSERT INTO cases (id, case_code, case_name, status) VALUES (3, 'CASE3', 'Partial evidence case', 'Pending'), (4, 'CASE4', 'Complete case', 'Verified'), (5, 'CASE5', 'Queued case', 'Verified'), (6, 'CASE6', 'Processing case', 'Verified'), (7, 'CASE7', 'Stale partial case', 'Verified')");
+  $issueInsert = $pdo->prepare('INSERT INTO case_ollama_reports (case_id, status, requested_version, processed_version, error_message, report_text, report_json) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  $issueInsert->execute([2, 'Failed', 1, 0, 'PRIVATE_CASE2_FAILURE', 'STALE_FAILED_SUMMARY_SENTINEL', null]);
+  $issueInsert->execute([3, 'Partial', 1, 1, null, 'Partial summary <script>alert("fixture")</script>', tp_case_ollama_json(['coverage' => [['evidence_id' => 301, 'filename' => 'unsupported-video.mp4', 'status' => 'Not analysed', 'parts' => 0, 'issues' => ['Video needs a transcript. <script>fixture</script>']]]])]);
+  foreach ([[4, 'Ready', 1, 1], [5, 'Queued', 1, 0], [6, 'Processing', 1, 0], [7, 'Partial', 2, 1]] as $row) { $issueInsert->execute(array_merge($row, [null, 'STALE_REPORT_SENTINEL', null])); }
+  $issues = tp_case_ollama_failures_list($pdo);
+  case_ai_check($issues['counts'] === ['Failed' => 2, 'Partial' => 1] && count($issues['rows']) === 3 && !isset($issues['rows'][0]['report_text']), 'Failure listing includes complete/pending/stale reports or fetched report bodies.');
+  $filtered = tp_case_ollama_failures_list($pdo, 'Partial');
+  case_ai_check(count($filtered['rows']) === 1 && (int)$filtered['rows'][0]['case_id'] === 3, 'Partial failures filter is incorrect.');
+  for ($id = 10; $id < 33; $id++) {
+    $pdo->exec("INSERT INTO cases (id, case_code, case_name) VALUES ($id, 'PAGE$id', 'Pagination fixture')");
+    $issueInsert->execute([$id, 'Failed', 1, 0, 'Synthetic failure', null, null]);
+  }
+  $firstPage = tp_case_ollama_failures_list($pdo);
+  $lastPage = tp_case_ollama_failures_list($pdo, '', 999);
+  case_ai_check(count($firstPage['rows']) === 20 && $firstPage['total'] === 26 && count($lastPage['rows']) === 6 && $lastPage['page'] === 2, 'Failure listing pagination is unbounded or loses cases.');
+  $pdo->exec('DELETE FROM case_ollama_reports WHERE case_id >= 10'); $pdo->exec('DELETE FROM cases WHERE id >= 10');
+  $failureDetail = tp_case_ollama_failure_report($pdo, 2);
+  case_ai_check($failureDetail['report_text'] === null && $failureDetail['error_message'] === 'PRIVATE_CASE2_FAILURE', 'Failure diagnostics exposed an old evidence summary.');
+  $partialDetail = tp_case_ollama_failure_report($pdo, 3);
+  case_ai_check(count($partialDetail['coverage_issues']) === 1 && str_contains($partialDetail['report_text'], 'Partial summary'), 'Partial summary or file coverage was omitted.');
+  foreach ([4, 5, 6, 7, 999] as $id) { case_ai_check(tp_case_ollama_failure_report($pdo, $id) === null, 'A non-issue or stale summary was exposed on the failures page.'); }
+  [$pageStatus, $html] = case_ai_page($webUrl . '/failures?report=3');
+  case_ai_check($pageStatus === 200 && str_contains($html, 'unsupported-video.mp4') && str_contains($html, '&lt;script&gt;') && !str_contains($html, '<script>') && !str_contains($html, 'STALE_REPORT_SENTINEL'), 'Failure report HTML omitted coverage, executed content, or exposed a stale summary.');
+  $retryInput = ['action' => 'case_ollama_retry_failure', 'case_id' => '2', 'case_code' => 'CASE2', 'report_version' => '1', 'csrf_token' => 'test-csrf'];
+  foreach (['viewer', 'moderator', ''] as $role) {
+    [$pageStatus, $html] = case_ai_page($webUrl . '/failures?role=' . urlencode($role) . '&report=2');
+    case_ai_check($pageStatus === 403 && !str_contains($html, 'PRIVATE_CASE2_FAILURE'), 'A non-admin accessed failure diagnostics.');
+    [$pageStatus] = case_ai_page($webUrl . '/failures?role=' . urlencode($role), $retryInput);
+    case_ai_check($pageStatus === 403, 'A non-admin retried a private summary.');
+    $_SESSION = ['user' => ['id' => 1, 'role' => $role]];
+    $denied = false;
+    try { tp_case_ollama_failures_list($pdo); } catch (RuntimeException $e) { $denied = true; }
+    case_ai_check($denied, 'Failure metadata helper did not enforce admin access.');
+  }
+  $_SESSION = ['user' => ['id' => 1, 'role' => 'admin']];
+  [$pageStatus] = case_ai_page($webUrl . '/failures', array_replace($retryInput, ['csrf_token' => 'bad']));
+  case_ai_check($pageStatus === 403, 'Failure retry accepted invalid CSRF.');
+  foreach ([['case_code' => 'CASE1'], ['report_version' => '2'], ['case_id' => ['bad']]] as $invalid) {
+    [$pageStatus] = case_ai_page($webUrl . '/failures', array_replace($retryInput, $invalid));
+    case_ai_check($pageStatus === 303 && $pdo->query('SELECT status FROM case_ollama_reports WHERE case_id = 2')->fetchColumn() === 'Failed', 'Invalid failure retry changed the job.');
+  }
+  [$pageStatus, , $redirect] = case_ai_page($webUrl . '/failures', $retryInput);
+  $retried = $pdo->query('SELECT * FROM case_ollama_reports WHERE case_id = 2')->fetch();
+  case_ai_check($pageStatus === 303 && str_contains($redirect, 'view=ai_summary_failures') && $retried['status'] === 'Queued' && (int)$retried['requested_version'] === 2 && $retried['report_text'] === null, 'Failure retry was not queued and redirected safely.');
+  case_ai_page($webUrl . '/failures', $retryInput);
+  case_ai_check((int)$pdo->query('SELECT requested_version FROM case_ollama_reports WHERE case_id = 2')->fetchColumn() === 2, 'A duplicate retry invalidated the queued report.');
+  if (in_array('--failures-preview', $argv, true)) {
+    $pdo->exec("UPDATE case_ollama_reports SET status = 'Failed', error_message = 'Ollama request timed out while reading an uploaded evidence file.' WHERE case_id = 2");
+    $previewReport = $pdo->prepare("UPDATE case_ollama_reports SET model = 'fixture-text', generated_at = CURRENT_TIMESTAMP, report_text = ?, report_json = ? WHERE case_id = 3");
+    $previewReport->execute(["PRIVATE CASE EVIDENCE REPORT\nCase: CASE3\n\nOVERVIEW\nThe uploaded statement was analysed. The video could not be analysed without a transcript.\n\nSOURCE COVERAGE\nEvidence #301: unsupported-video.mp4 [Not analysed]\nVideo needs a transcript.", tp_case_ollama_json(['coverage' => [['evidence_id' => 301, 'filename' => 'unsupported-video.mp4', 'status' => 'Not analysed', 'parts' => 0, 'issues' => ['Video needs a transcript.']]]])]);
+  } else { $pdo->exec('DELETE FROM case_ollama_reports WHERE case_id > 1'); $pdo->exec('DELETE FROM cases WHERE id > 2'); }
   $config['default_model'] = 'fixture-truncated';
   $rejected = false;
   try { tp_ollama_chat($config, [['role' => 'user', 'content' => 'Test']]); } catch (RuntimeException $e) { $rejected = str_contains($e->getMessage(), 'output limit'); }
@@ -174,7 +234,7 @@ try {
   case_ai_check(!str_contains($requests, 'SECRET_CASE2_CONTENT'), 'An inference request contained another case.');
   $source = file_get_contents(dirname(__DIR__) . '/index.php');
   case_ai_check(str_contains($source, "if (is_admin() && \$viewCaseId > 0) { require __DIR__ . '/lib/case-ollama-panel.php'; }"), 'Case panel lost its admin-only rendering guard.');
-  if (!in_array('--preview', $argv, true) && !in_array('--monitor-preview', $argv, true)) {
+  if (!in_array('--preview', $argv, true) && !in_array('--monitor-preview', $argv, true) && !in_array('--failures-preview', $argv, true)) {
     $pdo->beginTransaction();
     $insertEvent = $pdo->prepare("INSERT INTO ollama_worker_events (run_id, level, message) VALUES ('retention-test', 'INFO', 'Synthetic retention event')");
     for ($i = 0; $i < 5005; $i++) { $insertEvent->execute(); }
@@ -186,17 +246,22 @@ try {
     tp_case_ollama_enqueue($pdo, 1);
     $withoutMonitor = tp_case_ollama_work_one($pdo, tp_ollama_config($pdo));
     case_ai_check($withoutMonitor['status'] === 'Partial', 'A monitoring storage outage stopped report generation.');
+    $withoutEvents = tp_case_ollama_failure_report($pdo, 1);
+    case_ai_check($withoutEvents['events_available'] === false && !empty($withoutEvents['report_text']), 'Missing worker logs hid the available partial report.');
+    $pdo->exec('DROP TABLE case_ollama_reports');
+    [$pageStatus, $html] = case_ai_page($webUrl . '/failures');
+    case_ai_check($pageStatus === 200 && str_contains($html, 'failure reports are unavailable'), 'A missing report migration broke the failures page.');
   }
   echo "Private evidence extraction, chunking, vision, report storage, access control, chat isolation, stale-report and model-error checks passed.\n";
-  if (in_array('--preview', $argv, true) || in_array('--monitor-preview', $argv, true)) {
-    tp_case_ollama_enqueue($pdo, 1); tp_case_ollama_work_one($pdo, tp_ollama_config($pdo));
+  if (in_array('--preview', $argv, true) || in_array('--monitor-preview', $argv, true) || in_array('--failures-preview', $argv, true)) {
+    if (!in_array('--failures-preview', $argv, true)) { tp_case_ollama_enqueue($pdo, 1); tp_case_ollama_work_one($pdo, tp_ollama_config($pdo)); }
     if (in_array('--monitor-preview', $argv, true)) {
       tp_ollama_worker_monitor_start($pdo, false);
       $pdo->exec("UPDATE case_ollama_reports SET status = 'Processing', processing_token = 'fixture-preview' WHERE case_id = 1");
       tp_ollama_worker_event('INFO', 'Extracting screenshot content.', ['status' => 'Processing', 'phase' => 'Extracting', 'case_id' => 1, 'evidence_id' => 102, 'source_label' => 'screenshot.png', 'source_index' => 2, 'source_total' => 6, 'parts_done' => 3, 'part_index' => 1, 'model' => 'fixture-vision']);
       tp_ollama_worker_event('INFO', 'Waiting for Ollama /api/chat.', ['phase' => 'Waiting for Ollama']);
     }
-    echo 'Browser preview: ' . $webUrl . (in_array('--monitor-preview', $argv, true) ? '/monitor' : '/ui') . "\n";
+    echo 'Browser preview: ' . $webUrl . (in_array('--failures-preview', $argv, true) ? '/failures' : (in_array('--monitor-preview', $argv, true) ? '/monitor' : '/ui')) . "\n";
     echo 'Stop preview by creating: ' . $directory . '/stop-preview' . "\n";
     while (!is_file($directory . '/stop-preview')) { tp_ollama_worker_heartbeat(); sleep(1); }
   }

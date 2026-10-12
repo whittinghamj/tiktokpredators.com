@@ -1,12 +1,22 @@
 <?php
 if (PHP_SAPI !== 'cli-server') { http_response_code(404); exit; }
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-if ($path === '/web' || $path === '/ui' || $path === '/monitor' || in_array($path, ['/assets/case-ollama.js', '/assets/ollama-worker.js'], true)) {
+if ($path === '/web' || $path === '/ui' || $path === '/monitor' || $path === '/failures' || in_array($path, ['/assets/case-ollama.js', '/assets/ollama-worker.js'], true)) {
   if (strpos($path, '/assets/') === 0) { header('Content-Type: application/javascript'); readfile(dirname(__DIR__, 2) . $path); return; }
   require __DIR__ . '/case-ollama-bootstrap.php';
   $pdo = new CaseOllamaTestDatabase(getenv('TP_CASE_OLLAMA_TEST_DB'));
   $_SESSION = ['user' => ['id' => (int)($_GET['user'] ?? 1), 'role' => $_GET['role'] ?? 'admin']];
-  if ($path === '/web' || !empty($_POST['action'])) { require dirname(__DIR__, 2) . '/lib/case-ollama-http.php'; return; }
+  if ($path === '/web' || !empty($_POST['action'])) {
+    require dirname(__DIR__, 2) . '/lib/case-ollama-failures-http.php';
+    require dirname(__DIR__, 2) . '/lib/case-ollama-http.php'; return;
+  }
+  if ($path === '/failures') {
+    if (!is_admin() || (int)($_SESSION['user']['id'] ?? 0) <= 0) { http_response_code(403); }
+    header('Cache-Control: private, no-store, max-age=0'); header('Vary: Cookie');
+    echo '<!doctype html><html data-bs-theme="dark"><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css"><title>AI Summary Failures preview</title></head><body>';
+    require dirname(__DIR__, 2) . '/lib/case-ollama-failures-page.php';
+    echo '</body></html>'; return;
+  }
   $viewCaseId = 1; $caseCode = 'CASE1';
   echo '<!doctype html><html data-bs-theme="dark"><head><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"><title>Private case AI preview</title></head><body><main class="container py-4"><h2 class="h4 mb-3">Fixture case | CASE1</h2>';
   require dirname(__DIR__, 2) . ($path === '/monitor' ? '/lib/ollama-worker-panel.php' : '/lib/case-ollama-panel.php');

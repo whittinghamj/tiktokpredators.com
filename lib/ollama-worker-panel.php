@@ -9,6 +9,7 @@ if (!function_exists('is_admin') || !is_admin()) { return; }
         <div class="small text-secondary">Current report activity and recent worker events. Refreshes every 3 seconds.</div>
       </div>
       <div class="d-flex align-items-center gap-2">
+        <a class="btn btn-outline-warning btn-sm" href="?view=ai_summary_failures#ai-summary-failures">AI Summary Failures</a>
         <span class="badge text-bg-secondary" id="ollamaWorkerBadge">Connecting</span>
         <button type="button" class="btn btn-outline-light btn-sm" id="ollamaWorkerPause">Pause Live Updates</button>
       </div>

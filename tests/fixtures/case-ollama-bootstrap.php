@@ -3,6 +3,7 @@ if (PHP_SAPI !== 'cli' && PHP_SAPI !== 'cli-server') { http_response_code(404); 
 require_once dirname(__DIR__, 2) . '/lib/ollama.php';
 require_once dirname(__DIR__, 2) . '/lib/ollama-worker-monitor.php';
 require_once dirname(__DIR__, 2) . '/lib/case-ollama.php';
+require_once dirname(__DIR__, 2) . '/lib/case-ollama-failures.php';
 
 // Use a real SQLite database for behavioral tests, translating only MySQL syntax.
 class_alias(class_exists('Pdo\\Sqlite') ? 'Pdo\\Sqlite' : 'PDO', 'CaseOllamaSqliteBase');
@@ -32,6 +33,10 @@ class CaseOllamaTestDatabase extends CaseOllamaSqliteBase {
 function is_admin(): bool { return ($_SESSION['user']['role'] ?? '') === 'admin'; }
 function check_csrf(): bool { return is_string($_POST['csrf_token'] ?? null) && hash_equals('test-csrf', $_POST['csrf_token']); }
 function csrf_field(): void { echo '<input type="hidden" name="csrf_token" value="test-csrf">'; }
+function flash(string $key, ?string $value = null): string {
+  if ($value !== null) { $_SESSION['flash'][$key] = $value; return ''; }
+  $value = $_SESSION['flash'][$key] ?? ''; unset($_SESSION['flash'][$key]); return $value;
+}
 function tp_post_string(string $key): string { return is_string($_POST[$key] ?? null) ? trim($_POST[$key]) : ''; }
 function log_console(string $level, string $message): void {}
 function tp_client_ip(): array { return ['127.0.0.1', '']; }
