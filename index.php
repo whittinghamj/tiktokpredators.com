@@ -5573,9 +5573,8 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
 
-    // New flow: temp move → hash → final unique name
+    // Preserve the original filename as metadata, never as a storage key.
     $safeName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', basename($f['name']));
-    $origBase = pathinfo($safeName, PATHINFO_FILENAME);
     $origExt  = pathinfo($safeName, PATHINFO_EXTENSION);
     $origExt  = $origExt !== '' ? ('.' . strtolower($origExt)) : '';
 
@@ -5588,10 +5587,9 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
     }
 
-    // 2) Compute hash and build a final, unique filename
+    // 2) Keep the content hash for deduplication; use a separate random storage name.
     $hash = hash_file('sha256', $tmpAbs);
-    $uniq = date('Ymd_His') . '_' . bin2hex(random_bytes(4)); // timestamp + 8 hex chars
-    $finalName = $origBase . '_' . $uniq . '_' . substr($hash, 0, 12) . $origExt;
+    $finalName = bin2hex(random_bytes(32)) . $origExt;
     $destRel = tp_private_file_token('evidence', $finalName);
     $destAbs = $uploadDir . '/' . $finalName;
     if ($destRel === null) {
@@ -5657,7 +5655,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
         $stmt->execute([
             $case_id,
             $type,
-            ($title !== '' ? $title : $finalName),
+            ($title !== '' ? $title : $safeName),
             $destRel,
             dirname($uploadDir),
             $safeName,
@@ -5669,9 +5667,9 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
             $_SESSION['user']['id'] ?? null
         ]);
         $newEvidenceId = (int)$pdo->lastInsertId();
-        log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $finalName), 'Type: '.$type, $newEvidenceId, null);
+        log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $safeName), 'Type: '.$type, $newEvidenceId, null);
         flash('success', 'Evidence uploaded.');
-        log_console('SUCCESS', 'Evidence uploaded for case_id ' . $case_id . ' (' . ($title !== '' ? $title : $finalName) . ')');
+        log_console('SUCCESS', 'Evidence uploaded for case_id ' . $case_id . ' (' . ($title !== '' ? $title : $safeName) . ')');
     } catch (Throwable $e) {
         if (is_file($destAbs)) { @unlink($destAbs); }
         $_SESSION['sql_error'] = $e->getMessage();
@@ -5718,8 +5716,8 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
         echo json_encode(['ok'=>false,'error'=>'Private evidence storage is unavailable.']); exit;
     }
 
+    // Preserve the original filename as metadata, never as a storage key.
     $safeName = preg_replace('/[^A-Za-z0-9_.\\-]/', '_', basename($f['name']));
-    $origBase = pathinfo($safeName, PATHINFO_FILENAME);
     $origExt  = pathinfo($safeName, PATHINFO_EXTENSION);
     $origExt  = $origExt !== '' ? ('.' . strtolower($origExt)) : '';
 
@@ -5729,8 +5727,7 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
     }
 
     $hash    = hash_file('sha256', $tmpAbs);
-    $uniq    = date('Ymd_His') . '_' . bin2hex(random_bytes(4));
-    $finalName = $origBase . '_' . $uniq . '_' . substr($hash, 0, 12) . $origExt;
+    $finalName = bin2hex(random_bytes(32)) . $origExt;
     $destRel = tp_private_file_token('evidence', $finalName);
     $destAbs = $uploadDir . '/' . $finalName;
     if ($destRel === null) {
@@ -5773,13 +5770,13 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
         $stmt = $pdo->prepare('INSERT INTO evidence (case_id, type, title, filepath, storage_path, original_filename, mime_type, size_bytes, hash_sha256, sha256_hex, uploaded_by, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         $stmt->execute([
             $case_id, $type,
-            ($title !== '' ? $title : $finalName),
+            ($title !== '' ? $title : $safeName),
             $destRel, dirname($uploadDir), $safeName, $mime, $size, $hash, $hash,
             $_SESSION['user']['id'] ?? null,
             $_SESSION['user']['id'] ?? null
         ]);
         $newEvidenceId = (int)$pdo->lastInsertId();
-        log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $finalName), 'Type: '.$type, $newEvidenceId, null);
+        log_case_event($pdo, $case_id, 'evidence_added', ($title !== '' ? $title : $safeName), 'Type: '.$type, $newEvidenceId, null);
         log_console('SUCCESS', 'AJAX evidence uploaded for case_id '.$case_id.' ('.$finalName.')');
         echo json_encode(['ok'=>true,'evidence_id'=>$newEvidenceId,'filename'=>$finalName]); exit;
     } catch (Throwable $e) {
