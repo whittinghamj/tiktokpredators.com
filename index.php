@@ -5,6 +5,9 @@ require_once __DIR__ . '/lib/ollama-worker-monitor.php';
 require_once __DIR__ . '/lib/case-ollama.php';
 require_once __DIR__ . '/lib/case-ollama-failures.php';
 require_once __DIR__ . '/lib/case-review.php';
+require_once __DIR__ . '/lib/evidence-upload-limits.php';
+// Detect discarded oversized bodies before sessions, database work or HTML output.
+tp_evidence_reject_oversized_post();
 
 // --- Cross-subdomain session cookie for tiktokpredators.com and www.tiktokpredators.com
 // Must be set BEFORE session_start()
@@ -5582,8 +5585,9 @@ if (($_POST['action'] ?? '') === 'upload_evidence') {
     }
 
     $f = $_FILES['evidence_file'];
-    if ($f['error'] !== UPLOAD_ERR_OK) {
-        flash('error', 'Upload failed with code: '. (int)$f['error']);
+    $uploadError = tp_evidence_upload_error($f);
+    if ($uploadError !== '') {
+        flash('error', $uploadError);
         $redirUrl = trim($_POST['redirect_url'] ?? '');
         if ($redirUrl !== '') { header('Location: ' . $redirUrl); exit; }
         header('Location: ?view=case&code=' . urlencode($redir_code) . '#case-view'); exit;
@@ -5698,7 +5702,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
 }
 
 // Handle evidence AJAX upload (single file, returns JSON — used by multi-file uploader)
-if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
+if (($_POST['action'] ?? '') === 'upload_evidence_ajax'
+    || (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' && ($_GET['action'] ?? '') === 'upload_evidence_ajax')) {
     header('Content-Type: application/json');
     throttle();
     if (!check_csrf()) { echo json_encode(['ok'=>false,'error'=>'Security check failed.']); exit; }
@@ -5721,8 +5726,9 @@ if (($_POST['action'] ?? '') === 'upload_evidence_ajax') {
     }
 
     $f = $_FILES['evidence_file'];
-    if ($f['error'] !== UPLOAD_ERR_OK) {
-        echo json_encode(['ok'=>false,'error'=>'Upload error code: '.(int)$f['error']]); exit;
+    $uploadError = tp_evidence_upload_error($f);
+    if ($uploadError !== '') {
+        echo json_encode(['ok'=>false,'error'=>$uploadError]); exit;
     }
 
     $privateStorageError = '';
@@ -12196,7 +12202,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
               <div class="dropzone mb-3 position-relative" id="evDropzone" style="cursor:pointer;" onclick="document.getElementById('evMultiFileInput').click()">
                 <i class="bi bi-cloud-upload display-4 d-block mb-2 text-primary"></i>
                 <p class="mb-1 fw-semibold">Drag &amp; drop files here, or click to browse</p>
-                <small class="text-secondary">Images &nbsp;·&nbsp; Videos (MP4/WebM/OGG) &nbsp;·&nbsp; PDFs &nbsp;·&nbsp; Documents &nbsp;·&nbsp; Multiple files supported</small>
+                <small class="text-secondary">Images &nbsp;·&nbsp; Videos (MP4/WebM/OGG) &nbsp;·&nbsp; PDFs &nbsp;·&nbsp; Documents &nbsp;·&nbsp; Multiple files supported<br>Maximum file size: <?php echo htmlspecialchars(tp_evidence_upload_size_label(tp_evidence_upload_limit())); ?> per file</small>
               </div>
               <input type="file" id="evMultiFileInput" multiple accept="image/*,video/mp4,video/webm,video/ogg,audio/*,application/pdf,.doc,.docx,.txt" class="d-none">
               <!-- Staged file list (shown after selection) -->
@@ -13211,7 +13217,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             <div class="dropzone mb-3 position-relative" id="adminEvDropzone" style="cursor:pointer;" onclick="document.getElementById('adminEvFileInput').click()">
               <i class="bi bi-cloud-upload d-block mb-1 text-primary" style="font-size:2rem;"></i>
               <p class="mb-1 fw-semibold">Drag &amp; drop files here, or click to browse</p>
-              <small class="text-secondary">Images · Videos (MP4/WebM/OGG) · PDFs · Docs · Audio &nbsp;·&nbsp; Multiple files supported</small>
+              <small class="text-secondary">Images · Videos (MP4/WebM/OGG) · PDFs · Docs · Audio &nbsp;·&nbsp; Multiple files supported<br>Maximum file size: <?php echo htmlspecialchars(tp_evidence_upload_size_label(tp_evidence_upload_limit())); ?> per file</small>
             </div>
             <input type="file" id="adminEvFileInput" multiple accept="image/*,video/mp4,video/webm,video/ogg,audio/*,application/pdf,.doc,.docx,.txt" class="d-none">
             <div id="adminEvFileList" class="d-none">
@@ -15848,6 +15854,31 @@ document.addEventListener('click', function (ev) {
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
+  var maxUploadBytes = <?php echo json_encode(tp_evidence_upload_limit()); ?>;
+  var maxUploadLabel = <?php echo json_encode(tp_evidence_upload_size_label(tp_evidence_upload_limit())); ?>;
+
+  function uploadResponse(xhr) {
+    var data;
+    try { data = JSON.parse(xhr.responseText); } catch (error) {}
+    if (data && typeof data === 'object' && typeof data.ok === 'boolean') {
+      if (xhr.status >= 200 && xhr.status < 300) return data;
+      if (!data.ok && typeof data.error === 'string') return data;
+    }
+    var message;
+    if (xhr.status === 413) {
+      message = 'The server rejected this file as too large. Its upload limit may be lower than ' + maxUploadLabel + '. Please ask the site administrator to increase the server upload limit.';
+    } else if ([408, 504, 524].includes(xhr.status)) {
+      message = 'The upload timed out before the server finished. Please try again or use a smaller file.';
+    } else if (xhr.status === 401 || xhr.status === 403) {
+      message = 'The upload was not authorized. Refresh the page, sign in if needed, and try again.';
+    } else if (xhr.status >= 500) {
+      message = 'The server could not finish saving the upload (HTTP ' + xhr.status + '). Please try again or contact the site administrator.';
+    } else {
+      message = 'The server did not return an upload result (HTTP ' + xhr.status + '). Refresh the page and try again; the file may exceed the server upload limit.';
+    }
+    return {ok: false, error: message};
+  }
+
   function detectType(file) {
     var m = file.type || '';
     var ext = (file.name.split('.').pop() || '').toLowerCase();
@@ -15996,6 +16027,10 @@ document.addEventListener('click', function (ev) {
               + '<div class="progress" style="height:6px;"><div class="progress-bar" id="evProg_'+rid+'" style="width:0%"></div></div>'
               + '<span class="small text-secondary" id="evProgTxt_'+rid+'">Pending</span>'
           + '</td>';
+        if (f.size > maxUploadBytes) {
+          row.querySelector('#evProgTxt_' + rid).textContent = 'Too large — maximum ' + maxUploadLabel;
+          row.querySelector('#evProgTxt_' + rid).className = 'small text-danger';
+        }
         row.querySelector('.evidence-upload-preview-slot').replaceWith(buildPreview(f, detected, rememberPreviewUrl));
         config.listBodyEl.appendChild(row);
       }
@@ -16017,6 +16052,14 @@ document.addEventListener('click', function (ev) {
       var titleEl = document.getElementById('evTitle_' + rid);
       var typeEl  = document.getElementById('evType_' + rid);
 
+      if (item.file.size > maxUploadBytes) {
+        progTxt.textContent = 'Error: File is too large. Maximum file size: ' + maxUploadLabel + '.';
+        progTxt.className = 'small text-danger';
+        if (progBar) progBar.classList.add('bg-danger');
+        callback(false);
+        return;
+      }
+
       progTxt.textContent = 'Uploading…';
       progTxt.className = 'small text-info';
 
@@ -16029,18 +16072,21 @@ document.addEventListener('click', function (ev) {
       fd.append('evidence_file', item.file, item.file.name);
 
       var xhr = new XMLHttpRequest();
-      xhr.open('POST', '', true);
+      // Keep the action in the URL even if PHP discards an oversized POST body.
+      xhr.open('POST', '?action=upload_evidence_ajax', true);
+      xhr.setRequestHeader('Accept', 'application/json');
+      xhr.timeout = 60 * 60 * 1000;
 
       xhr.upload.addEventListener('progress', function (e) {
         if (e.lengthComputable && progBar) {
           var pct = Math.round((e.loaded / e.total) * 100);
           progBar.style.width = pct + '%';
+          progTxt.textContent = pct === 100 ? 'Upload received; saving evidence…' : 'Uploading… ' + pct + '%';
         }
       });
 
       xhr.addEventListener('load', function () {
-        var data;
-        try { data = JSON.parse(xhr.responseText); } catch(e) { data = {ok:false,error:'Invalid server response'}; }
+        var data = uploadResponse(xhr);
         if (data.ok) {
           if (progBar) { progBar.style.width = '100%'; progBar.classList.add('bg-success'); }
           progTxt.textContent = 'Done ✓';
@@ -16055,7 +16101,14 @@ document.addEventListener('click', function (ev) {
 
       xhr.addEventListener('error', function () {
         if (progBar) progBar.classList.add('bg-danger');
-        progTxt.textContent = 'Network error';
+        progTxt.textContent = 'Error: The connection was interrupted. Please check your connection and try again.';
+        progTxt.className = 'small text-danger';
+        callback(false);
+      });
+
+      xhr.addEventListener('timeout', function () {
+        if (progBar) progBar.classList.add('bg-danger');
+        progTxt.textContent = 'Error: The upload timed out. Please try again or use a smaller file.';
         progTxt.className = 'small text-danger';
         callback(false);
       });

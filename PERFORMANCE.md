@@ -25,3 +25,11 @@ The shared stylesheet is now a versioned static file. jQuery, DataTables and Sel
 Checks: `php tests/performance.php`, `php tests/photo-thumbnails.php` and PHP lint. A synthetic 1800x1000 PNG of 5,409,722 bytes produced 160/640/1200-pixel previews of 6,030 / 82,052 / 181,806 bytes on the local GD installation. Actual sizes depend on the photo.
 
 Next server checks if latency remains: measure response completion and database query plans after deployment; verify PHP OPcache is enabled for PHP-FPM; verify gzip/Brotli at the serving proxy; inspect PHP-FPM worker saturation and MySQL connection latency; confirm the prior composite indexes were installed. The recent-activity listing still aggregates evidence, so measure that query before adding an activity rollup. Whole-page caching needs account/CSRF-aware design because this application mixes public pages with session state.
+
+## Large evidence uploads
+
+Deploy `.user.ini` together with the upload handlers. It allows files up to 500 MB with a 510 MB total POST limit and an hour for incoming request data. PHP-FPM may cache `.user.ini` for several minutes; reload the relevant FPM service to apply it immediately. The uploader displays the effective limit from the web PHP process and rejects larger files before sending them. PHP CLI settings can differ from FPM settings.
+
+The live site also uses an OpenResty reverse proxy. Its request-body limit must allow the complete request, for example `client_max_body_size 510m;` in the site's nginx/OpenResty server or proxy location. Apply that setting at every proxy in front of PHP and validate/reload the affected nginx configuration. PHP cannot override an upstream HTTP 413 rejection. Also ensure the PHP upload temporary directory and private evidence storage have enough free space for the incoming and stored copies.
+
+Validate with `php tests/evidence-uploads.php --large` for an actual 400 MB multipart upload plus content-hash verification, and `node tests/evidence-upload-response.js` for HTML/413, timeout, malformed-response and JSON error handling. These checks use isolated local storage and a test server; they do not change live proxy configuration.
