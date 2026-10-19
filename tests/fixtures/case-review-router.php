@@ -2,7 +2,7 @@
 if (PHP_SAPI !== 'cli-server' || !getenv('TP_CASE_REVIEW_TEST_DIR')) { http_response_code(404); exit; }
 $root = dirname(__DIR__, 2);
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-if (in_array($path, ['/assets/case-review.css', '/assets/case-review.js', '/assets/site.css'], true)) {
+if (in_array($path, ['/assets/case-review.css', '/assets/case-review.js', '/assets/case-review-viewer.js', '/assets/site.css'], true)) {
     header('Content-Type: ' . (str_ends_with($path, '.css') ? 'text/css' : 'application/javascript'));
     readfile($root . $path); return;
 }

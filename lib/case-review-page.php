@@ -19,7 +19,8 @@ $details = [
   <meta name="robots" content="noindex, nofollow, noarchive, noimageindex">
   <meta name="referrer" content="no-referrer">
   <title>Unverified case — private review</title>
-  <link rel="stylesheet" href="assets/case-review.css?v=1">
+  <link rel="stylesheet" href="assets/case-review.css?v=2">
+  <script defer src="assets/case-review-viewer.js?v=1"></script>
 </head>
 <body>
   <aside class="review-warning" role="alert">
@@ -55,23 +56,30 @@ $details = [
         $externalUrl = in_array(strtolower((string)parse_url((string)$item['filepath'], PHP_URL_SCHEME)), ['http', 'https'], true);
         $image = strpos($mime, 'image/') === 0 && strpos($mime, 'svg') === false;
         $blocked = $reviewCase['sensitivity'] === 'Sealed' || ($reviewCase['sensitivity'] === 'Restricted' && !$image);
+        $kind = 'file';
+        if ($externalUrl) { $kind = 'url'; }
+        elseif ($image) { $kind = 'image'; }
+        elseif (strpos($mime, 'video/') === 0 || $mime === 'application/ogg') { $kind = 'video'; }
+        elseif (strpos($mime, 'audio/') === 0) { $kind = 'audio'; }
+        elseif ($mime === 'application/pdf') { $kind = 'pdf'; }
+        elseif ($mime === 'text/plain') { $kind = 'text'; }
+        $title = $item['title'] ?: 'Evidence #' . (int)$item['id'];
+        $previewUrl = $externalUrl ? $item['filepath'] : $url;
+        $previewLabel = ['video' => 'Video', 'audio' => 'Audio', 'pdf' => 'PDF', 'text' => 'Text', 'file' => 'File', 'url' => 'External link'][$kind] ?? 'Image';
       ?>
-        <article class="review-card review-evidence">
-          <h3><?= $escape($item['title'] ?: 'Evidence #' . (int)$item['id']) ?></h3>
-          <p class="review-muted">Evidence #<?= (int)$item['id'] ?> · <?= $escape($item['created_at']) ?></p>
+        <article class="review-card review-evidence"<?php if (!$blocked): ?> data-review-item data-evidence-id="<?= (int)$item['id'] ?>" data-evidence-title="<?= $escape($title) ?>" data-evidence-src="<?= $escape($previewUrl) ?>" data-evidence-kind="<?= $escape($kind) ?>"<?php endif; ?>>
+          <h3><?= $escape($title) ?></h3>
+          <p class="review-muted review-item-meta">Evidence #<?= (int)$item['id'] ?> · <?= $escape($item['created_at']) ?></p>
           <?php if ($blocked): ?>
             <p class="review-muted">This evidence is unavailable under the case sensitivity restrictions.</p>
-          <?php elseif ($externalUrl): ?>
-            <a href="<?= $escape($item['filepath']) ?>" target="_blank" rel="noopener noreferrer">Open external evidence</a>
-          <?php elseif ($image): ?>
-            <a href="<?= $escape($url) ?>" target="_blank" rel="noopener noreferrer"><img loading="lazy" class="review-media" src="<?= $escape($url . '&thumbnail=1') ?>" alt="<?= $escape($item['title'] ?: 'Evidence image') ?>"></a>
-            <a href="<?= $escape($url) ?>" target="_blank" rel="noopener noreferrer">View full image</a>
-          <?php elseif (strpos($mime, 'video/') === 0): ?>
-            <video class="review-media" controls preload="metadata" src="<?= $escape($url) ?>"></video>
-          <?php elseif (strpos($mime, 'audio/') === 0): ?>
-            <audio controls preload="metadata" src="<?= $escape($url) ?>"></audio>
+          <?php elseif ($kind === 'image'): ?>
+            <a class="review-preview-trigger review-preview-image" href="<?= $escape($url) ?>" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog" aria-controls="reviewEvidenceDialog" aria-label="<?= $escape('Preview ' . $title) ?>"><img loading="lazy" class="review-media" src="<?= $escape($url . '&thumbnail=1') ?>" alt="<?= $escape($title) ?>"></a>
+            <a class="review-preview-trigger" href="<?= $escape($url) ?>" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog" aria-controls="reviewEvidenceDialog">Preview image</a>
           <?php else: ?>
-            <a href="<?= $escape($url) ?>" target="_blank" rel="noopener noreferrer">View evidence file</a>
+            <a class="review-preview-trigger review-file-preview" href="<?= $escape($previewUrl) ?>" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog" aria-controls="reviewEvidenceDialog" aria-label="<?= $escape('Preview ' . $title) ?>">
+              <span class="review-file-icon" aria-hidden="true"><?= $escape(['video' => '▶', 'audio' => '♫', 'pdf' => 'PDF', 'text' => 'TXT', 'url' => '↗'][$kind] ?? 'FILE') ?></span>
+              <span>Preview <?= $escape(strtolower($previewLabel)) ?></span>
+            </a>
           <?php endif; ?>
         </article>
       <?php endforeach; ?>
@@ -79,5 +87,26 @@ $details = [
     </section>
     <footer class="review-muted">Private review only. This link expires <?= $escape($reviewCase['expires_at']) ?> UTC and may be revoked by the case owner or an authorized reviewer.</footer>
   </main>
+  <dialog class="review-viewer" id="reviewEvidenceDialog" aria-labelledby="reviewViewerTitle" aria-describedby="reviewViewerWarning">
+    <div class="review-viewer-shell">
+      <div class="review-viewer-warning" id="reviewViewerWarning"><strong>UNVERIFIED &amp; UNPUBLISHED CASE</strong> · Private, read-only review</div>
+      <header class="review-viewer-header">
+        <div>
+          <h2 id="reviewViewerTitle">Evidence preview</h2>
+          <p class="review-muted" id="reviewViewerMeta"></p>
+        </div>
+        <button type="button" class="review-viewer-button review-viewer-close" id="reviewViewerClose" aria-label="Close evidence viewer" autofocus>×</button>
+      </header>
+      <div class="review-viewer-content" id="reviewViewerContent"></div>
+      <footer class="review-viewer-footer">
+        <nav class="review-viewer-navigation" aria-label="Evidence navigation">
+          <button type="button" class="review-viewer-button" id="reviewViewerPrevious" aria-label="Previous evidence">← Previous</button>
+          <span id="reviewViewerCounter" role="status" aria-live="polite" aria-atomic="true"></span>
+          <button type="button" class="review-viewer-button" id="reviewViewerNext" aria-label="Next evidence">Next →</button>
+        </nav>
+        <p class="review-muted review-viewer-hint">Use ← and → to browse. Press Esc to close.</p>
+      </footer>
+    </div>
+  </dialog>
 </body>
 </html>

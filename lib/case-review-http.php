@@ -40,7 +40,7 @@ if (in_array(($_POST['action'] ?? ''), ['create_case_review_link', 'revoke_case_
 
 if (($_GET['view'] ?? '') === 'case_review') {
     tp_case_review_headers();
-    header("Content-Security-Policy: default-src 'none'; style-src 'self'; img-src 'self'; media-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'");
+    header("Content-Security-Policy: default-src 'none'; script-src 'self'; connect-src 'self'; style-src 'self'; img-src 'self'; media-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'");
     $reviewToken = $_GET['review_token'] ?? '';
     $reviewCase = tp_case_review_lookup($pdo, $reviewToken);
     if (!$reviewCase) {

@@ -75,6 +75,8 @@ try {
     review_check(!str_contains($page, '<script>') && str_contains($page, '&lt;script&gt;') && !str_contains($page, '<form') && !str_contains($page, 'OTHER_CASE_SECRET'), 'Review exposed active content, editing controls or another case.');
     review_check(!str_contains($page, '12 Example Street') && !str_contains($page, '01234567890'), 'Review bypassed anonymous field redaction.');
     review_check($headers['referrer-policy'] === 'no-referrer' && str_contains($headers['x-robots-tag'], 'noindex') && str_contains($headers['cache-control'], 'no-store'), 'Review privacy headers are missing.');
+    review_check(str_contains($page, '<dialog ') && str_contains($page, 'aria-label="Previous evidence"') && str_contains($page, 'aria-label="Next evidence"') && str_contains($page, 'aria-controls="reviewEvidenceDialog"'), 'Review evidence does not expose an accessible navigable viewer.');
+    review_check(str_contains($headers['content-security-policy'], "script-src 'self'") && !str_contains($headers['content-security-policy'], 'unsafe-inline'), 'Viewer scripts loosened the review content security policy.');
     [$status, $head] = review_request($url, null, 'HEAD');
     review_check($status === 200 && $head === '', 'Review HEAD request returned content.');
     [$status] = review_request($url . '&role=admin', $create);
@@ -103,6 +105,8 @@ try {
     $pdo->exec("UPDATE cases SET sensitivity = 'Sealed' WHERE id = 1");
     [$status] = review_request($mediaUrl);
     review_check($status === 403, 'Review bypassed sealed evidence.');
+    [$status, $sealedPage] = review_request($url);
+    review_check($status === 200 && !str_contains($sealedPage, ' data-review-item'), 'Sealed evidence was included in the viewer navigation.');
     $pdo->exec("UPDATE cases SET sensitivity = 'Standard' WHERE id = 1");
     [$status, $body] = review_request($base . '/?role=admin', $create);
     $replacement = json_decode($body, true)['url'];
@@ -135,10 +139,50 @@ try {
     $pdo->exec("UPDATE cases SET status = 'Being Built' WHERE id = 1");
     echo "Case review checks passed: permissions, anonymous read-only access, warning, escaping, evidence isolation, public blurs, expiry, replacement, revocation and publication.\n";
     if (in_array('--preview', $argv, true)) {
+        // Mixed local fixtures make modal navigation and media cleanup reviewable.
+        $image = imagecreatetruecolor(240, 160);
+        imagefill($image, 0, 0, imagecolorallocate($image, 50, 40, 200));
+        imagepng($image, $directory . '/private/evidence/second.png');
+        $samples = str_repeat("\0\0", 8000);
+        file_put_contents($directory . '/private/evidence/audio.wav', 'RIFF' . pack('V', 36 + strlen($samples)) . 'WAVEfmt ' . pack('VvvVVvv', 16, 1, 1, 8000, 16000, 2, 16) . 'data' . pack('V', strlen($samples)) . $samples);
+        file_put_contents($directory . '/private/evidence/statement.txt', "Fixture statement for private review.\n<script>Untrusted evidence remains plain text.</script>\n");
+        file_put_contents($directory . '/private/evidence/document.bin', 'Unsupported document fixture.');
+        $objects = [
+            '<< /Type /Catalog /Pages 2 0 R >>',
+            '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+            '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 400 200] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+            '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+        ];
+        $pdfText = 'BT /F1 16 Tf 30 140 Td (Private review PDF fixture) Tj ET';
+        $objects[] = '<< /Length ' . strlen($pdfText) . ">>\nstream\n" . $pdfText . "\nendstream";
+        $pdf = "%PDF-1.4\n"; $offsets = [0];
+        foreach ($objects as $number => $object) { $offsets[] = strlen($pdf); $pdf .= ($number + 1) . " 0 obj\n" . $object . "\nendobj\n"; }
+        $xref = strlen($pdf); $pdf .= "xref\n0 6\n0000000000 65535 f \n";
+        foreach (array_slice($offsets, 1) as $offset) { $pdf .= sprintf("%010d 00000 n \n", $offset); }
+        $pdf .= "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n" . $xref . "\n%%EOF\n";
+        file_put_contents($directory . '/private/evidence/document.pdf', $pdf);
+        $fixtures = [
+            [102, 'image', 'Second screenshot', 'second.png', 'image/png'],
+            [103, 'audio', 'Audio statement', 'audio.wav', 'audio/wav'],
+            [104, 'other', 'Text statement', 'statement.txt', 'text/plain'],
+            [105, 'pdf', 'PDF document', 'document.pdf', 'application/pdf'],
+            [106, 'doc', 'Other document', 'document.bin', 'application/octet-stream'],
+            [107, 'url', 'External source', 'https://example.com/', 'text/url'],
+        ];
+        $previewInsert = $pdo->prepare('INSERT INTO evidence (id, case_id, type, title, filepath, mime_type, created_at) VALUES (?, 1, ?, ?, ?, ?, ?)');
+        foreach ($fixtures as [$id, $type, $title, $filename, $mime]) {
+            $previewInsert->execute([$id, $type, $title, $type === 'url' ? $filename : 'private:evidence/' . $filename, $mime, '2026-01-01 00:00:' . sprintf('%02d', 110 - $id)]);
+        }
         echo "Preview: " . $activeUrl . "\nShare controls: " . $base . "/share-ui?role=admin\n";
         flush();
+        $previewRunning = true;
+        if (function_exists('pcntl_async_signals')) {
+            pcntl_async_signals(true);
+            pcntl_signal(SIGTERM, static function () use (&$previewRunning): void { $previewRunning = false; });
+            pcntl_signal(SIGINT, static function () use (&$previewRunning): void { $previewRunning = false; });
+        }
         // Bound preview lifetime so a forgotten fixture cleans up automatically.
-        for ($seconds = 0; $seconds < 600; $seconds++) { sleep(1); }
+        for ($seconds = 0; $seconds < 600 && $previewRunning; $seconds++) { sleep(1); }
     }
 } finally {
     if (is_resource($process)) { proc_terminate($process); proc_close($process); }
