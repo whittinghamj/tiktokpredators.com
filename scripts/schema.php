@@ -144,6 +144,23 @@ SQL
   } catch (Throwable $e) {
     $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
   }
+// --- Revocable bearer links for read-only review of unpublished cases ---
+try {
+  $pdo->exec(<<<SQL
+CREATE TABLE IF NOT EXISTS case_review_links (
+  case_id BIGINT UNSIGNED NOT NULL PRIMARY KEY,
+  token_hash CHAR(64) NOT NULL,
+  created_by BIGINT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  expires_at DATETIME NOT NULL,
+  revoked_at DATETIME NULL,
+  UNIQUE KEY uq_case_review_token (token_hash)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+SQL
+  );
+} catch (Throwable $e) {
+  $_SESSION['sql_error'] = $_SESSION['sql_error'] ?? $e->getMessage();
+}
 // --- Evidence image display orientation (keeps the original upload immutable) ---
 $tp_evidence_rotation_ready = false;
 try {

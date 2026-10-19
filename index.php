@@ -4,6 +4,7 @@ require_once __DIR__ . '/lib/ollama.php';
 require_once __DIR__ . '/lib/ollama-worker-monitor.php';
 require_once __DIR__ . '/lib/case-ollama.php';
 require_once __DIR__ . '/lib/case-ollama-failures.php';
+require_once __DIR__ . '/lib/case-review.php';
 
 // --- Cross-subdomain session cookie for tiktokpredators.com and www.tiktokpredators.com
 // Must be set BEFORE session_start()
@@ -2460,6 +2461,9 @@ try {
     $tp_evidence_rotation_ready = true;
 } catch (Throwable $e) {}
 
+// Private review routes exit before the normal page, analytics and mutation flows.
+require __DIR__ . '/lib/case-review-http.php';
+
 // Readiness is checked only on game requests; migration runs outside page loads.
 $tp_catch_pred_ready = false;
 if (($_GET['view'] ?? '') === 'catch_a_pred' || strpos((string)($_POST['action'] ?? ''), 'catch_pred') !== false) {
@@ -3151,13 +3155,25 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     } catch (Throwable $e) {
         http_response_code(500); exit('Server error');
     }
-    if (!$row || !tp_evidence_context_is_visible($row)) { http_response_code(404); exit('Not found'); }
+    $isReviewRequest = array_key_exists('review_token', $_GET);
+    $reviewCase = $isReviewRequest ? tp_case_review_lookup($pdo, $_GET['review_token']) : null;
+    $isReviewEvidence = $row && $reviewCase && (int)$row['case_id'] === (int)$reviewCase['id'];
+    if (!$row || ($isReviewRequest ? !$isReviewEvidence : !tp_evidence_context_is_visible($row))) {
+        http_response_code(404); exit('Not found');
+    }
+    if ($isReviewRequest) {
+        tp_case_review_headers();
+        if (!in_array(($_SERVER['REQUEST_METHOD'] ?? 'GET'), ['GET', 'HEAD'], true)) {
+            header('Allow: GET, HEAD');
+            http_response_code(405); exit('This review is read-only.');
+        }
+    }
 
     $variantValue = $_GET['variant'] ?? '';
     if (!is_string($variantValue)) { http_response_code(400); exit('Bad request'); }
     $requestedVariant = strtolower(trim($variantValue));
     if (!in_array($requestedVariant, ['', 'public', 'original'], true)) { http_response_code(400); exit('Bad request'); }
-    $canViewOriginal = tp_can_view_evidence_original($row);
+    $canViewOriginal = !$isReviewRequest && tp_can_view_evidence_original($row);
     if ($requestedVariant === 'original' && !$canViewOriginal) { http_response_code(404); exit('Not found'); }
     if (empty($tp_evidence_redactions_ready) && (!$canViewOriginal || $requestedVariant === 'public')) {
         // Without redaction metadata the server cannot prove that the original is the public copy.
@@ -11819,14 +11835,17 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           $tp_headerLocation = tp_case_location_for_viewer($viewCase['location'] ?? '');
           if ($tp_headerLocation === '') { $tp_headerLocation = 'Unknown Location'; }
         ?>
-        <div class="d-flex align-items-center justify-content-between mb-3">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
           <div>
             <h2 class="h4 mb-0"><?php echo htmlspecialchars($tp_headerName); ?> | <?php echo htmlspecialchars($tp_headerLocation); ?> | <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
             <?php if ($viewCaseId > 0): ?>
               <div class="small text-secondary">Total views: <?php echo (int)$viewTotalViews; ?></div>
             <?php endif; ?>
           </div>
-          <div class="d-flex gap-2">
+          <div class="d-flex flex-wrap gap-2">
+<?php if (!empty($viewCase) && tp_can_share_case_review($viewCase)): ?>
+            <button type="button" class="btn btn-outline-warning btn-sm" data-bs-toggle="modal" data-bs-target="#caseReviewShareModal"><i class="bi bi-share me-1"></i> Share for Review</button>
+<?php endif; ?>
 <?php if ($tp_canAddEvidence): ?>
             <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence</button>
 <?php endif; ?>
@@ -11863,6 +11882,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             <a class="btn btn-outline-light btn-sm" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
           </div>
         </div>
+        <?php if (!empty($viewCase) && tp_can_share_case_review($viewCase)) { require __DIR__ . '/lib/case-review-share.php'; } ?>
         <?php if (is_admin() && $viewCaseId > 0) { require __DIR__ . '/lib/case-ollama-panel.php'; } ?>
         <?php if ($viewCaseId > 0 && in_array(($viewCase['status'] ?? ''), ['Being Built', 'Pending', 'Rejected'], true) && ($tp_isCaseOwner || can_moderate_cases())): ?>
         <div class="card glass mb-3" id="case-readiness">
