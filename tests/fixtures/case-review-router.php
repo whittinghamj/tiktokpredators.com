@@ -11,6 +11,7 @@ class CaseReviewTestDatabase extends CaseReviewSqliteBase {
     public function prepare(string $query, array $options = []): PDOStatement|false {
         $query = str_replace(['ON DUPLICATE KEY UPDATE', 'UTC_TIMESTAMP()'], ['ON CONFLICT(case_id) DO UPDATE SET', 'CURRENT_TIMESTAMP'], $query);
         $query = preg_replace('/VALUES\(([a-z_]+)\)/i', 'excluded.$1', $query);
+        $query = str_replace(' FOR UPDATE', '', $query);
         return parent::prepare($query, $options);
     }
 }
@@ -27,6 +28,11 @@ $_SESSION = $role === 'guest' ? [] : ['user' => ['id' => $userId, 'role' => $rol
 $_SESSION['csrf_token'] = 'test-csrf';
 function check_csrf(): bool { return ($_POST['csrf_token'] ?? '') === 'test-csrf'; }
 function log_console(string $level, string $message): void {}
+function flash(string $key, string $message): void {}
+function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = null, ?string $detail = null): void {
+    $query = $pdo->prepare('INSERT INTO case_events (case_id, event_type) VALUES (?, ?)');
+    $query->execute([$caseId, $type]);
+}
 function get_case_tiktok_usernames(PDO $pdo, int $caseId): string { return ''; }
 function get_case_tags(PDO $pdo, int $caseId): array { return ['fixture' => 'Fixture tag']; }
 $source = file_get_contents($root . '/index.php');
@@ -39,9 +45,15 @@ foreach ([
     $start = strpos($source, $from);
     $end = strpos($source, $until, $start);
     if ($start === false || $end === false) { throw new RuntimeException('Fixture source boundary missing.'); }
-    eval(str_replace('__DIR__', var_export($root, true), substr($source, $start, $end - $start)));
+    $functionRoot = $from === 'function find_person_photo_url(' ? $directory : $root;
+    eval(str_replace('__DIR__', var_export($functionRoot, true), substr($source, $start, $end - $start)));
 }
 require $root . '/lib/case-review.php';
+if ($path === '/archive-list') {
+    require $root . '/lib/case-archive-list.php'; return;
+}
+if ($path === '/photo.php') { $_GET['action'] = 'serve_case_photo'; }
+require $root . '/lib/case-photo-http.php';
 $tp_evidence_redactions_ready = ($_GET['schema'] ?? '') !== 'missing';
 $tp_evidence_rotation_ready = true;
 if ($path === '/share-ui' && empty($_POST['action'])) {
@@ -52,6 +64,15 @@ if ($path === '/share-ui' && empty($_POST['action'])) {
     echo '</main></body></html>'; return;
 }
 require $root . '/lib/case-review-http.php';
+require $root . '/lib/case-archive-http.php';
+if (($_GET['view'] ?? '') === 'case') {
+    // Exercise the same visibility helper used by the full case/metadata views.
+    $query = $pdo->prepare('SELECT * FROM cases WHERE case_code = ?');
+    $query->execute([$_GET['code'] ?? '']);
+    $case = $query->fetch();
+    if (!$case || !tp_case_is_visible($case)) { http_response_code(404); exit('Not found'); }
+    echo htmlspecialchars($case['initial_summary']); exit;
+}
 $start = strpos($source, '// Secure evidence streaming endpoint.');
 $end = strpos($source, '// Start a short-lived, session-bound Catch a Pred round.', $start);
 eval(substr($source, $start, $end - $start));

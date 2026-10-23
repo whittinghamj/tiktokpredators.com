@@ -6,6 +6,16 @@ $source = file_get_contents(dirname(__DIR__) . '/index.php');
 $start = strpos($source, '  $whereParts = ["c.status NOT IN');
 $end = strpos($source, 'if ($rs && count($rs) > 0):', $start);
 $listing = 'try {' . substr($source, $start, $end - $start);
+// Run the actual listing visibility condition against each status, including archives.
+preg_match('/\$whereParts = \["([^"]+)"\]/', $listing, $publicFilter);
+$visibilityDb = new PDO('sqlite::memory:');
+$visibilityDb->exec('CREATE TABLE cases (status TEXT)');
+$visibilityInsert = $visibilityDb->prepare('INSERT INTO cases (status) VALUES (?)');
+foreach (['Being Built', 'Pending', 'Rejected', 'Archived', 'Verified', 'Open', 'In Review', 'Closed'] as $caseStatus) {
+    $visibilityInsert->execute([$caseStatus]);
+}
+$publicStatuses = $visibilityDb->query('SELECT status FROM cases c WHERE ' . $publicFilter[1] . ' ORDER BY status')->fetchAll(PDO::FETCH_COLUMN);
+if ($publicStatuses !== ['Closed', 'In Review', 'Open', 'Verified']) { throw new RuntimeException('Public case listings expose a private/archived status or hide published records.'); }
 final class ListingStatement extends PDOStatement {
     private array $rows;
     public function __construct(array $rows) { $this->rows = $rows; }

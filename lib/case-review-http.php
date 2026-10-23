@@ -44,7 +44,18 @@ if (($_GET['view'] ?? '') === 'case_review') {
     $reviewToken = $_GET['review_token'] ?? '';
     $reviewCase = tp_case_review_lookup($pdo, $reviewToken);
     if (!$reviewCase) {
-        http_response_code(404); exit('This review link is invalid, expired, revoked, or the case is no longer unpublished.');
+        http_response_code(404); exit('This private link is invalid, expired, revoked, or the case is no longer private.');
+    }
+    if (array_key_exists('evidence_id', $_GET)) {
+        $evidenceId = $_GET['evidence_id'];
+        if (!is_string($evidenceId) || !ctype_digit($evidenceId)) { http_response_code(404); exit('Not found'); }
+        $query = $pdo->prepare('SELECT id, type, title, filepath, mime_type, created_at FROM evidence WHERE id = ? AND case_id = ? LIMIT 1');
+        $query->execute([(int)$evidenceId, (int)$reviewCase['id']]);
+        $reviewItem = $query->fetch();
+        if (!$reviewItem) { http_response_code(404); exit('Not found'); }
+        if (session_status() === PHP_SESSION_ACTIVE) { session_write_close(); }
+        if (($_SERVER['REQUEST_METHOD'] ?? 'GET') !== 'HEAD') { require __DIR__ . '/case-review-evidence.php'; }
+        exit;
     }
     $reviewCase['tiktok_username'] = get_case_tiktok_usernames($pdo, (int)$reviewCase['id']) ?: $reviewCase['tiktok_username'];
     $reviewTags = get_case_tags($pdo, (int)$reviewCase['id']);

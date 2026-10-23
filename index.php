@@ -966,6 +966,9 @@ function tp_create_user_notification(PDO $pdo, int $userId, string $type, string
     return $html;
   }
 $view = $_GET['view'] ?? 'cases';
+if ($view === 'pending' || (!empty($_GET['admin_case']) && is_admin())) {
+  tp_case_review_headers();
+}
 if ($view === 'ai_summary_failures') {
   if (!is_admin() || (int)($_SESSION['user']['id'] ?? 0) <= 0) { http_response_code(403); }
   header('Cache-Control: private, no-store, max-age=0');
@@ -976,7 +979,7 @@ function throttle(){
     if ($now - ($_SESSION['auth_last'] ?? 0) < 3) { sleep(1); }
 }
 
-// Helper: find person photo URL by case code (tries common extensions)
+// Storage-relative photo path for server-side file operations; never a public URL.
 function find_person_photo_url(string $caseCode): string {
     $baseDir = __DIR__ . '/uploads/people/';
     $baseRel = 'uploads/people/';
@@ -990,6 +993,11 @@ function find_person_photo_url(string $caseCode): string {
     return '';
 }
 
+function tp_person_photo_source_path(string $caseCode): string {
+    $relative = find_person_photo_url($caseCode);
+    return $relative === '' ? '' : __DIR__ . '/' . $relative;
+}
+
 /** Person-photo URL with a file-version suffix so rotations appear immediately. */
 function tp_person_photo_display_url(string $caseCode): string {
     $relative = find_person_photo_url($caseCode);
@@ -999,14 +1007,15 @@ function tp_person_photo_display_url(string $caseCode): string {
     $size = @filesize($absolute) ?: 0;
     $inode = @fileinode($absolute) ?: 0;
     $version = substr(hash('sha256', $modified . '|' . $size . '|' . $inode), 0, 16);
-    return $relative . '?v=' . $version;
+    return 'photo.php?' . http_build_query(['code' => $caseCode, 'original' => '1', 'v' => $version]);
 }
 
-/** Sized previews are generated/cached by a session-free endpoint. */
+/** Sized previews use the same case visibility and private-link checks as originals. */
 function tp_person_photo_thumbnail_url(string $caseCode, int $width = 640): string {
     $original = tp_person_photo_display_url($caseCode);
     if ($original === '') { return ''; }
-    $version = substr($original, strpos($original, '?v=') + 3);
+    parse_str((string)parse_url($original, PHP_URL_QUERY), $photoQuery);
+    $version = $photoQuery['v'] ?? '';
     return 'photo.php?' . http_build_query(['code' => $caseCode, 'width' => $width, 'v' => $version]);
 }
 
@@ -1627,13 +1636,7 @@ function tp_evidence_json_response(array $payload, int $status = 200): void {
 
 /** Apply the same case visibility rule used by the case page and evidence streamer. */
 function tp_evidence_context_is_visible(array $row): bool {
-    $status = (string)($row['case_status'] ?? '');
-    if (!in_array($status, ['Being Built', 'Pending', 'Rejected'], true)) { return true; }
-    if (is_admin()) { return true; }
-    if (is_moderator() && in_array($status, ['Pending', 'Rejected'], true)) { return true; }
-    return !empty($_SESSION['user'])
-        && (int)($row['case_created_by'] ?? 0) > 0
-        && (int)($row['case_created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
+    return tp_case_is_visible(['status' => $row['case_status'] ?? '', 'created_by' => $row['case_created_by'] ?? 0]);
 }
 
 /** Original evidence and redaction controls are restricted to visible admin/mod accounts. */
@@ -2455,6 +2458,9 @@ if (PHP_SAPI === 'cli' && defined('TP_OLLAMA_WORKER')) {
     if (!isset($pdo)) { fwrite(STDERR, "Database connection failed.\n"); exit(1); }
     return;
 }
+// Photos must pass visibility checks before cached bytes or originals can be served.
+require __DIR__ . '/lib/case-photo-http.php';
+
 // Keep redaction failures closed without running DDL on evidence requests.
 $tp_evidence_redactions_ready = false;
 $tp_evidence_rotation_ready = false;
@@ -2466,6 +2472,7 @@ try {
 
 // Private review routes exit before the normal page, analytics and mutation flows.
 require __DIR__ . '/lib/case-review-http.php';
+require __DIR__ . '/lib/case-archive-http.php';
 
 // Readiness is checked only on game requests; migration runs outside page loads.
 $tp_catch_pred_ready = false;
@@ -2478,7 +2485,7 @@ if (($_GET['view'] ?? '') === 'catch_a_pred' || strpos((string)($_POST['action']
 
 function log_case_event(PDO $pdo, int $caseId, string $type, ?string $subject = null, ?string $detail = null, ?int $refEvidenceId = null, ?int $refNoteId = null): void {
     // A tiny durable queue write; file extraction and model calls run in the worker.
-    if (in_array($type, ['case_created', 'case_submitted_for_review', 'case_resubmitted', 'case_approved', 'case_rejected', 'case_returned_to_building', 'case_updated', 'ai_suggestion_approved', 'note_added', 'evidence_added', 'evidence_updated', 'evidence_deleted', 'evidence_rotated', 'person_photo_rotated'], true)) {
+    if (in_array($type, ['case_created', 'case_submitted_for_review', 'case_resubmitted', 'case_approved', 'case_rejected', 'case_returned_to_building', 'case_archived', 'case_restored_from_archive', 'case_updated', 'ai_suggestion_approved', 'note_added', 'evidence_added', 'evidence_updated', 'evidence_deleted', 'evidence_rotated', 'person_photo_rotated'], true)) {
         tp_case_ollama_enqueue($pdo, $caseId);
     }
     try {
@@ -3171,6 +3178,9 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
             http_response_code(405); exit('This review is read-only.');
         }
     }
+    $archivedEvidence = ($row['case_status'] ?? '') === 'Archived';
+    if ($archivedEvidence) { header('X-Case-Notice: Archived case - non-public information'); }
+    $evidenceFilenamePrefix = $archivedEvidence ? 'archived-non-public-evidence-' : 'evidence-';
 
     $variantValue = $_GET['variant'] ?? '';
     if (!is_string($variantValue)) { http_response_code(400); exit('Bad request'); }
@@ -3244,7 +3254,7 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
     $isImage = ($type === 'image') || strpos($selectedMime, 'image/') === 0;
     $isRestrictedPresentation = $sensitivity === 'Restricted' && $showPublicPresentation;
     if ($isRestrictedPresentation && !$isImage) { http_response_code(403); exit('Restricted'); }
-    $isThumbnailRequest = $isImage && (($_GET['thumbnail'] ?? null) === '1');
+    $isThumbnailRequest = $isImage && (($_GET['thumbnail'] ?? null) === '1') && (($_GET['download'] ?? '') !== '1');
 
     // Cached previews are private and are consulted only AFTER access, redaction
     // freshness and sensitivity checks. Content hashes invalidate replaced files.
@@ -3258,6 +3268,7 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
             $previewCachePath = $previewDirectory . '/preview-' . $previewKey . '.cache';
             if (is_file($previewCachePath) && !is_link($previewCachePath)) {
                 header('Content-Type: ' . $previewMime);
+                header('Content-Disposition: inline; filename="' . $evidenceFilenamePrefix . $eid . '-thumbnail.' . ($previewMime === 'image/webp' ? 'webp' : 'jpg') . '"');
                 header('Content-Length: ' . filesize($previewCachePath));
                 readfile($previewCachePath); exit;
             }
@@ -3296,7 +3307,7 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
             }
             for ($pass = 0; $pass < 8; $pass++) { @imagefilter($img, IMG_FILTER_GAUSSIAN_BLUR); }
             header('Content-Type: image/jpeg');
-            header('Content-Disposition: inline; filename="restricted.jpg"');
+            header('Content-Disposition: ' . (($_GET['download'] ?? '') === '1' ? 'attachment' : 'inline') . '; filename="' . ($archivedEvidence ? 'archived-non-public-' : '') . 'restricted.jpg"');
             imagejpeg($img, null, 60);
             tp_release_evidence_image($img);
             exit;
@@ -3330,11 +3341,11 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
         if ($img instanceof GdImage && $renderMime !== null) {
             $extension = ['image/jpeg' => 'jpg', 'image/png' => 'png', 'image/webp' => 'webp'][$renderMime] ?? 'img';
             header('Content-Type: ' . $renderMime);
-            header('Content-Disposition: inline; filename="evidence-' . $eid . ($isThumbnailRequest ? '-thumbnail' : '') . '.' . $extension . '"');
+            header('Content-Disposition: ' . (($_GET['download'] ?? '') === '1' ? 'attachment' : 'inline') . '; filename="' . $evidenceFilenamePrefix . $eid . ($isThumbnailRequest ? '-thumbnail' : '') . '.' . $extension . '"');
             if ($isThumbnailRequest) {
                 // Compact preview encoding; retain lossless originals for the full viewer.
                 header('Content-Type: ' . $previewMime);
-                header('Content-Disposition: inline; filename="evidence-' . $eid . '-thumbnail.' . ($previewMime === 'image/webp' ? 'webp' : 'jpg') . '"');
+                header('Content-Disposition: inline; filename="' . $evidenceFilenamePrefix . $eid . '-thumbnail.' . ($previewMime === 'image/webp' ? 'webp' : 'jpg') . '"');
                 ob_start();
                 $outputOk = $previewMime === 'image/webp' ? imagewebp($img, null, 78) : imagejpeg($img, null, 78);
                 $previewBytes = ob_get_clean();
@@ -3387,7 +3398,7 @@ if (($_GET['action'] ?? '') === 'serve_evidence') {
         'application/ogg' => 'ogg', 'application/pdf' => 'pdf', 'text/plain' => 'txt',
     ][$selectedMime] ?? 'bin';
     header('Content-Type: ' . $streamMime);
-    header('Content-Disposition: ' . ($streamInline ? 'inline' : 'attachment') . '; filename="evidence-' . $eid . ($usePublicDerivative ? '-public' : '') . '.' . $extension . '"');
+    header('Content-Disposition: ' . ($streamInline && (($_GET['download'] ?? '') !== '1') ? 'inline' : 'attachment') . '; filename="' . $evidenceFilenamePrefix . $eid . ($usePublicDerivative ? '-public' : '') . '.' . $extension . '"');
     if (is_int($size) && $size >= 0) {
         $rangeHeader = trim((string)($_SERVER['HTTP_RANGE'] ?? ''));
         $ifRangeHeader = trim((string)($_SERVER['HTTP_IF_RANGE'] ?? ''));
@@ -5153,7 +5164,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
     $status = $skipVerifiedAnnouncement ? 'Verified' : $requestedStatus;
 
     $allowed_sensitivity = ['Standard','Restricted','Sealed'];
-    $allowed_status = ['Being Built','Pending','Open','In Review','Verified','Closed','Rejected'];
+    $allowed_status = ['Being Built','Pending','Open','In Review','Verified','Closed','Rejected','Archived'];
 
     if ($case_id <= 0 || $case_code === '') {
         flash('error', 'Invalid case reference.');
@@ -5185,8 +5196,13 @@ if (($_POST['action'] ?? '') === 'update_case') {
         header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
     }
 
-    if (is_admin() && in_array(($prev['status'] ?? ''), ['Being Built', 'Rejected'], true) && $status !== ($prev['status'] ?? '')) {
+    if (is_admin() && in_array(($prev['status'] ?? ''), ['Being Built', 'Rejected'], true) && $status !== ($prev['status'] ?? '') && $status !== 'Archived') {
         flash('error', 'Use the Submit for Review button before moving this case to an approval or publishing status.');
+        header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
+    }
+
+    if (is_admin() && ($prev['status'] ?? '') === 'Archived' && !in_array($status, ['Archived', 'Being Built'], true)) {
+        flash('error', 'Restore the archived case to Being Built, then submit it for review before publishing.');
         header('Location: ?view=case&code=' . urlencode($case_code) . '#case-view'); exit;
     }
 
@@ -5242,6 +5258,12 @@ if (($_POST['action'] ?? '') === 'update_case') {
     }
 
     try {
+        $archiveStatusChanged = $status !== ($prev['status'] ?? '') && ($status === 'Archived' || ($prev['status'] ?? '') === 'Archived');
+        if ($archiveStatusChanged) {
+            $pdo->beginTransaction();
+            $revokeReview = $pdo->prepare('UPDATE case_review_links SET revoked_at = CURRENT_TIMESTAMP WHERE case_id = ?');
+            $revokeReview->execute([$case_id]);
+        }
         $u = $pdo->prepare('UPDATE cases SET case_name = ?, person_name = ?, date_of_birth = ?, location = ?, phone_number = ?, snapchat_username = ?, discord_username = ?, tiktok_username = ?, initial_summary = ?, sensitivity = ?, status = ? WHERE id = ? LIMIT 1');
         $u->execute([
             $case_name,
@@ -5257,6 +5279,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
             $status,
             $case_id
         ]);
+        if ($archiveStatusChanged) { $pdo->commit(); }
         $tiktok_username = save_case_tiktok_usernames($pdo, $case_id, $tiktok_username);
         $savedCaseTags = save_case_tags($pdo, $case_id, array_keys($case_tags));
         if ($remove_person_photo || !empty($_FILES['person_photo']['name'])) {
@@ -5330,6 +5353,7 @@ if (($_POST['action'] ?? '') === 'update_case') {
                 : 'Case updated.'
         );
     } catch (Throwable $e) {
+        if ($pdo->inTransaction()) { $pdo->rollBack(); }
         $_SESSION['sql_error'] = $e->getMessage();
 log_console('ERROR', 'SQL: ' . $e->getMessage());
         flash('error', 'Unable to update case.');
@@ -7142,7 +7166,7 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                                 'status'          => $pr['status'],
                                 'sensitivity'     => $pr['sensitivity'],
                                 'location'        => $pr['location'] ?? '',
-                                'photo_url'       => $photoRel,
+                                'photo_url'       => tp_person_photo_display_url((string)$pr['case_code']),
                                 'match_source'    => 'profile_photo',
                                 'evidence_id'     => null,
                                 'evidence_title'  => '',
@@ -7195,7 +7219,7 @@ if (($view ?? '') === 'scanner' && $_SERVER['REQUEST_METHOD'] === 'POST' && ($_P
                                 'status'         => $row['status'],
                                 'sensitivity'    => $row['sensitivity'],
                                 'location'       => $row['location'] ?? '',
-                                'photo_url'      => $photoRel ?: ('?action=serve_evidence&id=' . (int)$row['id']),
+                                'photo_url'      => $photoRel ? tp_person_photo_display_url((string)$row['case_code']) : ('?action=serve_evidence&id=' . (int)$row['id']),
                                 'match_source'   => $photoRel ? 'evidence_with_photo' : 'evidence_image',
                                 'evidence_id'    => (int)$row['id'],
                                 'evidence_title' => $row['title'],
@@ -7266,10 +7290,12 @@ if ($view === 'case' && isset($pdo) && $pdo instanceof PDO) {
       $metaStmt = $pdo->prepare('SELECT case_code, case_name, person_name, initial_summary, status, created_by FROM cases WHERE case_code = ? LIMIT 1');
       $metaStmt->execute([$metaCaseCode]);
       $metaCase = $metaStmt->fetch();
-      $metaReviewOwner = $metaCase && is_logged_in() && (int)($metaCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
-      $metaIsPrivateReview = $metaCase && in_array(($metaCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true);
-      $metaCanReviewCase = $metaCase && can_moderate_cases() && in_array(($metaCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true);
-      if ($metaCase && (!$metaIsPrivateReview || is_admin() || $metaCanReviewCase || $metaReviewOwner)) {
+      $metaIsPrivateReview = $metaCase && tp_case_is_unpublished($metaCase);
+      if ($metaIsPrivateReview) {
+        tp_case_review_headers();
+        if (!tp_case_is_visible($metaCase)) { http_response_code(404); }
+      }
+      if ($metaCase && tp_case_is_visible($metaCase)) {
         $metaCaseCode = (string)($metaCase['case_code'] ?? $metaCaseCode);
         $metaCaseName = trim((string)($metaCase['case_name'] ?? ''));
         $metaPersonName = trim((string)($metaCase['person_name'] ?? ''));
@@ -7363,7 +7389,7 @@ if (is_logged_in() && isset($pdo) && $pdo instanceof PDO) {
   <?php endif; ?>
   <!-- Bootstrap JS (required for modal/tabs) -->
   <script defer src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <link rel="stylesheet" href="assets/site.css?v=901bcede507a">
+  <link rel="stylesheet" href="assets/site.css?v=aae9289b8ccc">
 </head>
 <body class="tp-sidebar-layout">
   <?php if (in_array($view, ['cases', 'case'], true)): ?>
@@ -8609,7 +8635,7 @@ document.addEventListener('DOMContentLoaded', function () {
           <div class="row g-3 row-cols-1 row-cols-md-2">
 <?php
 try {
-  $whereParts = ["c.status NOT IN ('Being Built','Pending','Rejected')"];
+  $whereParts = ["c.status NOT IN ('Being Built','Pending','Rejected','Archived')"];
   $casePage = max(1, min(100000, (int)($_GET['page'] ?? 1)));
   $casesPerPage = 24;
   $caseOffset = ($casePage - 1) * $casesPerPage;
@@ -8883,7 +8909,7 @@ if ($rs && count($rs) > 0):
               <div class="d-flex align-items-center justify-content-between gap-3 mb-3">
                 <div>
                   <h1 class="h5 mb-1"><i class="bi bi-clipboard-check me-2"></i>Case Reviews</h1>
-                  <p class="small text-secondary mb-0">Search Being Built, Pending Review, Approved / Published, and Rejected cases together.</p>
+                  <p class="small text-secondary mb-0">Search Being Built, Pending Review, Approved / Published, Rejected, and Archived cases together.</p>
                 </div>
                 <a class="btn btn-outline-light btn-sm flex-shrink-0" href="?view=cases#cases"><i class="bi bi-arrow-left me-1"></i> Back to Cases</a>
               </div>
@@ -9285,6 +9311,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
             </div>
           </div>
         </div>
+        <?php require __DIR__ . '/lib/case-archive-list.php'; ?>
       </div>
     </div>
   </main>
@@ -11653,10 +11680,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage());
           $st = $pdo->prepare('SELECT id, case_code, case_name, person_name, date_of_birth, location, phone_number, snapchat_username, discord_username, tiktok_username, initial_summary, status, sensitivity, rejection_reason, rejected_at, opened_at, created_by FROM cases WHERE case_code = ? LIMIT 1');
           $st->execute([$caseCode]);
           $viewCase = $st->fetch();
-          $viewReviewOwner = $viewCase && is_logged_in() && (int)($viewCase['created_by'] ?? 0) === (int)($_SESSION['user']['id'] ?? 0);
-          $viewIsPrivateReview = $viewCase && in_array(($viewCase['status'] ?? ''), ['Being Built','Pending','Rejected'], true);
-          $viewCanReviewCase = $viewCase && can_moderate_cases() && in_array(($viewCase['status'] ?? ''), ['Pending', 'Rejected', 'Verified'], true);
-          if ($viewCase && $viewIsPrivateReview && !is_admin() && !$viewCanReviewCase && !$viewReviewOwner) {
+          if ($viewCase && !tp_case_is_visible($viewCase)) {
             $viewCase = null;
           }
           $viewCaseId = (int)($viewCase['id'] ?? 0);
@@ -11830,6 +11854,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
         'Verified' => 'case-outline-published',
         'Closed' => 'case-outline-published',
         'Rejected' => 'case-outline-rejected',
+        'Archived' => 'case-outline-archived',
       ][$tpCaseOutlineStatus] ?? '';
     ?>
     <section class="py-5 border-top <?php echo htmlspecialchars($tpCaseOutlineClass); ?>" id="case-view">
@@ -11841,6 +11866,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           $tp_headerLocation = tp_case_location_for_viewer($viewCase['location'] ?? '');
           if ($tp_headerLocation === '') { $tp_headerLocation = 'Unknown Location'; }
         ?>
+        <?php if (($viewCase['status'] ?? '') === 'Archived'): ?>
+        <div class="alert alert-warning" role="alert"><strong>ARCHIVED CASE — NON-PUBLIC INFORMATION</strong><br>This case is no longer publicly visible. Its details and evidence are private. Do not publish or redistribute this information.</div>
+        <?php endif; ?>
         <div class="d-flex flex-wrap align-items-center justify-content-between gap-3 mb-3">
           <div>
             <h2 class="h4 mb-0"><?php echo htmlspecialchars($tp_headerName); ?> | <?php echo htmlspecialchars($tp_headerLocation); ?> | <?php echo htmlspecialchars($caseCode ?: ''); ?></h2>
@@ -11850,7 +11878,7 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
           </div>
           <div class="d-flex flex-wrap gap-2">
 <?php if (!empty($viewCase) && tp_can_share_case_review($viewCase)): ?>
-            <button type="button" class="btn btn-outline-warning btn-sm" data-bs-toggle="modal" data-bs-target="#caseReviewShareModal"><i class="bi bi-share me-1"></i> Share for Review</button>
+            <button type="button" class="btn btn-outline-warning btn-sm" data-bs-toggle="modal" data-bs-target="#caseReviewShareModal"><i class="bi bi-share me-1"></i> <?php echo ($viewCase['status'] ?? '') === 'Archived' ? 'Share Archived Case' : 'Share for Review'; ?></button>
 <?php endif; ?>
 <?php if ($tp_canAddEvidence): ?>
             <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addEvidenceModal"><i class="bi bi-cloud-plus me-1"></i> Add Evidence</button>
@@ -11876,6 +11904,13 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
             <button type="button" class="btn btn-danger btn-sm btn-reject-case" data-bs-toggle="modal" data-bs-target="#rejectCaseModal" data-case-id="<?php echo (int)$viewCaseId; ?>" data-case-code="<?php echo htmlspecialchars($caseCode); ?>" data-case-name="<?php echo htmlspecialchars($viewCase['case_name'] ?? $caseCode); ?>"><i class="bi bi-x-circle me-1"></i>Reject Case</button>
             <?php endif; ?>
             <?php if (is_admin()): ?>
+            <form method="post" action="" class="d-inline" onsubmit="return confirm('<?php echo ($viewCase['status'] ?? '') === 'Archived' ? 'Restore this case to Being Built? It must be reviewed again before publication.' : 'Archive this case and remove it from public view? Existing private links will be revoked.'; ?>');">
+              <input type="hidden" name="action" value="<?php echo ($viewCase['status'] ?? '') === 'Archived' ? 'restore_archived_case' : 'archive_case'; ?>">
+              <?php csrf_field(); ?>
+              <input type="hidden" name="case_id" value="<?php echo (int)$viewCaseId; ?>">
+              <input type="hidden" name="case_code" value="<?php echo htmlspecialchars($caseCode); ?>">
+              <button type="submit" class="btn btn-outline-warning btn-sm"><i class="bi bi-archive me-1"></i><?php echo ($viewCase['status'] ?? '') === 'Archived' ? 'Restore to Being Built' : 'Archive Case'; ?></button>
+            </form>
             <form method="post" action="" class="d-inline" onsubmit="return confirm('This will permanently delete the entire case and all evidence/notes. This cannot be undone. Continue?');">
               <input type="hidden" name="action" value="delete_case">
               <?php csrf_field(); ?>
@@ -12104,6 +12139,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                             'case_resubmitted' => 'Case resubmitted',
                             'case_submitted_for_review' => 'Submitted for review',
                             'case_returned_to_building' => 'Returned to Being Built',
+                            'case_archived' => 'Case archived',
+                            'case_restored_from_archive' => 'Restored from archive',
                             'person_photo_rotated' => 'Person photo rotated',
                             'evidence_added' => 'Evidence added',
                             'evidence_updated' => 'Evidence updated',
@@ -12967,8 +13004,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                   <?php
                     $currentStatus = (string)($viewCase['status'] ?? 'Being Built');
                     $statOpts = in_array($currentStatus, ['Being Built','Rejected'], true)
-                      ? [$currentStatus]
-                      : ['Being Built','Pending','Open','In Review','Verified','Verified dont announce','Closed'];
+                      ? [$currentStatus, 'Archived']
+                      : ($currentStatus === 'Archived' ? ['Archived', 'Being Built'] : ['Being Built','Pending','Open','In Review','Verified','Verified dont announce','Closed','Archived']);
                     foreach ($statOpts as $opt) {
                       $sel = ($currentStatus === $opt) ? ' selected' : '';
                       $label = $opt === 'Verified dont announce' ? "Verified — Don't Announce" : $opt;
@@ -13118,6 +13155,9 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
     </div>
 
     <?php if ($caseRow) { ?>
+    <?php if (($caseRow['status'] ?? '') === 'Archived'): ?>
+    <div class="alert alert-warning" role="alert"><strong>ARCHIVED CASE — NON-PUBLIC INFORMATION</strong><br>This case and its evidence are private and no longer publicly visible.</div>
+    <?php endif; ?>
     <div class="row g-4">
       <div class="col-lg-4">
         <div class="card glass h-100">
@@ -13526,8 +13566,8 @@ log_console('ERROR', 'SQL: ' . $e->getMessage()); }
                       <?php
                         $currentStatus = (string)($caseRow['status'] ?? 'Being Built');
                         $statOpts = in_array($currentStatus, ['Being Built','Rejected'], true)
-                          ? [$currentStatus]
-                          : ['Being Built','Pending','Open','In Review','Verified','Verified dont announce','Closed'];
+                          ? [$currentStatus, 'Archived']
+                          : ($currentStatus === 'Archived' ? ['Archived', 'Being Built'] : ['Being Built','Pending','Open','In Review','Verified','Verified dont announce','Closed','Archived']);
                         foreach ($statOpts as $opt) {
                           $sel = ($currentStatus === $opt) ? ' selected' : '';
                           $label = $opt === 'Verified dont announce' ? "Verified — Don't Announce" : $opt;

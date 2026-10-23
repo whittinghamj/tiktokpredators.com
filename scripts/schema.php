@@ -127,8 +127,8 @@ SQL
     $statusInfo = $statusCol ? $statusCol->fetch() : null;
     $statusType = (string)($statusInfo['Type'] ?? '');
     $statusDefault = (string)($statusInfo['Default'] ?? '');
-    if ($statusInfo && stripos($statusType, 'enum(') === 0 && (stripos($statusType, "'Being Built'") === false || stripos($statusType, "'Rejected'") === false || $statusDefault !== 'Being Built')) {
-      $pdo->exec("ALTER TABLE cases MODIFY COLUMN status ENUM('Being Built','Pending','Open','In Review','Verified','Closed','Rejected') NOT NULL DEFAULT 'Being Built'");
+    if ($statusInfo && stripos($statusType, 'enum(') === 0 && (stripos($statusType, "'Being Built'") === false || stripos($statusType, "'Rejected'") === false || stripos($statusType, "'Archived'") === false || $statusDefault !== 'Being Built')) {
+      $pdo->exec("ALTER TABLE cases MODIFY COLUMN status ENUM('Being Built','Pending','Open','In Review','Verified','Closed','Rejected','Archived') NOT NULL DEFAULT 'Being Built'");
     }
     $reviewColumns = [
       'rejection_reason' => "ALTER TABLE cases ADD COLUMN rejection_reason TEXT NULL AFTER status",

@@ -123,6 +123,11 @@
       border: 2px solid #dc3545 !important;
       box-shadow: 0 0 0 .1rem rgba(220,53,69,.14);
     }
+    #case-view.case-outline-archived .card.glass,
+    #archived-cases > .card.glass {
+      border: 2px solid #adb5bd !important;
+      box-shadow: 0 0 0 .1rem rgba(173,181,189,.14);
+    }
     #case-owner-details .select2-container--bootstrap-5 .select2-selection,
     .select2-container--bootstrap-5 .select2-dropdown,
     .select2-container--bootstrap-5 .select2-search__field {

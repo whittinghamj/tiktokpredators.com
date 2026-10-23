@@ -27,9 +27,12 @@ try {
     $pdo = new PDO('sqlite:' . $directory . '/fixture.sqlite', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]);
     $pdo->exec('CREATE TABLE cases (id INTEGER PRIMARY KEY, case_code TEXT, case_name TEXT, person_name TEXT, location TEXT, phone_number TEXT, snapchat_username TEXT, discord_username TEXT, tiktok_username TEXT, initial_summary TEXT, status TEXT, sensitivity TEXT, opened_at TEXT, created_by INTEGER)');
     $pdo->exec('CREATE TABLE case_review_links (case_id INTEGER PRIMARY KEY, token_hash TEXT UNIQUE, created_by INTEGER, created_at TEXT DEFAULT CURRENT_TIMESTAMP, expires_at TEXT, revoked_at TEXT)');
+    $pdo->exec('CREATE TABLE case_events (case_id INTEGER, event_type TEXT)');
     $pdo->exec('CREATE TABLE evidence (id INTEGER PRIMARY KEY, case_id INTEGER, type TEXT, title TEXT, filepath TEXT, mime_type TEXT, size_bytes INTEGER, hash_sha256 TEXT, sha256_hex TEXT, rotation_degrees INTEGER DEFAULT 0, created_at TEXT DEFAULT CURRENT_TIMESTAMP)');
     $pdo->exec('CREATE TABLE evidence_redactions (evidence_id INTEGER PRIMARY KEY, public_filepath TEXT, public_mime_type TEXT, public_size_bytes INTEGER, public_sha256 TEXT, source_sha256 TEXT, source_rotation INTEGER, source_width INTEGER, source_height INTEGER, mask_json TEXT, region_count INTEGER, updated_by INTEGER, updated_at TEXT)');
     $pdo->exec("INSERT INTO cases VALUES (1, 'REVIEW1', 'Draft case for review', 'Example person', '12 Example Street', '01234567890', 'example', 'example', 'example', 'DRAFT_SUMMARY <script>alert(1)</script>', 'Being Built', 'Standard', '2026-10-19 10:00:00', 7), (2, 'REVIEW2', 'OTHER_CASE_SECRET', '', '', '', '', '', '', 'OTHER_CASE_SECRET', 'Pending', 'Standard', '2026-10-19 10:00:00', 8)");
+    $pdo->exec('ALTER TABLE cases ADD COLUMN updated_at TEXT');
+    $pdo->exec('CREATE TABLE users (id INTEGER PRIMARY KEY, display_name TEXT)');
     $image = imagecreatetruecolor(16, 16);
     imagefill($image, 0, 0, imagecolorallocate($image, 200, 40, 60));
     imagepng($image, $directory . '/private/evidence/source.png');
@@ -38,6 +41,9 @@ try {
     $sourceBytes = file_get_contents($directory . '/private/evidence/source.png');
     $publicBytes = file_get_contents($directory . '/private/redactions/public.png');
     $sourceHash = hash('sha256', $sourceBytes);
+    mkdir($directory . '/uploads/people', 0700, true);
+    file_put_contents($directory . '/uploads/people/REVIEW1.png', $sourceBytes);
+    file_put_contents($directory . '/uploads/people/REVIEW2.png', $publicBytes);
     $insert = $pdo->prepare("INSERT INTO evidence (id, case_id, type, title, filepath, mime_type, size_bytes, hash_sha256, sha256_hex) VALUES (?, ?, 'image', ?, 'private:evidence/source.png', 'image/png', ?, ?, ?)");
     $insert->execute([101, 1, 'Screenshot for review', strlen($sourceBytes), $sourceHash, $sourceHash]);
     $insert->execute([201, 2, 'OTHER_CASE_EVIDENCE', strlen($sourceBytes), $sourceHash, $sourceHash]);
@@ -69,6 +75,7 @@ try {
     $token = $query['review_token'];
     $stored = $pdo->query('SELECT * FROM case_review_links')->fetch();
     review_check($stored['token_hash'] === hash('sha256', $token) && $stored['token_hash'] !== $token, 'Stored a plaintext bearer token.');
+    review_check(abs(strtotime($created['expires_at']) - time() - 7 * 86400) <= 2, 'Link does not expire after exactly seven days.');
     [$status, $page, $headers] = review_request($url);
     review_check($status === 200 && str_contains($page, 'NOT been verified, approved, or published') && str_contains($page, 'DRAFT_SUMMARY'), 'Anonymous private review did not render its warning and case.');
     review_check(strpos($page, 'UNVERIFIED &amp; UNPUBLISHED CASE') < strpos($page, '<main'), 'Warning banner is not above the case.');
@@ -136,8 +143,94 @@ try {
     review_check($status === 404, 'Review link remained active after publication.');
     [$status] = review_request($base . '/?role=admin', $create);
     review_check($status === 403, 'Published case could be shared as unpublished.');
-    $pdo->exec("UPDATE cases SET status = 'Being Built' WHERE id = 1");
-    echo "Case review checks passed: permissions, anonymous read-only access, warning, escaping, evidence isolation, public blurs, expiry, replacement, revocation and publication.\n";
+
+    $archive = ['action' => 'archive_case', 'case_id' => 1, 'case_code' => 'REVIEW1', 'csrf_token' => 'test-csrf'];
+    foreach (['guest', 'viewer', 'moderator'] as $role) {
+        [$status] = review_request($base . '/?role=' . $role . '&user=7', $archive);
+        review_check($status === 403, $role . ' could archive a case.');
+    }
+    [$status] = review_request($base . '/?role=admin', array_replace($archive, ['csrf_token' => 'invalid']));
+    review_check($status === 403, 'Archiving accepted an invalid CSRF token.');
+    [$status] = review_request($base . '/?role=admin', array_replace($archive, ['case_code' => 'REVIEW2']));
+    review_check($status === 404 && $pdo->query('SELECT status FROM cases WHERE id = 1')->fetchColumn() === 'Verified', 'Archiving accepted a mismatched case reference.');
+    [$status] = review_request($base . '/?role=admin', $archive);
+    review_check($status === 302 && $pdo->query('SELECT status FROM cases WHERE id = 1')->fetchColumn() === 'Archived', 'Admin could not archive a published case.');
+    $pdo->exec("UPDATE cases SET status = 'Archived' WHERE id = 2");
+    [$status, $page] = review_request($base . '/archive-list');
+    review_check($status === 200 && !str_contains($page, 'REVIEW1') && !str_contains($page, 'OTHER_CASE_SECRET'), 'Public visitor could read the archive category.');
+    [$status, $page] = review_request($base . '/archive-list?role=viewer&user=7');
+    review_check(str_contains($page, 'REVIEW1') && !str_contains($page, 'OTHER_CASE_SECRET') && str_contains($page, 'non-public information'), 'Archive category lost owner isolation or its warning.');
+    [$status, $page] = review_request($base . '/archive-list?role=moderator');
+    review_check(str_contains($page, 'REVIEW1') && str_contains($page, 'OTHER_CASE_SECRET'), 'Moderator could not access the archive category.');
+    $pdo->exec("UPDATE cases SET status = 'Pending' WHERE id = 2");
+    review_check($pdo->query("SELECT COUNT(*) FROM case_events WHERE event_type = 'case_archived'")->fetchColumn() === 1, 'Archiving was not audited.');
+    [$status] = review_request($activeUrl);
+    review_check($status === 404, 'An old review link became active when the case was archived.');
+    foreach (['guest' => 0, 'viewer' => 99] as $role => $user) {
+        [$status] = review_request($base . '/?view=case&code=REVIEW1&role=' . $role . '&user=' . $user);
+        review_check($status === 404, 'Archived case was visible to ' . $role . '.');
+        [$status] = review_request($base . '/?action=serve_evidence&id=101&role=' . $role . '&user=' . $user);
+        review_check($status === 404, 'Archived evidence was visible without a private link.');
+        [$status] = review_request($base . '/photo.php?code=REVIEW1&role=' . $role . '&user=' . $user);
+        review_check($status === 404, 'Archived photo was visible without a private link.');
+    }
+    foreach (['admin' => 99, 'moderator' => 99, 'viewer' => 7] as $role => $user) {
+        [$status] = review_request($base . '/?view=case&code=REVIEW1&role=' . $role . '&user=' . $user);
+        review_check($status === 200, 'Authorized ' . $role . ' could not view an archived case.');
+        [$status, $body] = review_request($base . '/?role=' . $role . '&user=' . $user, $create);
+        review_check($status === 200, 'Authorized ' . $role . ' could not share an archived case.');
+        $archivedUrl = json_decode($body, true)['url'];
+    }
+    parse_str(parse_url($archivedUrl, PHP_URL_QUERY), $archivedQuery);
+    $archivedToken = $archivedQuery['review_token'];
+    $archivedMedia = $base . '/?action=serve_evidence&id=101&review_token=' . $archivedToken;
+    $archivedPhoto = $base . '/photo.php?code=REVIEW1&review_token=' . $archivedToken;
+    $archivedEvidence = $archivedUrl . '&evidence_id=101';
+    [$status, $page] = review_request($archivedUrl);
+    review_check($status === 200 && substr_count($page, 'ARCHIVED CASE — NON-PUBLIC INFORMATION') >= 2 && str_contains($page, 'no longer publicly visible'), 'Archived case/viewer warnings are missing.');
+    review_check(!str_contains($page, 'NOT been verified, approved, or published'), 'Previously published archive was incorrectly labelled unverified.');
+    review_check(str_contains($page, 'photo.php?') && str_contains($page, '&amp;review_token=' . $archivedToken), 'Shared photo does not use the scoped private link.');
+    [$status, $page] = review_request($archivedEvidence);
+    review_check($status === 200 && str_contains($page, 'ARCHIVED CASE — NON-PUBLIC INFORMATION') && str_contains($page, '&amp;download=1'), 'Standalone evidence preview lost its archive warning.');
+    [$status] = review_request($archivedUrl . '&evidence_id=201');
+    review_check($status === 404, 'Standalone preview exposed another case evidence.');
+    [$status, $page] = review_request($archivedUrl . '&evidence_id[]=101');
+    review_check($status === 404, 'Malformed standalone evidence ID was accepted.');
+    [$status, $bytes, $headers] = review_request($archivedMedia . '&download=1');
+    review_check($status === 200 && $bytes === $sourceBytes && str_contains($headers['content-disposition'], 'attachment; filename="archived-non-public-evidence-') && str_contains($headers['x-case-notice'], 'non-public'), 'Archived download lost its privacy label or bytes.');
+    [$status, $bytes, $headers] = review_request($archivedPhoto . '&original=1');
+    review_check($status === 200 && $bytes === $sourceBytes && str_contains($headers['cache-control'], 'no-store') && str_contains($headers['x-case-notice'], 'Archived'), 'Scoped archive photo was unavailable or publicly cacheable.');
+    [$status] = review_request($archivedPhoto);
+    review_check($status === 200, 'Scoped archive photo thumbnail was unavailable.');
+    foreach ([str_replace('REVIEW1', 'REVIEW2', $archivedPhoto), $archivedPhoto . 'bad&role=admin', $base . '/photo.php?code=REVIEW1&review_token[]=bad&role=admin'] as $deniedPhoto) {
+        [$status] = review_request($deniedPhoto);
+        review_check($status === 404, 'Photo token scope or validation was bypassed.');
+    }
+    [$status, $page] = review_request($base . '/share-ui?role=admin');
+    review_check($status === 200 && str_contains($page, 'Share archived case privately') && str_contains($page, 'non-public information') && str_contains($page, '7 days'), 'Archive sharing controls do not explain the warnings/expiry.');
+    $restore = array_replace($archive, ['action' => 'restore_archived_case']);
+    [$status] = review_request($base . '/?role=admin', $restore);
+    review_check($status === 302 && $pdo->query('SELECT status FROM cases WHERE id = 1')->fetchColumn() === 'Being Built', 'Restoring an archive did not return it to private review.');
+    review_check($pdo->query("SELECT COUNT(*) FROM case_events WHERE event_type = 'case_restored_from_archive'")->fetchColumn() === 1, 'Restoring an archive was not audited.');
+    foreach ([$archivedUrl, $archivedEvidence, $archivedMedia, $archivedPhoto] as $revokedUrl) {
+        [$status] = review_request($revokedUrl);
+        review_check($status === 404, 'Restoring an archive left an archive link/attachment accessible.');
+    }
+    review_request($base . '/?role=admin', $archive);
+    [$status, $body] = review_request($base . '/?role=admin', $create);
+    $activeUrl = json_decode($body, true)['url'];
+    parse_str(parse_url($activeUrl, PHP_URL_QUERY), $expiresQuery);
+    $expiringUrls = [$activeUrl, $activeUrl . '&evidence_id=101', $base . '/?action=serve_evidence&id=101&review_token=' . $expiresQuery['review_token'], $base . '/photo.php?code=REVIEW1&review_token=' . $expiresQuery['review_token']];
+    $pdo->exec("UPDATE case_review_links SET expires_at = '2000-01-01 00:00:00'");
+    foreach ($expiringUrls as $expiringUrl) {
+        [$status] = review_request($expiringUrl);
+        review_check($status === 404, 'Expired archive link exposed a case, preview, evidence or cached photo.');
+    }
+    // A fresh link for optional visual inspection after the expiry/revocation checks.
+    $pdo->exec("UPDATE cases SET status = '" . (in_array('--archived-preview', $argv, true) ? 'Archived' : 'Being Built') . "' WHERE id = 1");
+    [$status, $body] = review_request($base . '/?role=admin', $create);
+    $activeUrl = json_decode($body, true)['url'];
+    echo "Case review checks passed: private permissions, warnings, evidence isolation, public blurs, seven-day expiry, revocation, publication, archiving, photos, downloads and restoration.\n";
     if (in_array('--preview', $argv, true)) {
         // Mixed local fixtures make modal navigation and media cleanup reviewable.
         $image = imagecreatetruecolor(240, 160);

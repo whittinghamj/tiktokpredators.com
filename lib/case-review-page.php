@@ -1,7 +1,10 @@
 <?php
 if (!isset($reviewCase, $reviewToken, $reviewEvidence)) { http_response_code(404); exit; }
 $escape = static fn($value): string => htmlspecialchars((string)$value, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+$reviewArchived = ($reviewCase['status'] ?? '') === 'Archived';
+[$warningTitle, $warningText] = tp_case_review_warning($reviewCase);
 $reviewPhoto = tp_person_photo_thumbnail_url((string)$reviewCase['case_code'], 640);
+if ($reviewPhoto !== '') { $reviewPhoto .= '&review_token=' . rawurlencode($reviewToken); }
 $details = [
     'Case name' => $reviewCase['case_name'], 'Person name' => $reviewCase['person_name'],
     'Location' => tp_mask_case_location_house_number($reviewCase['location']),
@@ -18,20 +21,20 @@ $details = [
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow, noarchive, noimageindex">
   <meta name="referrer" content="no-referrer">
-  <title>Unverified case — private review</title>
+  <title><?= $reviewArchived ? 'Archived case — non-public information' : 'Unverified case — private review' ?></title>
   <link rel="stylesheet" href="assets/case-review.css?v=2">
-  <script defer src="assets/case-review-viewer.js?v=1"></script>
+  <script defer src="assets/case-review-viewer.js?v=2"></script>
 </head>
 <body>
   <aside class="review-warning" role="alert">
-    <strong>UNVERIFIED &amp; UNPUBLISHED CASE</strong>
-    <span>This case has NOT been verified, approved, or published. It may contain mistakes or unverified allegations. This private link is for read-only review.</span>
+    <strong><?= $escape($warningTitle) ?></strong>
+    <span><?= $escape($warningText) ?></span>
   </aside>
   <main class="review-container">
     <header class="review-heading">
       <p class="review-eyebrow">Private case review · <?= $escape($reviewCase['case_code']) ?></p>
       <h1><?= $escape($reviewCase['case_name'] ?: $reviewCase['person_name'] ?: 'Case details') ?></h1>
-      <p class="review-muted">Review the details and evidence, then send any corrections to the person who shared this link. The case remains unpublished.</p>
+      <p class="review-muted"><?= $reviewArchived ? 'Archived case details and evidence are shared privately. This case is no longer public.' : 'Review the details and evidence, then send any corrections to the person who shared this link. The case remains unpublished.' ?></p>
     </header>
     <section class="review-card" aria-labelledby="details-heading">
       <h2 id="details-heading">Case details</h2>
@@ -64,19 +67,20 @@ $details = [
         elseif ($mime === 'application/pdf') { $kind = 'pdf'; }
         elseif ($mime === 'text/plain') { $kind = 'text'; }
         $title = $item['title'] ?: 'Evidence #' . (int)$item['id'];
-        $previewUrl = $externalUrl ? $item['filepath'] : $url;
+        $evidencePage = '?view=case_review&review_token=' . rawurlencode($reviewToken) . '&evidence_id=' . (int)$item['id'];
+        $previewUrl = $externalUrl ? $evidencePage : $url;
         $previewLabel = ['video' => 'Video', 'audio' => 'Audio', 'pdf' => 'PDF', 'text' => 'Text', 'file' => 'File', 'url' => 'External link'][$kind] ?? 'Image';
       ?>
-        <article class="review-card review-evidence"<?php if (!$blocked): ?> data-review-item data-evidence-id="<?= (int)$item['id'] ?>" data-evidence-title="<?= $escape($title) ?>" data-evidence-src="<?= $escape($previewUrl) ?>" data-evidence-kind="<?= $escape($kind) ?>"<?php endif; ?>>
+        <article class="review-card review-evidence"<?php if (!$blocked): ?> data-review-item data-evidence-id="<?= (int)$item['id'] ?>" data-evidence-title="<?= $escape($title) ?>" data-evidence-src="<?= $escape($previewUrl) ?>" data-evidence-page="<?= $escape($evidencePage) ?>" data-evidence-kind="<?= $escape($kind) ?>"<?php endif; ?>>
           <h3><?= $escape($title) ?></h3>
           <p class="review-muted review-item-meta">Evidence #<?= (int)$item['id'] ?> · <?= $escape($item['created_at']) ?></p>
           <?php if ($blocked): ?>
             <p class="review-muted">This evidence is unavailable under the case sensitivity restrictions.</p>
           <?php elseif ($kind === 'image'): ?>
-            <a class="review-preview-trigger review-preview-image" href="<?= $escape($url) ?>" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog" aria-controls="reviewEvidenceDialog" aria-label="<?= $escape('Preview ' . $title) ?>"><img loading="lazy" class="review-media" src="<?= $escape($url . '&thumbnail=1') ?>" alt="<?= $escape($title) ?>"></a>
-            <a class="review-preview-trigger" href="<?= $escape($url) ?>" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog" aria-controls="reviewEvidenceDialog">Preview image</a>
+            <a class="review-preview-trigger review-preview-image" href="<?= $escape($evidencePage) ?>" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog" aria-controls="reviewEvidenceDialog" aria-label="<?= $escape('Preview ' . $title) ?>"><img loading="lazy" class="review-media" src="<?= $escape($url . '&thumbnail=1') ?>" alt="<?= $escape($title) ?>"></a>
+            <a class="review-preview-trigger" href="<?= $escape($evidencePage) ?>" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog" aria-controls="reviewEvidenceDialog">Preview image</a>
           <?php else: ?>
-            <a class="review-preview-trigger review-file-preview" href="<?= $escape($previewUrl) ?>" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog" aria-controls="reviewEvidenceDialog" aria-label="<?= $escape('Preview ' . $title) ?>">
+            <a class="review-preview-trigger review-file-preview" href="<?= $escape($evidencePage) ?>" target="_blank" rel="noopener noreferrer" aria-haspopup="dialog" aria-controls="reviewEvidenceDialog" aria-label="<?= $escape('Preview ' . $title) ?>">
               <span class="review-file-icon" aria-hidden="true"><?= $escape(['video' => '▶', 'audio' => '♫', 'pdf' => 'PDF', 'text' => 'TXT', 'url' => '↗'][$kind] ?? 'FILE') ?></span>
               <span>Preview <?= $escape(strtolower($previewLabel)) ?></span>
             </a>
@@ -85,11 +89,11 @@ $details = [
       <?php endforeach; ?>
       </div>
     </section>
-    <footer class="review-muted">Private review only. This link expires <?= $escape($reviewCase['expires_at']) ?> UTC and may be revoked by the case owner or an authorized reviewer.</footer>
+    <footer class="review-muted"><?= $reviewArchived ? 'Archived case — non-public information. ' : '' ?>Private review only. This link expires <?= $escape($reviewCase['expires_at']) ?> UTC and may be revoked by the case owner or an authorized reviewer.</footer>
   </main>
   <dialog class="review-viewer" id="reviewEvidenceDialog" aria-labelledby="reviewViewerTitle" aria-describedby="reviewViewerWarning">
     <div class="review-viewer-shell">
-      <div class="review-viewer-warning" id="reviewViewerWarning"><strong>UNVERIFIED &amp; UNPUBLISHED CASE</strong> · Private, read-only review</div>
+      <div class="review-viewer-warning" id="reviewViewerWarning"><strong><?= $escape($warningTitle) ?></strong> · Private, read-only review</div>
       <header class="review-viewer-header">
         <div>
           <h2 id="reviewViewerTitle">Evidence preview</h2>

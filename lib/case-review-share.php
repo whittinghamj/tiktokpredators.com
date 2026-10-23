@@ -1,16 +1,22 @@
 <?php
 if (empty($viewCase) || !tp_can_share_case_review($viewCase)) { return; }
+$shareArchived = ($viewCase['status'] ?? '') === 'Archived';
 ?>
 <div class="modal fade" id="caseReviewShareModal" tabindex="-1" aria-labelledby="caseReviewShareTitle" aria-hidden="true" data-case-id="<?= (int)$viewCaseId ?>" data-csrf="<?= htmlspecialchars($_SESSION['csrf_token'], ENT_QUOTES, 'UTF-8') ?>">
   <div class="modal-dialog modal-dialog-centered">
     <div class="modal-content">
       <div class="modal-header">
-        <h3 class="modal-title h5" id="caseReviewShareTitle">Share unpublished case for review</h3>
+        <h3 class="modal-title h5" id="caseReviewShareTitle"><?= $shareArchived ? 'Share archived case privately' : 'Share unpublished case for review' ?></h3>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <div class="modal-body">
         <p>Anyone with the private link can review this case and its evidence without signing in. They cannot edit, approve, or publish the case.</p>
-        <p class="small text-secondary">A warning banner identifies the case as unverified and unpublished. Existing blur areas and sensitivity restrictions still apply.</p>
+        <?php if ($shareArchived): ?>
+        <p class="alert alert-warning"><strong>Archived case — non-public information.</strong> The case and every evidence preview carry this warning. Only share with intended recipients; do not publish or redistribute the information.</p>
+        <?php else: ?>
+        <p class="small text-secondary">A warning banner identifies the case as unverified and unpublished.</p>
+        <?php endif; ?>
+        <p class="small text-secondary">Existing blur areas and sensitivity restrictions still apply.</p>
         <p class="small text-secondary">Links expire after 7 days. Creating a new link replaces the previous link. Revoke the link below to stop access sooner.</p>
         <div id="caseReviewLinkResult" class="d-none">
           <label for="caseReviewLink" class="form-label">Private review link</label>

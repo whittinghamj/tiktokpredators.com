@@ -27,7 +27,7 @@
 
   function openFileLink(item) {
     var link = document.createElement('a');
-    link.href = item.dataset.evidenceSrc;
+    link.href = item.dataset.evidencePage || item.dataset.evidenceSrc;
     link.target = '_blank';
     link.rel = 'noopener noreferrer';
     link.textContent = item.dataset.evidenceKind === 'url' ? 'Open external evidence' : 'Open evidence file';
